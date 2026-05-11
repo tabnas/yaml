@@ -54,7 +54,7 @@ function unescape(s: string): string {
 
 // Load and parse a TSV file into test cases.
 function loadTSV(filename: string): { name: string, input: string, expected: any }[] {
-  const filepath = join(__dirname, '..', 'test', filename)
+  const filepath = join(__dirname, '..', '..', 'test', filename)
   const content = readFileSync(filepath, 'utf8')
   const cases: { name: string, input: string, expected: any }[] = []
   for (const line of content.split('\n')) {
@@ -71,7 +71,7 @@ function loadTSV(filename: string): { name: string, input: string, expected: any
 
 
 // Discover all .tsv files in the test directory.
-const tsvDir = join(__dirname, '..', 'test')
+const tsvDir = join(__dirname, '..', '..', 'test')
 const tsvFiles = readdirSync(tsvDir).filter(f => f.endsWith('.tsv')).sort()
 
 

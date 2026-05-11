@@ -40,7 +40,7 @@ if (grammar.includes('`')) {
   process.exit(1)
 }
 embed(
-  path.join(__dirname, 'go', 'yaml.go'),
+  path.join(__dirname, '..', 'go', 'yaml.go'),
   'const grammarText = `\n' + grammar + '`'
 )
 

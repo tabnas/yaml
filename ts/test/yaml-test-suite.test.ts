@@ -19,7 +19,7 @@ import { Jsonic } from 'jsonic'
 import { Yaml } from '../dist/yaml'
 
 
-const SUITE_DIR = join(__dirname, '..', 'test', 'yaml-test-suite')
+const SUITE_DIR = join(__dirname, '..', '..', 'test', 'yaml-test-suite')
 
 
 // Known-failing test IDs, skipped with reasons.
