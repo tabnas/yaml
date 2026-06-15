@@ -38,11 +38,11 @@ Full docs follow the [Diataxis](https://diataxis.fr) structure
 ### Node.js
 
 ```bash
-npm install @tabnas/yaml tabnas
+npm install @tabnas/yaml @tabnas/parser
 ```
 
 ```js
-const { Tabnas } = require('tabnas')
+const { Tabnas } = require('@tabnas/parser')
 const { Yaml } = require('@tabnas/yaml')
 
 const j = Tabnas.make().use(Yaml)
