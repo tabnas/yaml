@@ -38,16 +38,15 @@ Full docs follow the [Diataxis](https://diataxis.fr) structure
 ### Node.js
 
 ```bash
-npm install @tabnas/yaml @tabnas/parser
+npm install @tabnas/yaml @tabnas/jsonic
 ```
 
 ```js
-const { Tabnas } = require('@tabnas/parser')
+const { Jsonic } = require('@tabnas/jsonic')
 const { Yaml } = require('@tabnas/yaml')
 
-const j = Tabnas.make().use(Yaml)
-j("name: Alice\nitems:\n  - one\n  - two\n")
-// { name: 'Alice', items: ['one', 'two'] }
+const j = Jsonic.make().use(Yaml)
+j("name: Alice\nitems:\n  - one\n  - two\n")   // => { name: 'Alice', items: ['one', 'two'] }
 ```
 
 See [doc/yaml-ts.md](doc/yaml-ts.md) for the full guide.

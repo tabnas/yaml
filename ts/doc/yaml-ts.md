@@ -17,20 +17,21 @@ Requires `jsonic` >= 2 as a peer dependency.
 
 Install the plugin, register it with a Jsonic instance, then parse:
 
-```typescript
+```js
 import { Jsonic } from '@tabnas/jsonic'
 import { Yaml } from '@tabnas/yaml'
 
 const j = Jsonic.make().use(Yaml)
 
-j(`name: Alice
+const out = j(`name: Alice
 items:
   - one
   - two
 flags:
   debug: true
 `)
-// { name: 'Alice', items: ['one', 'two'], flags: { debug: true } }
+
+out   // => { name: 'Alice', items: ['one', 'two'], flags: { debug: true } }
 ```
 
 ### Parse block mappings and sequences
@@ -38,35 +39,42 @@ flags:
 Indentation drives structure. Mappings use `key: value`; sequences use
 `- item`:
 
-```typescript
+```js
+import { Jsonic } from '@tabnas/jsonic'
+import { Yaml } from '@tabnas/yaml'
+
 const j = Jsonic.make().use(Yaml)
 
-j(`server:
+const out = j(`server:
   host: localhost
   port: 5432
   tags:
     - web
     - api
 `)
-// { server: { host: 'localhost', port: 5432, tags: ['web', 'api'] } }
+
+out   // => { server: { host: 'localhost', port: 5432, tags: ['web', 'api'] } }
 ```
 
 ### Parse anchors and aliases
 
 Define a node with `&name`, reuse it with `*name`:
 
-```typescript
+```js
+import { Jsonic } from '@tabnas/jsonic'
+import { Yaml } from '@tabnas/yaml'
+
 const j = Jsonic.make().use(Yaml)
 
-j(`base: &defaults
+const out = j(`base: &defaults
   timeout: 30
   retries: 3
 prod:
   <<: *defaults
   timeout: 60
 `)
-// { base:  { timeout: 30, retries: 3 },
-//   prod:  { timeout: 60, retries: 3 } }
+
+out   // => { base: { timeout: 30, retries: 3 }, prod: { timeout: 60, retries: 3 } }
 ```
 
 The `<<` merge key copies keys from the aliased mapping; explicit keys
@@ -79,29 +87,34 @@ on the current mapping win.
 
 Inline `{}` and `[]` collections work anywhere a value is expected:
 
-```typescript
+```js
+import { Jsonic } from '@tabnas/jsonic'
+import { Yaml } from '@tabnas/yaml'
+
 const j = Jsonic.make().use(Yaml)
 
-j("data: {name: Bob, tags: [admin, ops]}")
-// { data: { name: 'Bob', tags: ['admin', 'ops'] } }
+j("data: {name: Bob, tags: [admin, ops]}")   // => { data: { name: 'Bob', tags: ['admin', 'ops'] } }
 ```
 
 ### Use block scalars (literal / folded)
 
 Preserve or fold newlines in multi-line strings:
 
-```typescript
+```js
+import { Jsonic } from '@tabnas/jsonic'
+import { Yaml } from '@tabnas/yaml'
+
 const j = Jsonic.make().use(Yaml)
 
-j(`literal: |
+const out = j(`literal: |
   line one
   line two
 folded: >
   line one
   line two
 `)
-// { literal: 'line one\nline two\n',
-//   folded:  'line one line two\n' }
+
+out   // => { literal: 'line one\nline two\n', folded: 'line one line two\n' }
 ```
 
 Chomping indicators (`-` strip, `+` keep) and explicit indent digits
@@ -111,41 +124,51 @@ Chomping indicators (`-` strip, `+` keep) and explicit indent digits
 
 `true`/`false`/`yes`/`no`/`on`/`off`, `null`/`~`, `.inf`/`.nan`:
 
-```typescript
+```js
+import { Jsonic } from '@tabnas/jsonic'
+import { Yaml } from '@tabnas/yaml'
+
 const j = Jsonic.make().use(Yaml)
 
-j(`enabled: yes
+const out = j(`enabled: yes
 retries: ~
 max: .inf
 `)
-// { enabled: true, retries: null, max: Infinity }
+
+out   // => { enabled: true, retries: null, max: null }
 ```
 
 ### Parse numeric literals beyond decimals
 
 Hex (`0x`), octal (`0o`), and binary (`0b`) integers are supported:
 
-```typescript
+```js
+import { Jsonic } from '@tabnas/jsonic'
+import { Yaml } from '@tabnas/yaml'
+
 const j = Jsonic.make().use(Yaml)
 
-j("{mask: 0xff, perm: 0o755, flags: 0b1010}")
-// { mask: 255, perm: 493, flags: 10 }
+j("{mask: 0xff, perm: 0o755, flags: 0b1010}")   // => { mask: 255, perm: 493, flags: 10 }
 ```
 
 ### Handle multi-document streams
 
-`---` starts a new document; `...` ends one. Only the last document is
-returned by a single `j()` call:
+`---` starts a new document; `...` ends one. A multi-document stream is
+returned as an array of documents:
 
-```typescript
+```js
+import { Jsonic } from '@tabnas/jsonic'
+import { Yaml } from '@tabnas/yaml'
+
 const j = Jsonic.make().use(Yaml)
 
-j(`---
+const out = j(`---
 a: 1
 ---
 b: 2
 `)
-// { b: 2 }
+
+out   // => [{ a: 1 }, { b: 2 }]
 ```
 
 ### Use tags for explicit types
@@ -153,13 +176,17 @@ b: 2
 `!!str`, `!!int`, `!!float`, `!!bool`, `!!null` coerce values; custom
 tags are preserved via `%TAG` directives:
 
-```typescript
+```js
+import { Jsonic } from '@tabnas/jsonic'
+import { Yaml } from '@tabnas/yaml'
+
 const j = Jsonic.make().use(Yaml)
 
-j(`count: !!int "42"
+const out = j(`count: !!int "42"
 name: !!str 100
 `)
-// { count: 42, name: '100' }
+
+out   // => { count: 42, name: '100' }
 ```
 
 
