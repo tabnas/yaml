@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	jsonic "github.com/jsonicjs/jsonic/go"
+	jsonic "github.com/tabnas/jsonic/go"
 )
 
 // YamlOptions configures the YAML parser plugin.
@@ -2517,7 +2517,7 @@ func tinToName(tin jsonic.Tin) string {
 // --- BEGIN EMBEDDED yaml-grammar.jsonic ---
 const grammarText = `
 # YAML Grammar Definition
-# Parsed by a standard Jsonic instance and passed to jsonic.grammar()
+# Parsed by a standard Tabnas instance and passed to tabnas.grammar()
 # Function references (@ prefixed) are resolved against the refs map.
 # State handlers (bo/ao/bc/ac) remain wired in code, since they use
 # closures over per-parse state (anchors, pendingAnchors, etc.).
@@ -2633,7 +2633,7 @@ const grammarText = `
   }
 
   # Amend pair rule: end of input ends pair; dedent closes, same-indent repeats.
-  # Also handle YAML flow-mapping shapes Jsonic doesn't have natively:
+  # Also handle YAML flow-mapping shapes Tabnas doesn't have natively:
   # - implicit null values: {a, b: c}  — KEY followed directly by CA or CB
   # - explicit-key marker:  {? k : v}  — leading #QM is consumed
   rule: pair: open: {

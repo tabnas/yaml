@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const root      = join(__dirname, '..', '..')
 
-const { Jsonic } = await import(join(root, 'node_modules', 'jsonic', 'dist', 'jsonic.js'))
+const { Jsonic } = await import(join(root, 'node_modules', '@tabnas', 'jsonic', 'dist', 'jsonic.js'))
 const { Yaml }   = await import(join(root, 'dist', 'yaml.js'))
 
 function makeParser() { return Jsonic.make().use(Yaml) }

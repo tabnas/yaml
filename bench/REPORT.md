@@ -1,4 +1,4 @@
-# @jsonic/yaml — Performance Review
+# @tabnas/yaml — Performance Review
 
 _Target:_ parse very large YAML files (tens of KB → tens of MB) in
 both the TypeScript and Go implementations.
@@ -112,8 +112,8 @@ Virtually all CPU time on flow-mapping input is spent inside the custom
 
 ```
 flat%   cum%    symbol
-27.0%   29.8%   github.com/jsonicjs/yaml/go.handlePlainScalar
-14.9%   30.5%   github.com/jsonicjs/yaml/go.Yaml.func2 (yamlMatcher / textCheck)
+27.0%   29.8%   github.com/tabnas/yaml/go.handlePlainScalar
+14.9%   30.5%   github.com/tabnas/yaml/go.Yaml.func2 (yamlMatcher / textCheck)
  0.3%   22.8%   runtime.gcBgMarkWorker   ← GC pressure from high alloc
  0.2%   13.3%   regexp.MustCompile / regexp.Compile   ← hot-path regex compile
  2.8%   10.5%   runtime.scanobject

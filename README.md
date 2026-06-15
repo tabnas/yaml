@@ -1,6 +1,6 @@
-# @jsonic/yaml
+# @tabnas/yaml
 
-This plugin allows the [Jsonic](https://jsonic.senecajs.org) JSON parser to support a core subset of YAML syntax.
+This plugin allows the [Tabnas](https://jsonic.senecajs.org) JSON parser to support a core subset of YAML syntax.
 
 This repository contains:
 

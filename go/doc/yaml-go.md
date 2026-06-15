@@ -6,10 +6,10 @@ including block and flow collections, anchors, aliases, merge keys,
 tags, block scalars, and multi-document streams.
 
 ```bash
-go get github.com/jsonicjs/yaml/go
+go get github.com/tabnas/yaml/go
 ```
 
-Requires `github.com/jsonicjs/jsonic/go` >= v0.1.19.
+Requires `github.com/tabnas/jsonic/go` >= v0.1.19.
 
 
 ## Tutorials
@@ -23,7 +23,7 @@ package main
 
 import (
     "fmt"
-    yaml "github.com/jsonicjs/yaml/go"
+    yaml "github.com/tabnas/yaml/go"
 )
 
 func main() {

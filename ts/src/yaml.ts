@@ -11,7 +11,7 @@ import {
   Context,
   Lex,
   Token,
-} from 'jsonic'
+} from '@tabnas/jsonic'
 
 
 type YamlOptions = {
@@ -32,7 +32,7 @@ type DocMeta = {
 // --- BEGIN EMBEDDED yaml-grammar.jsonic ---
 const grammarText = `
 # YAML Grammar Definition
-# Parsed by a standard Jsonic instance and passed to jsonic.grammar()
+# Parsed by a standard Tabnas instance and passed to tabnas.grammar()
 # Function references (@ prefixed) are resolved against the refs map.
 # State handlers (bo/ao/bc/ac) remain wired in code, since they use
 # closures over per-parse state (anchors, pendingAnchors, etc.).
@@ -148,7 +148,7 @@ const grammarText = `
   }
 
   # Amend pair rule: end of input ends pair; dedent closes, same-indent repeats.
-  # Also handle YAML flow-mapping shapes Jsonic doesn't have natively:
+  # Also handle YAML flow-mapping shapes Tabnas doesn't have natively:
   # - implicit null values: {a, b: c}  — KEY followed directly by CA or CB
   # - explicit-key marker:  {? k : v}  — leading #QM is consumed
   rule: pair: open: {
@@ -237,19 +237,19 @@ const grammarText = `
 // --- END EMBEDDED yaml-grammar.jsonic ---
 
 
-const Yaml: Plugin = (jsonic: Jsonic, options: YamlOptions) => {
+const Yaml: Plugin = (tabnas: Jsonic, options: YamlOptions) => {
   // Guard against re-entry during options() re-application.
-  if ((jsonic as any).__yamlInstalled) return
-  ;(jsonic as any).__yamlInstalled = true
+  if ((tabnas as any).__yamlInstalled) return
+  ;(tabnas as any).__yamlInstalled = true
 
-  let TX = jsonic.token.TX
-  let NR = jsonic.token.NR
-  let ST = jsonic.token.ST
-  let VL = jsonic.token.VL
-  let CL = jsonic.token.CL
-  let ZZ = jsonic.token.ZZ
+  let TX = tabnas.token.TX
+  let NR = tabnas.token.NR
+  let ST = tabnas.token.ST
+  let VL = tabnas.token.VL
+  let CL = tabnas.token.CL
+  let ZZ = tabnas.token.ZZ
 
-  let IN = jsonic.token('#IN')
+  let IN = tabnas.token('#IN')
 
   // Shared anchor storage for the plugin instance.
   let anchors: Record<string, any> = {}
@@ -308,7 +308,7 @@ const Yaml: Plugin = (jsonic: Jsonic, options: YamlOptions) => {
   }
 
 
-  jsonic.options({
+  tabnas.options({
     fixed: {
       token: {
         // Single colon is not a YAML token, so remove.
@@ -927,12 +927,12 @@ const Yaml: Plugin = (jsonic: Jsonic, options: YamlOptions) => {
   })
 
   // Register #EL token (not as a fixed token — we match it in yamlMatcher).
-  let EL = jsonic.token('#EL')
+  let EL = tabnas.token('#EL')
 
   // Register #QM token: the YAML `?` explicit-key indicator inside flow
   // collections. Emitted by yamlMatcher only when in flow context and
   // followed by whitespace; consumed by pair/elem rule alts below.
-  let QM = jsonic.token('#QM')
+  let QM = tabnas.token('#QM')
 
   // YAML document-frame tokens, emitted by yamlMatcher at column 0:
   //   #DS  document start: ---     (with optional inline content following)
@@ -940,22 +940,22 @@ const Yaml: Plugin = (jsonic: Jsonic, options: YamlOptions) => {
   //   #DR  directive line: %YAML 1.2  /  %TAG !! tag:...
   // The `stream` rule consumes them; rules apply directives and accumulate
   // each document's value into the result.
-  let DS = jsonic.token('#DS')
-  let DE = jsonic.token('#DE')
-  let DR = jsonic.token('#DR')
+  let DS = tabnas.token('#DS')
+  let DE = tabnas.token('#DE')
+  let DR = tabnas.token('#DR')
 
   // Flow collection tokens.
-  let CA = jsonic.token.CA  // comma
-  let CS = jsonic.token.CS  // ]
-  let CB = jsonic.token.CB  // }
-  let OS = jsonic.token.OS  // [
-  let OB = jsonic.token.OB  // {
+  let CA = tabnas.token.CA  // comma
+  let CS = tabnas.token.CS  // ]
+  let CB = tabnas.token.CB  // }
+  let OS = tabnas.token.OS  // [
+  let OB = tabnas.token.OB  // {
 
   // All tokens that can start a value.
   let KEY = [TX, NR, ST, VL]
 
   // Add a custom lex matcher for YAML special cases.
-  jsonic.options({
+  tabnas.options({
     lex: {
       match: {
         yaml: {
@@ -2151,13 +2151,13 @@ const Yaml: Plugin = (jsonic: Jsonic, options: YamlOptions) => {
   // Parse the embedded grammar text and install declarative rules.
   const grammarDef: any = (Jsonic.make() as any)(grammarText)
   grammarDef.ref = refs
-  jsonic.grammar(grammarDef)
+  tabnas.grammar(grammarDef)
 
   // ===== State handlers (bo/ao/bc/ac) — kept in code for closure capture =====
 
   // val rule: claim pending anchors (ao), handle empty (bc),
   //          resolve aliases and record anchors (ac).
-  jsonic.rule('val', (rulespec: RuleSpec) => {
+  tabnas.rule('val', (rulespec: RuleSpec) => {
     rulespec.ao((rule: Rule) => {
       if (pendingAnchors.length > 0) {
         rule.u.yamlAnchors = [...pendingAnchors]
@@ -2203,7 +2203,7 @@ const Yaml: Plugin = (jsonic: Jsonic, options: YamlOptions) => {
   })
 
   // indent rule: propagate child node up on close.
-  jsonic.rule('indent', (rulespec: RuleSpec) => {
+  tabnas.rule('indent', (rulespec: RuleSpec) => {
     rulespec.bc((rule: Rule) => {
       if (undefined !== rule.child.node) {
         rule.node = rule.child.node
@@ -2212,7 +2212,7 @@ const Yaml: Plugin = (jsonic: Jsonic, options: YamlOptions) => {
   })
 
   // yamlBlockList rule: init array and push child nodes.
-  jsonic.rule('yamlBlockList', (rulespec: RuleSpec) => {
+  tabnas.rule('yamlBlockList', (rulespec: RuleSpec) => {
     rulespec.bo((rule: Rule) => {
       rule.node = []
       rule.k.yamlBlockArr = rule.node
@@ -2225,7 +2225,7 @@ const Yaml: Plugin = (jsonic: Jsonic, options: YamlOptions) => {
   })
 
   // yamlBlockElem rule: reuse shared array, push child nodes.
-  jsonic.rule('yamlBlockElem', (rulespec: RuleSpec) => {
+  tabnas.rule('yamlBlockElem', (rulespec: RuleSpec) => {
     rulespec.bo((rule: Rule) => {
       rule.node = rule.k.yamlBlockArr
     })
@@ -2236,7 +2236,7 @@ const Yaml: Plugin = (jsonic: Jsonic, options: YamlOptions) => {
   })
 
   // list rule: propagate list indent so val can check nesting depth.
-  jsonic.rule('list', (rulespec: RuleSpec) => {
+  tabnas.rule('list', (rulespec: RuleSpec) => {
     rulespec.bo((rule: Rule) => {
       rule.k.yamlListIn = rule.n.in
     })
@@ -2317,7 +2317,7 @@ const Yaml: Plugin = (jsonic: Jsonic, options: YamlOptions) => {
     flushCurMeta(true)
   }
 
-  jsonic.rule('stream', (rs: RuleSpec) => {
+  tabnas.rule('stream', (rs: RuleSpec) => {
     rs.open([
       // Consume directive line; rotate to stream to look for the next token.
       { s: '#DR', a: applyDirective, r: 'stream', g: 'yaml' },
@@ -2344,10 +2344,10 @@ const Yaml: Plugin = (jsonic: Jsonic, options: YamlOptions) => {
   })
 
   // Configure jsonic to start parsing with `stream` instead of `val`.
-  jsonic.options({ rule: { start: 'stream' } })
+  tabnas.options({ rule: { start: 'stream' } })
 
   // map rule: default indent and merge-key handling.
-  jsonic.rule('map', (rulespec: RuleSpec) => {
+  tabnas.rule('map', (rulespec: RuleSpec) => {
     rulespec.bo((rule: Rule) => {
       if (null == rule.n.in) {
         rule.n.in = 0
@@ -2376,7 +2376,7 @@ const Yaml: Plugin = (jsonic: Jsonic, options: YamlOptions) => {
   })
 
   // yamlElemMap rule: init map and store pairs.
-  jsonic.rule('yamlElemMap', (rulespec: RuleSpec) => {
+  tabnas.rule('yamlElemMap', (rulespec: RuleSpec) => {
     rulespec.bo((rule: Rule) => {
       rule.node = Object.create(null)
     })
@@ -2388,7 +2388,7 @@ const Yaml: Plugin = (jsonic: Jsonic, options: YamlOptions) => {
   })
 
   // yamlElemPair rule: store pair into shared map node.
-  jsonic.rule('yamlElemPair', (rulespec: RuleSpec) => {
+  tabnas.rule('yamlElemPair', (rulespec: RuleSpec) => {
     rulespec.bc((rule: Rule) => {
       if (rule.u.key != null) {
         rule.node[rule.u.key] = rule.child.node

@@ -15,7 +15,7 @@ import { test, describe } from 'node:test'
 import { readFileSync, readdirSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 
-import { Jsonic } from 'jsonic'
+import { Jsonic } from '@tabnas/jsonic'
 import { Yaml } from '../dist/yaml'
 
 

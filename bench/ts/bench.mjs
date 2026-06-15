@@ -25,7 +25,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 const root      = join(__dirname, '..', '..')
 const fixtures  = join(root, 'bench', 'fixtures')
 
-const { Jsonic } = await import(join(root, 'node_modules', 'jsonic', 'dist', 'jsonic.js'))
+const { Jsonic } = await import(join(root, 'node_modules', '@tabnas', 'jsonic', 'dist', 'jsonic.js'))
 const { Yaml }   = await import(join(root, 'dist', 'yaml.js'))
 
 function makeParser() {

@@ -5,7 +5,7 @@ JavaScript objects, including block and flow collections, anchors,
 aliases, merge keys, tags, block scalars, and multi-document streams.
 
 ```bash
-npm install @jsonic/yaml jsonic
+npm install @tabnas/yaml @tabnas/jsonic
 ```
 
 Requires `jsonic` >= 2 as a peer dependency.
@@ -18,8 +18,8 @@ Requires `jsonic` >= 2 as a peer dependency.
 Install the plugin, register it with a Jsonic instance, then parse:
 
 ```typescript
-import { Jsonic } from 'jsonic'
-import { Yaml } from '@jsonic/yaml'
+import { Jsonic } from '@tabnas/jsonic'
+import { Yaml } from '@tabnas/yaml'
 
 const j = Jsonic.make().use(Yaml)
 
@@ -215,8 +215,8 @@ All alts are tagged `g: yaml` so callers can use
 A Jsonic plugin function. Register with `Jsonic.make().use(Yaml)`.
 
 ```typescript
-import { Jsonic } from 'jsonic'
-import { Yaml } from '@jsonic/yaml'
+import { Jsonic } from '@tabnas/jsonic'
+import { Yaml } from '@tabnas/yaml'
 
 const j = Jsonic.make().use(Yaml)
 ```

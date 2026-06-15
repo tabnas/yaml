@@ -3,7 +3,7 @@
 import { test, describe } from 'node:test'
 import assert from 'node:assert'
 
-import { Jsonic } from 'jsonic'
+import { Jsonic } from '@tabnas/jsonic'
 import { Yaml } from '../dist/yaml'
 
 

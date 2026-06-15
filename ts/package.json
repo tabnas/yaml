@@ -1,21 +1,21 @@
 {
-  "name": "@jsonic/yaml",
+  "name": "@tabnas/yaml",
   "version": "0.7.0",
-  "description": "This plugin allows the [Jsonic](https://jsonic.senecajs.org) JSON parser to support a core subset of YAML syntax.",
+  "description": "This plugin allows the [Tabnas](https://jsonic.senecajs.org) JSON parser to support a core subset of YAML syntax.",
   "main": "dist/yaml.js",
   "type": "commonjs",
   "types": "dist/yaml.d.ts",
-  "homepage": "https://github.com/jsonicjs/yaml",
+  "homepage": "https://github.com/tabnas/yaml",
   "keywords": [
     "json",
-    "jsonic",
+    "tabnas",
     "yaml",
     "parser"
   ],
   "author": "Richard Rodger (http://richardrodger.com)",
   "repository": {
     "type": "git",
-    "url": "git://github.com/jsonicjs/yaml.git"
+    "url": "git://github.com/tabnas/yaml.git"
   },
   "scripts": {
     "test": "node --enable-source-maps --test \"dist-test/*.test.js\"",
@@ -40,6 +40,6 @@
     "typescript": "6.0.3"
   },
   "peerDependencies": {
-    "jsonic": ">=2"
+    "@tabnas/jsonic": "file:../../jsonic/ts"
   }
 }

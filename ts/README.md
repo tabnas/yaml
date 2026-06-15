@@ -1,12 +1,12 @@
-# @jsonic/yaml
+# @tabnas/yaml
 
-A [Jsonic](https://jsonic.senecajs.org) plugin that parses YAML into plain JavaScript objects or Go values, using
-Jsonic's extensible grammar engine.
+A [Tabnas](https://jsonic.senecajs.org) plugin that parses YAML into plain JavaScript objects or Go values, using
+Tabnas's extensible grammar engine.
 
 Available for both **TypeScript/JavaScript** (npm) and **Go**.
 
-[![npm version](https://img.shields.io/npm/v/@jsonic/yaml.svg)](https://www.npmjs.com/package/@jsonic/yaml)
-[![license](https://img.shields.io/npm/l/@jsonic/yaml.svg)](https://github.com/jsonicjs/yaml/blob/main/LICENSE)
+[![npm version](https://img.shields.io/npm/v/@tabnas/yaml.svg)](https://www.npmjs.com/package/@tabnas/yaml)
+[![license](https://img.shields.io/npm/l/@tabnas/yaml.svg)](https://github.com/tabnas/yaml/blob/main/LICENSE)
 
 
 ## Documentation
@@ -38,14 +38,14 @@ Full docs follow the [Diataxis](https://diataxis.fr) structure
 ### Node.js
 
 ```bash
-npm install @jsonic/yaml jsonic
+npm install @tabnas/yaml tabnas
 ```
 
 ```js
-const { Jsonic } = require('jsonic')
-const { Yaml } = require('@jsonic/yaml')
+const { Tabnas } = require('tabnas')
+const { Yaml } = require('@tabnas/yaml')
 
-const j = Jsonic.make().use(Yaml)
+const j = Tabnas.make().use(Yaml)
 j("name: Alice\nitems:\n  - one\n  - two\n")
 // { name: 'Alice', items: ['one', 'two'] }
 ```
@@ -55,11 +55,11 @@ See [doc/yaml-ts.md](doc/yaml-ts.md) for the full guide.
 ### Go
 
 ```bash
-go get github.com/jsonicjs/yaml/go
+go get github.com/tabnas/yaml/go
 ```
 
 ```go
-import yaml "github.com/jsonicjs/yaml/go"
+import yaml "github.com/tabnas/yaml/go"
 
 result, err := yaml.Parse("name: Alice\nitems:\n  - one\n  - two\n")
 // map[name:Alice items:[one two]]
@@ -89,4 +89,4 @@ to re-sync the source files.
 
 ## License
 
-[MIT](LICENSE) — Copyright (c) 2021 jsonicjs
+[MIT](LICENSE) — Copyright (c) 2021 tabnas
