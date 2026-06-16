@@ -11,6 +11,9 @@ import (
 	jsonic "github.com/tabnas/jsonic/go"
 )
 
+// Version is the module version, injected at release by `make publish-go`.
+const Version = "0.7.0"
+
 // YamlOptions configures the YAML parser plugin.
 // Currently empty — reserved for future extension.
 type YamlOptions struct {
