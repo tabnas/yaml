@@ -198,3 +198,14 @@ yamlElemPair:
  └──┬──┘ │
     ├────┘
     │
+
+Tokens:
+  CL  = :
+  DE  = DE token
+  DR  = DR token
+  DS  = DS token
+  EL  = EL token
+  IN  = IN token
+  KEY = map key (text, number, string, or value)
+  QM  = QM token
+  VAL = a value (text, number, string, or value)
