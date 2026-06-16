@@ -245,6 +245,25 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
   if ((tabnas as any).__yamlInstalled) return
   ;(tabnas as any).__yamlInstalled = true
 
+  // Human descriptions for YAML tokens, surfaced in railroad diagram legends
+  // (read off the live config by @tabnas/railroad).
+  tabnas.options({
+    config: {
+      modify: {
+        'yaml-tokendesc': (cfg: any) => {
+          cfg.tokenDesc = Object.assign(cfg.tokenDesc || {}, {
+            '#DS': 'document start marker --- (column 0)',
+            '#DE': 'document end marker ... (column 0)',
+            '#DR': 'directive line, e.g. %YAML / %TAG (column 0)',
+            '#EL': 'block sequence item dash "- "',
+            '#IN': 'line indentation (count of leading spaces)',
+            '#QM': 'explicit-key marker ? in flow {? k : v }',
+          })
+        },
+      },
+    },
+  })
+
   let TX = tabnas.token.TX
   let NR = tabnas.token.NR
   let ST = tabnas.token.ST

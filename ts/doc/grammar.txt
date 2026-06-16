@@ -200,12 +200,12 @@ yamlElemPair:
     │
 
 Tokens:
-  CL  = :
-  DE  = DE token
-  DR  = DR token
-  DS  = DS token
-  EL  = EL token
-  IN  = IN token
-  KEY = map key (text, number, string, or value)
-  QM  = QM token
-  VAL = a value (text, number, string, or value)
+  CL  = colon : (separates a key from its value)
+  DE  = document end marker ... (column 0)
+  DR  = directive line, e.g. %YAML / %TAG (column 0)
+  DS  = document start marker --- (column 0)
+  EL  = block sequence item dash "- "
+  IN  = line indentation (count of leading spaces)
+  KEY = map key: bare text, number, string, or keyword
+  QM  = explicit-key marker ? in flow {? k : v }
+  VAL = value: bare text, number, string, or keyword
