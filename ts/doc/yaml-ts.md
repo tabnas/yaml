@@ -5,10 +5,11 @@ JavaScript objects, including block and flow collections, anchors,
 aliases, merge keys, tags, block scalars, and multi-document streams.
 
 ```bash
-npm install @tabnas/yaml @tabnas/jsonic
+npm install @tabnas/yaml @tabnas/jsonic @tabnas/parser
 ```
 
-Requires `jsonic` >= 2 as a peer dependency.
+Requires `@tabnas/jsonic` >= 2 and `@tabnas/parser` >= 2 as peer
+dependencies.
 
 
 ## Tutorials
@@ -18,12 +19,13 @@ Requires `jsonic` >= 2 as a peer dependency.
 Install the plugin, register it with a Jsonic instance, then parse:
 
 ```js
-import { Jsonic } from '@tabnas/jsonic'
+import { Tabnas } from '@tabnas/parser'
+import { jsonic } from '@tabnas/jsonic'
 import { Yaml } from '@tabnas/yaml'
 
-const j = Jsonic.make().use(Yaml)
+const j = new Tabnas().use(jsonic).use(Yaml)
 
-const out = j(`name: Alice
+const out = j.parse(`name: Alice
 items:
   - one
   - two
@@ -40,12 +42,13 @@ Indentation drives structure. Mappings use `key: value`; sequences use
 `- item`:
 
 ```js
-import { Jsonic } from '@tabnas/jsonic'
+import { Tabnas } from '@tabnas/parser'
+import { jsonic } from '@tabnas/jsonic'
 import { Yaml } from '@tabnas/yaml'
 
-const j = Jsonic.make().use(Yaml)
+const j = new Tabnas().use(jsonic).use(Yaml)
 
-const out = j(`server:
+const out = j.parse(`server:
   host: localhost
   port: 5432
   tags:
@@ -61,12 +64,13 @@ out   // => { server: { host: 'localhost', port: 5432, tags: ['web', 'api'] } }
 Define a node with `&name`, reuse it with `*name`:
 
 ```js
-import { Jsonic } from '@tabnas/jsonic'
+import { Tabnas } from '@tabnas/parser'
+import { jsonic } from '@tabnas/jsonic'
 import { Yaml } from '@tabnas/yaml'
 
-const j = Jsonic.make().use(Yaml)
+const j = new Tabnas().use(jsonic).use(Yaml)
 
-const out = j(`base: &defaults
+const out = j.parse(`base: &defaults
   timeout: 30
   retries: 3
 prod:
@@ -88,12 +92,13 @@ on the current mapping win.
 Inline `{}` and `[]` collections work anywhere a value is expected:
 
 ```js
-import { Jsonic } from '@tabnas/jsonic'
+import { Tabnas } from '@tabnas/parser'
+import { jsonic } from '@tabnas/jsonic'
 import { Yaml } from '@tabnas/yaml'
 
-const j = Jsonic.make().use(Yaml)
+const j = new Tabnas().use(jsonic).use(Yaml)
 
-j("data: {name: Bob, tags: [admin, ops]}")   // => { data: { name: 'Bob', tags: ['admin', 'ops'] } }
+j.parse("data: {name: Bob, tags: [admin, ops]}")   // => { data: { name: 'Bob', tags: ['admin', 'ops'] } }
 ```
 
 ### Use block scalars (literal / folded)
@@ -101,12 +106,13 @@ j("data: {name: Bob, tags: [admin, ops]}")   // => { data: { name: 'Bob', tags: 
 Preserve or fold newlines in multi-line strings:
 
 ```js
-import { Jsonic } from '@tabnas/jsonic'
+import { Tabnas } from '@tabnas/parser'
+import { jsonic } from '@tabnas/jsonic'
 import { Yaml } from '@tabnas/yaml'
 
-const j = Jsonic.make().use(Yaml)
+const j = new Tabnas().use(jsonic).use(Yaml)
 
-const out = j(`literal: |
+const out = j.parse(`literal: |
   line one
   line two
 folded: >
@@ -125,12 +131,13 @@ Chomping indicators (`-` strip, `+` keep) and explicit indent digits
 `true`/`false`/`yes`/`no`/`on`/`off`, `null`/`~`, `.inf`/`.nan`:
 
 ```js
-import { Jsonic } from '@tabnas/jsonic'
+import { Tabnas } from '@tabnas/parser'
+import { jsonic } from '@tabnas/jsonic'
 import { Yaml } from '@tabnas/yaml'
 
-const j = Jsonic.make().use(Yaml)
+const j = new Tabnas().use(jsonic).use(Yaml)
 
-const out = j(`enabled: yes
+const out = j.parse(`enabled: yes
 retries: ~
 max: .inf
 `)
@@ -143,12 +150,13 @@ out   // => { enabled: true, retries: null, max: null }
 Hex (`0x`), octal (`0o`), and binary (`0b`) integers are supported:
 
 ```js
-import { Jsonic } from '@tabnas/jsonic'
+import { Tabnas } from '@tabnas/parser'
+import { jsonic } from '@tabnas/jsonic'
 import { Yaml } from '@tabnas/yaml'
 
-const j = Jsonic.make().use(Yaml)
+const j = new Tabnas().use(jsonic).use(Yaml)
 
-j("{mask: 0xff, perm: 0o755, flags: 0b1010}")   // => { mask: 255, perm: 493, flags: 10 }
+j.parse("{mask: 0xff, perm: 0o755, flags: 0b1010}")   // => { mask: 255, perm: 493, flags: 10 }
 ```
 
 ### Handle multi-document streams
@@ -157,12 +165,13 @@ j("{mask: 0xff, perm: 0o755, flags: 0b1010}")   // => { mask: 255, perm: 493, fl
 returned as an array of documents:
 
 ```js
-import { Jsonic } from '@tabnas/jsonic'
+import { Tabnas } from '@tabnas/parser'
+import { jsonic } from '@tabnas/jsonic'
 import { Yaml } from '@tabnas/yaml'
 
-const j = Jsonic.make().use(Yaml)
+const j = new Tabnas().use(jsonic).use(Yaml)
 
-const out = j(`---
+const out = j.parse(`---
 a: 1
 ---
 b: 2
@@ -177,12 +186,13 @@ out   // => [{ a: 1 }, { b: 2 }]
 tags are preserved via `%TAG` directives:
 
 ```js
-import { Jsonic } from '@tabnas/jsonic'
+import { Tabnas } from '@tabnas/parser'
+import { jsonic } from '@tabnas/jsonic'
 import { Yaml } from '@tabnas/yaml'
 
-const j = Jsonic.make().use(Yaml)
+const j = new Tabnas().use(jsonic).use(Yaml)
 
-const out = j(`count: !!int "42"
+const out = j.parse(`count: !!int "42"
 name: !!str 100
 `)
 
@@ -239,13 +249,14 @@ All alts are tagged `g: yaml` so callers can use
 
 ### `Yaml` (Plugin)
 
-A Jsonic plugin function. Register with `Jsonic.make().use(Yaml)`.
+A Tabnas plugin function. Register with `new Tabnas().use(jsonic).use(Yaml)`.
 
 ```typescript
-import { Jsonic } from '@tabnas/jsonic'
+import { Tabnas } from '@tabnas/parser'
+import { jsonic } from '@tabnas/jsonic'
 import { Yaml } from '@tabnas/yaml'
 
-const j = Jsonic.make().use(Yaml)
+const j = new Tabnas().use(jsonic).use(Yaml)
 ```
 
 ### `YamlOptions`

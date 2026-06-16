@@ -5,14 +5,15 @@ import { test, describe } from 'node:test'
 import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 
-import { Jsonic } from '@tabnas/jsonic'
+import { Tabnas } from '@tabnas/parser'
+import { jsonic } from '@tabnas/jsonic'
 import { Yaml } from '../dist/yaml'
 
 
-// Helper: create a fresh Yaml-enabled Jsonic instance per test.
+// Helper: create a fresh Yaml-enabled Tabnas instance per test.
 function y(src: string) {
-  const j = Jsonic.make().use(Yaml)
-  return j(src)
+  const j = new Tabnas().use(jsonic).use(Yaml)
+  return j.parse(src)
 }
 
 

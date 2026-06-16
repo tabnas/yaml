@@ -38,15 +38,16 @@ Full docs follow the [Diataxis](https://diataxis.fr) structure
 ### Node.js
 
 ```bash
-npm install @tabnas/yaml @tabnas/jsonic
+npm install @tabnas/yaml @tabnas/jsonic @tabnas/parser
 ```
 
 ```js
-const { Jsonic } = require('@tabnas/jsonic')
+const { Tabnas } = require('@tabnas/parser')
+const { jsonic } = require('@tabnas/jsonic')
 const { Yaml } = require('@tabnas/yaml')
 
-const j = Jsonic.make().use(Yaml)
-j("name: Alice\nitems:\n  - one\n  - two\n")   // => { name: 'Alice', items: ['one', 'two'] }
+const j = new Tabnas().use(jsonic).use(Yaml)
+j.parse("name: Alice\nitems:\n  - one\n  - two\n")   // => { name: 'Alice', items: ['one', 'two'] }
 ```
 
 See [doc/yaml-ts.md](doc/yaml-ts.md) for the full guide.
@@ -85,6 +86,16 @@ and is embedded into `src/yaml.ts` and `go/grammar.go` by
 `embed-grammar.js`. After editing the grammar file, run `make embed`
 to re-sync the source files.
 
+
+
+## Grammar diagram
+
+The installed grammar as a railroad/syntax diagram, generated from the live
+grammar with [`@tabnas/railroad`](https://github.com/tabnas/railroad):
+
+![yaml grammar railroad diagram](doc/grammar.svg)
+
+A vertical ASCII version is in [`doc/grammar.txt`](doc/grammar.txt).
 
 ## License
 
