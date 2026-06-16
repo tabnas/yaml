@@ -209,3 +209,8 @@ Tokens:
   KEY = map key: bare text, number, string, or keyword
   QM  = explicit-key marker ? in flow {? k : v }
   VAL = value: bare text, number, string, or keyword
+
+Ignored tokens:
+  CM = comment
+  LN = newline (line break)
+  SP = whitespace (spaces or tabs)
