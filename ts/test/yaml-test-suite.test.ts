@@ -15,7 +15,8 @@ import { test, describe } from 'node:test'
 import { readFileSync, readdirSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 
-import { Jsonic } from '@tabnas/jsonic'
+import { Tabnas } from '@tabnas/parser'
+import { jsonic } from '@tabnas/jsonic'
 import { Yaml } from '../dist/yaml'
 
 
@@ -219,11 +220,11 @@ describe('yaml-test-suite', () => {
         const inJsonRaw = readFileSync(join(tc.dir, 'in.json'), 'utf8')
         const { value: expected, multiDoc } = parseExpectedJson(inJsonRaw)
 
-        const j = Jsonic.make().use(Yaml)
+        const j = new Tabnas().use(jsonic).use(Yaml)
 
         let actual: any
         try {
-          actual = j(inYaml)
+          actual = j.parse(inYaml)
         } catch (e: any) {
           throw new Error(
             `Parse failed for ${tc.id} (${tc.name}): ${e.message}`
@@ -254,11 +255,11 @@ describe('yaml-test-suite', () => {
 
       test(`${tc.id}: ${tc.name}`, { skip: skipReason || undefined }, () => {
         const inYaml = readFileSync(join(tc.dir, 'in.yaml'), 'utf8').replace(/\r\n/g, '\n')
-        const j = Jsonic.make().use(Yaml)
+        const j = new Tabnas().use(jsonic).use(Yaml)
 
         let threw = false
         try {
-          j(inYaml)
+          j.parse(inYaml)
         } catch {
           threw = true
         }

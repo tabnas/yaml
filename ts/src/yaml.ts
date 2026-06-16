@@ -1,17 +1,20 @@
 /* Copyright (c) 2021-2025 Richard Rodger, MIT License */
 
 
+// The engine is the tabnas parser; jsonic supplies the relaxed-JSON
+// grammar that the embedded grammar text is authored in.
+import { Tabnas } from '@tabnas/parser'
+import { jsonic } from '@tabnas/jsonic'
 import {
-  Jsonic,
   Rule,
   RuleSpec,
   Plugin,
   Config,
-  Options,
+  TabnasOptions as Options,
   Context,
   Lex,
   Token,
-} from '@tabnas/jsonic'
+} from '@tabnas/parser'
 
 
 type YamlOptions = {
@@ -237,7 +240,7 @@ const grammarText = `
 // --- END EMBEDDED yaml-grammar.jsonic ---
 
 
-const Yaml: Plugin = (tabnas: Jsonic, options: YamlOptions) => {
+const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
   // Guard against re-entry during options() re-application.
   if ((tabnas as any).__yamlInstalled) return
   ;(tabnas as any).__yamlInstalled = true
@@ -2149,7 +2152,7 @@ const Yaml: Plugin = (tabnas: Jsonic, options: YamlOptions) => {
   }
 
   // Parse the embedded grammar text and install declarative rules.
-  const grammarDef: any = (Jsonic.make() as any)(grammarText)
+  const grammarDef: any = (new Tabnas().use(jsonic) as any).parse(grammarText)
   grammarDef.ref = refs
   tabnas.grammar(grammarDef)
 

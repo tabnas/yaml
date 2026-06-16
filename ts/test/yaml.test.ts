@@ -3,14 +3,15 @@
 import { test, describe } from 'node:test'
 import assert from 'node:assert'
 
-import { Jsonic } from '@tabnas/jsonic'
+import { Tabnas } from '@tabnas/parser'
+import { jsonic } from '@tabnas/jsonic'
 import { Yaml } from '../dist/yaml'
 
 
-// Helper: create a fresh Yaml-enabled Jsonic instance per test.
+// Helper: create a fresh Yaml-enabled Tabnas instance per test.
 function y(src: string) {
-  const j = Jsonic.make().use(Yaml)
-  return j(src)
+  const j = new Tabnas().use(jsonic).use(Yaml)
+  return j.parse(src)
 }
 
 
@@ -548,10 +549,10 @@ c:
       // must produce identical output. Earlier versions used a source-string
       // identity check to gate per-parse state reset, which silently skipped
       // the reset on the second call and accumulated stream state.
-      const j = Jsonic.make().use(Yaml)
+      const j = new Tabnas().use(jsonic).use(Yaml)
       const src = `openapi: 3.0\npaths:\n  /a:\n    get: {}`
-      const a = j(src)
-      const b = j(src)
+      const a = j.parse(src)
+      const b = j.parse(src)
       assert.deepEqual(b, a)
     })
   })
@@ -562,8 +563,8 @@ c:
   describe('stream-meta', () => {
 
     function ym(src: string) {
-      const j = Jsonic.make().use(Yaml, { meta: true })
-      return j(src)
+      const j = new Tabnas().use(jsonic).use(Yaml, { meta: true })
+      return j.parse(src)
     }
 
     test('single-doc-implicit-meta-shape', () => {
@@ -623,15 +624,15 @@ c:
 
     test('meta-disabled-returns-bare-content', () => {
       // Default meta=false: same shape as no plugin option.
-      const j = Jsonic.make().use(Yaml)
-      assert.deepEqual(j(`a: 1`), { a: 1 })
-      assert.deepEqual(j(`---\na: 1\n---\nb: 2`), [{ a: 1 }, { b: 2 }])
+      const j = new Tabnas().use(jsonic).use(Yaml)
+      assert.deepEqual(j.parse(`a: 1`), { a: 1 })
+      assert.deepEqual(j.parse(`---\na: 1\n---\nb: 2`), [{ a: 1 }, { b: 2 }])
     })
 
     test('meta-explicitly-disabled', () => {
       // meta:false matches meta-not-passed.
-      const j = Jsonic.make().use(Yaml, { meta: false })
-      assert.deepEqual(j(`a: 1`), { a: 1 })
+      const j = new Tabnas().use(jsonic).use(Yaml, { meta: false })
+      assert.deepEqual(j.parse(`a: 1`), { a: 1 })
     })
   })
 
@@ -920,11 +921,11 @@ c:
     const BUDGET_MS = 2000
 
     function measure(iters: number, src: string) {
-      const j = Jsonic.make().use(Yaml)
+      const j = new Tabnas().use(jsonic).use(Yaml)
       // Warm up so JIT/cache effects don't show up in the measured loop.
-      for (let i = 0; i < 50; i++) j(src)
+      for (let i = 0; i < 50; i++) j.parse(src)
       const t0 = Date.now()
-      for (let i = 0; i < iters; i++) j(src)
+      for (let i = 0; i < iters; i++) j.parse(src)
       return Date.now() - t0
     }
 
