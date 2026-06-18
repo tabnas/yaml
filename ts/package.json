@@ -1,7 +1,7 @@
 {
   "name": "@tabnas/yaml",
   "version": "0.7.0",
-  "description": "This plugin allows the [Tabnas](https://jsonic.senecajs.org) JSON parser to support a core subset of YAML syntax.",
+  "description": "This plugin allows the [Tabnas](https://github.com/tabnas/jsonic) JSON parser to support a core subset of YAML syntax.",
   "main": "dist/yaml.js",
   "type": "commonjs",
   "types": "dist/yaml.d.ts",
