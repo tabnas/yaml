@@ -11,6 +11,14 @@ This repository contains:
 
 See [`ts/README.md`](ts/README.md) for usage.
 
+## Grammar
+
+The grammar is defined once in the top-level [`yaml-grammar.jsonic`](yaml-grammar.jsonic)
+and embedded into both the TypeScript ([`ts/src/yaml.ts`](ts/src/yaml.ts)) and Go
+([`go/yaml.go`](go/yaml.go)) implementations by [`ts/embed-grammar.js`](ts/embed-grammar.js).
+After editing the grammar file, re-run the embed step (`make embed`, or `npm run build`
+in `ts/`) to re-sync both sources.
+
 ## Grammar diagram
 
 The grammar as a railroad/syntax diagram, generated from the live grammar
