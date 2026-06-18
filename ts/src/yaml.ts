@@ -2257,10 +2257,41 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
     })
   })
 
-  // list rule: propagate list indent so val can check nesting depth.
+  // list rule: propagate list indent so val can check nesting depth, and
+  // OWN the node-append phase for YAML block sequences.
+  //
+  // jsonic's @list-bo only allocates the array when the list is explicit
+  // (`[` -> @array$) or a top-level implicit comma/space list
+  // (prev.u.implist). A YAML block sequence reaches `list` a third way —
+  // the indent rule's `#EL` alt does `p: list` with no `#OS` and no
+  // implist — so neither builder runs and r.node stays the inherited
+  // parent container (a map/pair value, or undefined). jsonic's
+  // @elem-bc/replace then does a bare r.node.push(...) and throws
+  // ("r.node.push is not a function") / silently drops elements in Go.
+  // Allocate the array here so the push lands in a real list. For a flow
+  // `[...]` list the subsequent `#OS` open alt's @array$ re-allocates an
+  // (info-marked) array before any element rule is pushed, so this is a
+  // harmless pre-seed in that case.
   tabnas.rule('list', (rulespec: RuleSpec) => {
     rulespec.bo((rule: Rule) => {
       rule.k.yamlListIn = rule.n.in
+      // OWN the node-append phase for an indented YAML block sequence.
+      //
+      // jsonic's @array$ only allocates the list's array on the flow `[`
+      // (`#OS`) open alt; @list-bo only allocates for a top-level implicit
+      // comma/space list (prev.u.implist). A block sequence nested deeper
+      // than its map key reaches `list` a third way — the indent rule's
+      // `#EL` alt does `p: list` with no `#OS` — so neither builder runs
+      // and r.node stays the inherited parent container (the map). jsonic's
+      // @elem-bc/replace then does a bare r.node.push(...) on that map and
+      // throws ("r.node.push is not a function") in TS / silently drops
+      // every element in Go. Allocate the array here so the push lands in a
+      // real list. Only the indent path needs this: a flow `[...]` list is
+      // pushed by `val` (parent=val) and gets its array from @array$, so it
+      // is left untouched.
+      if (rule.parent && 'indent' === rule.parent.name) {
+        rule.node = []
+      }
     })
   })
 
@@ -2296,6 +2327,19 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
   const finalizeStream = (rule: Rule, ctx: Context) => {
     if (rule.child && rule.child.node !== undefined) {
       yamlStreamDocs.push(rule.child.node)
+      flushCurMeta(false)
+    } else if (yamlStreamCurMeta != null) {
+      // The final document was explicitly opened (a `---` / `%TAG`
+      // directive started a doc, recorded in yamlStreamCurMeta) but its
+      // value coalesced to undefined — a bare `---` at end-of-stream, or a
+      // trailing empty doc in `---\n---\n---`. jsonic's val-close treats a
+      // deliberate `@val-set-null` as undefined (typeof null === 'object'
+      // fails its primitive-value check), so the empty doc's null is lost
+      // here; restore it the same way accumChildDoc / pushEmptyDoc force a
+      // null for the non-final empty docs. Without an open doc (empty or
+      // comment-only source) yamlStreamCurMeta stays null and the stream
+      // correctly finalizes to undefined.
+      yamlStreamDocs.push(null)
       flushCurMeta(false)
     }
     let content: any

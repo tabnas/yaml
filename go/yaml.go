@@ -1107,6 +1107,18 @@ func Yaml(j *jsonic.Jsonic, opts map[string]any) error {
 		if r.Child != nil && r.Child != jsonic.NoRule && !jsonic.IsUndefined(r.Child.Node) {
 			streamDocs = append(streamDocs, r.Child.Node)
 			flushCurMeta(false)
+		} else if streamCurMeta != nil {
+			// The final document was explicitly opened (a `---` / `%TAG`
+			// directive started a doc, recorded in streamCurMeta) but its
+			// value coalesced to undefined — a bare `---` at end-of-stream,
+			// or a trailing empty doc in `---\n---\n---`. jsonic's val-close
+			// treats a deliberate @val-set-null as undefined, so the empty
+			// doc's null is lost here; restore it the same way accumChildDoc
+			// / pushEmptyDoc force a null for the non-final empty docs.
+			// Without an open doc (empty or comment-only source) streamCurMeta
+			// stays nil and the stream correctly finalizes to nil/undefined.
+			streamDocs = append(streamDocs, nil)
+			flushCurMeta(false)
 		}
 		var content any
 		switch len(streamDocs) {
@@ -2950,6 +2962,21 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 		})
 	})
 
+	// pushBack keeps the replaced-rule (rotation) chain in sync so the
+	// parent rule always sees the latest slice through r.Parent.Child.Node.
+	// Go's append may reallocate the backing array, so a rotated element
+	// bc that appends to its own r.Node would leave the original
+	// yamlBlockList head's Node (which the parent val reads as r.Child.Node)
+	// stale — only the first element would survive. Unlike JS arrays, which
+	// alias by reference, Go needs this explicit write-back. Mirrors the
+	// jsonic Go grammar's CSV pushBack.
+	pushBack := func(r *jsonic.Rule) {
+		if r.Parent != nil && r.Parent != jsonic.NoRule &&
+			r.Parent.Child != nil && r.Parent.Child != jsonic.NoRule {
+			r.Parent.Child.Node = r.Node
+		}
+	}
+
 	j.Rule("yamlBlockList", func(rs *jsonic.RuleSpec, _ *jsonic.Parser) {
 		rs.AddBO(func(r *jsonic.Rule, ctx *jsonic.Context) {
 			r.Node = make([]any, 0)
@@ -2965,6 +2992,7 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 				arr = append(arr, val)
 				r.K["yamlBlockArr"] = arr
 				r.Node = arr
+				pushBack(r)
 			}
 		})
 	})
@@ -2982,6 +3010,7 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 				arr = append(arr, val)
 				r.K["yamlBlockArr"] = arr
 				r.Node = arr
+				pushBack(r)
 			}
 		})
 	})
@@ -2989,6 +3018,24 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 	j.Rule("list", func(rs *jsonic.RuleSpec, _ *jsonic.Parser) {
 		rs.AddBO(func(r *jsonic.Rule, ctx *jsonic.Context) {
 			r.K["yamlListIn"] = r.N["in"]
+			// OWN the node-append phase for an indented YAML block sequence.
+			//
+			// jsonic's @array$ only allocates the list's array on the flow
+			// `[` (#OS) open alt; @list-bo only allocates for a top-level
+			// implicit comma/space list (prev.u.implist). A block sequence
+			// nested deeper than its map key reaches `list` a third way —
+			// the indent rule's #EL alt does `p: list` with no #OS — so
+			// neither builder runs and r.Node stays the inherited parent
+			// container (the map). jsonic's @elem-bc/replace then pushes onto
+			// that map: in Go the type assertion fails and every element is
+			// silently dropped. Allocate the array here so the push lands in
+			// a real list. Only the indent path needs this: a flow `[...]`
+			// list is pushed by `val` (parent=val) and gets its array from
+			// @array$, so it is left untouched.
+			if r.Parent != nil && r.Parent != jsonic.NoRule &&
+				r.Parent.Name == "indent" {
+				r.Node = []any{}
+			}
 		})
 	})
 
