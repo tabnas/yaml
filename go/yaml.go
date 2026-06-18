@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 
 	jsonic "github.com/tabnas/jsonic/go"
 )
@@ -155,9 +156,19 @@ func (s *flowScanState) advance(src string, target int) {
 //   - string for strings
 //   - bool for booleans
 //   - nil for null or empty input
+// defaultParser is a lazily-created instance reused by Parse, so repeated
+// calls don't rebuild the engine and grammar each time (building the YAML
+// grammar dominates a parse — see perf_test.go). Parsing builds a fresh
+// context per call and only reads instance state, so the shared instance
+// is safe for concurrent use. Mirrors @tabnas/json's Parse.
+var (
+	defaultOnce   sync.Once
+	defaultParser *jsonic.Jsonic
+)
+
 func Parse(src string) (any, error) {
-	j := MakeJsonic()
-	return j.Parse(src)
+	defaultOnce.Do(func() { defaultParser = MakeJsonic() })
+	return defaultParser.Parse(src)
 }
 
 // MakeJsonic creates a jsonic instance configured for YAML parsing.

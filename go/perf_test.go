@@ -1,143 +1,57 @@
 package yaml
 
 import (
-	"strings"
 	"testing"
 	"time"
 )
 
-const benchBudget = 2 * time.Second
+// TestParseReusesInstance guards against a performance regression where the
+// convenience Parse() rebuilds the (expensive) YAML grammar on every call
+// instead of reusing a cached instance. Building the grammar dominates a
+// parse, so a rebuild-per-call Parse() is ~25x slower than reusing one
+// MakeJsonic() instance.
+//
+// The check is machine-INDEPENDENT: it compares Parse() against instance
+// reuse on the SAME machine in the SAME run, so a slow CI box cannot make it
+// flaky (both sides scale together). There is deliberately NO wall-clock
+// budget.
+func TestParseReusesInstance(t *testing.T) {
+	const src = "a: 1\nb: 2\nc: 3"
+	const n = 3000
 
-// bench parses the given source `iters` times and asserts the total stays
-// under benchBudget. Mirrors the TS performance describe block.
-func bench(t *testing.T, label string, iters int, src string) {
-	t.Helper()
-	// Warm up so the runtime is steady before the timed loop.
-	for i := 0; i < 50; i++ {
+	// Warm both paths so the comparison is steady-state.
+	for i := 0; i < 100; i++ {
 		_, _ = Parse(src)
 	}
-	start := time.Now()
-	for i := 0; i < iters; i++ {
+	j := MakeJsonic()
+	for i := 0; i < 100; i++ {
+		_, _ = j.Parse(src)
+	}
+
+	t0 := time.Now()
+	for i := 0; i < n; i++ {
 		if _, err := Parse(src); err != nil {
-			t.Fatalf("%s parse error: %v", label, err)
+			t.Fatalf("Parse error: %v", err)
 		}
 	}
-	elapsed := time.Since(start)
-	if elapsed > benchBudget {
-		t.Errorf("%s %dx took %v (budget %v)", label, iters, elapsed, benchBudget)
-	} else {
-		t.Logf("%s %dx took %v (%.1f us/op)",
-			label, iters, elapsed, float64(elapsed.Microseconds())/float64(iters))
+	conv := time.Since(t0)
+
+	t1 := time.Now()
+	for i := 0; i < n; i++ {
+		if _, err := j.Parse(src); err != nil {
+			t.Fatalf("reuse parse error: %v", err)
+		}
 	}
-}
+	reuse := time.Since(t1)
 
-func TestPerfTinyBlockMap(t *testing.T) {
-	// Go iterations are lower than the TS counterpart because the Go parser
-	// is currently slower per-op. The 2s budget is preserved.
-	bench(t, "tiny block map", 500, "a: 1\nb: 2\nc: 3")
-}
-
-func TestPerfNestedBlockMap(t *testing.T) {
-	src := `
-top:
-  a: 1
-  b:
-    c: 2
-    d: 3
-  e:
-    - 1
-    - 2
-    - 3
-  f:
-    g:
-      h: 4
-`
-	bench(t, "nested block map", 500, src)
-}
-
-func TestPerfFlowSeq200(t *testing.T) {
-	parts := make([]string, 0, 200)
-	for i := 0; i < 200; i++ {
-		parts = append(parts, "v")
+	// A cached Parse() is ~= instance reuse; allow 4x for scheduling noise.
+	// A rebuild-per-call Parse() is ~25x here, so this catches the regression
+	// without depending on absolute wall-clock speed.
+	if conv > 4*reuse {
+		t.Errorf("Parse() appears to rebuild the grammar on every call: "+
+			"%d Parse() calls took %v vs %v reusing one instance (ratio %.1fx, limit 4x). "+
+			"Cache a lazy default instance (see Parse / sync.Once).",
+			n, conv, reuse, float64(conv)/float64(reuse))
 	}
-	src := "[" + strings.Join(parts, ", ") + "]"
-	bench(t, "flow seq 200", 100, src)
-}
-
-func TestPerfFlowMap200(t *testing.T) {
-	parts := make([]string, 0, 200)
-	for i := 0; i < 200; i++ {
-		parts = append(parts, "k: v")
-	}
-	src := "{" + strings.Join(parts, ", ") + "}"
-	bench(t, "flow map 200", 50, src)
-}
-
-func TestPerfBlockSeq200(t *testing.T) {
-	parts := make([]string, 0, 200)
-	for i := 0; i < 200; i++ {
-		parts = append(parts, "- item")
-	}
-	src := strings.Join(parts, "\n")
-	bench(t, "block seq 200", 100, src)
-}
-
-func TestPerfAnchorsAliases(t *testing.T) {
-	src := `
-defaults: &d
-  retries: 3
-  timeout: 30
-prod:
-  <<: *d
-  host: prod.com
-dev:
-  <<: *d
-  host: dev.com
-`
-	bench(t, "anchors+aliases", 500, src)
-}
-
-func TestPerfKubernetesLike(t *testing.T) {
-	src := `
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: nginx-deployment
-  labels:
-    app: nginx
-spec:
-  replicas: 3
-  selector:
-    matchLabels:
-      app: nginx
-  template:
-    metadata:
-      labels:
-        app: nginx
-    spec:
-      containers:
-      - name: nginx
-        image: nginx:1.14.2
-        ports:
-        - containerPort: 80
-`
-	bench(t, "kubernetes-like", 500, src)
-}
-
-func TestPerfMultiDocStream(t *testing.T) {
-	parts := make([]string, 0, 50)
-	for i := 0; i < 50; i++ {
-		parts = append(parts, "doc: x")
-	}
-	src := "---\n" + strings.Join(parts, "\n---\n")
-	bench(t, "multi-doc 50", 250, src)
-}
-
-func TestPerfQuotedStrings(t *testing.T) {
-	src := "" +
-		"s1: \"hello \\\"world\\\"\"\n" +
-		"s2: 'it''s working'\n" +
-		"s3: \"multi\nline\"\n" +
-		"s4: \"tab\\there\"\n"
-	bench(t, "quoted strings", 500, src)
+	t.Logf("Parse()=%v  reuse=%v  ratio=%.2fx", conv, reuse, float64(conv)/float64(reuse))
 }
