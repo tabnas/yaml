@@ -4,7 +4,7 @@
 // Usage:
 //   (cd go && go test -run TestScaling -v .)
 
-package yaml
+package tabnasyaml
 
 import (
 	"fmt"

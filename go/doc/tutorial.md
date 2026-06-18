@@ -20,7 +20,7 @@ go get github.com/tabnas/yaml/go
 Import it with a short alias:
 
 ```go
-import yaml "github.com/tabnas/yaml/go"
+import tabnasyaml "github.com/tabnas/yaml/go"
 ```
 
 
@@ -35,11 +35,11 @@ package main
 
 import (
     "fmt"
-    yaml "github.com/tabnas/yaml/go"
+    tabnasyaml "github.com/tabnas/yaml/go"
 )
 
 func main() {
-    result, err := yaml.Parse(`name: Alice
+    result, err := tabnasyaml.Parse(`name: Alice
 items:
   - one
   - two
@@ -64,7 +64,7 @@ block becomes a nested `map[string]any`.
 `Parse` returns `any`, so type-assert to the concrete shape you expect:
 
 ```go
-result, _ := yaml.Parse(`name: Alice
+result, _ := tabnasyaml.Parse(`name: Alice
 port: 5432
 `)
 
@@ -84,7 +84,7 @@ Numbers parse as numbers, the value keywords parse to their Go
 equivalents, and everything else is a string:
 
 ```go
-result, _ := yaml.Parse(`port: 5432
+result, _ := tabnasyaml.Parse(`port: 5432
 enabled: yes
 note: ~
 title: hello world
@@ -103,7 +103,7 @@ single unquoted string up to the end of the line.
 build the parser once with `MakeJsonic` and reuse it:
 
 ```go
-j := yaml.MakeJsonic()
+j := tabnasyaml.MakeJsonic()
 
 for _, src := range inputs {
     result, err := j.Parse(src)

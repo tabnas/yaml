@@ -4,7 +4,7 @@
 // character(s)" errors in real-world OpenAPI/Swagger YAML files.
 // Each case is a TS-valid YAML snippet that the Go parser previously rejected.
 
-package yaml
+package tabnasyaml
 
 import (
 	"reflect"

@@ -9,7 +9,7 @@ the differences from the TypeScript version see [concepts](concepts.md).
 ## Package
 
 ```go
-import yaml "github.com/tabnas/yaml/go"
+import tabnasyaml "github.com/tabnas/yaml/go"
 ```
 
 ```bash
@@ -34,34 +34,34 @@ The shared instance only reads instance state during a parse, so `Parse`
 is safe for concurrent use.
 
 ```go
-result, err := yaml.Parse("name: Alice\nitems:\n  - one\n  - two\n")
+result, err := tabnasyaml.Parse("name: Alice\nitems:\n  - one\n  - two\n")
 // result == map[string]any{"name": "Alice", "items": []any{"one", "two"}}
 ```
 
 ### `MakeJsonic`
 
 ```go
-func MakeJsonic(opts ...YamlOptions) *jsonic.Jsonic
+func MakeJsonic(opts ...YamlOptions) *tabnasjsonic.Jsonic
 ```
 
-Creates a `*jsonic.Jsonic` configured for YAML parsing. Pass an optional
+Creates a `*tabnasjsonic.Jsonic` configured for YAML parsing. Pass an optional
 `YamlOptions` to configure the plugin (only the first is used). Reuse
 the returned instance for repeated parses, or to apply further engine
 options.
 
 ```go
-j := yaml.MakeJsonic(yaml.YamlOptions{Meta: true})
+j := tabnasyaml.MakeJsonic(tabnasyaml.YamlOptions{Meta: true})
 result, err := j.Parse(src)
 ```
 
 ### `Yaml`
 
 ```go
-func Yaml(j *jsonic.Jsonic, opts map[string]any) error
+func Yaml(j *tabnasjsonic.Jsonic, opts map[string]any) error
 ```
 
-The raw plugin function. Install it on an existing `*jsonic.Jsonic` with
-`j.Use(yaml.Yaml, opts)`. `MakeJsonic` is the convenience wrapper around
+The raw plugin function. Install it on an existing `*tabnasjsonic.Jsonic` with
+`j.Use(tabnasyaml.Yaml, opts)`. `MakeJsonic` is the convenience wrapper around
 this; reach for `Yaml` directly only when you build the engine yourself.
 The `opts` map honours the key `"meta"` (a `bool`), matching
 `YamlOptions.Meta`.
@@ -97,9 +97,9 @@ type MetaResult struct {
 `Content` slice for a stream. Type-assert at the call site:
 
 ```go
-r, _ := yaml.MakeJsonic(yaml.YamlOptions{Meta: true}).Parse("a: 1")
-mr := r.(*yaml.MetaResult)
-m := mr.Meta.(*yaml.DocMeta)   // single doc
+r, _ := tabnasyaml.MakeJsonic(tabnasyaml.YamlOptions{Meta: true}).Parse("a: 1")
+mr := r.(*tabnasyaml.MetaResult)
+m := mr.Meta.(*tabnasyaml.DocMeta)   // single doc
 ```
 
 ### `DocMeta`
@@ -226,7 +226,7 @@ rules it adds, alongside jsonic's `val` / `map` / `pair` / `list` /
 
 Every alternate the plugin adds is tagged with the rule group `yaml`, so
 the whole extension can be removed from an instance with
-`j.SetOptions(jsonic.Options{Rule: &jsonic.RuleOptions{Exclude: "yaml"}})`,
+`j.SetOptions(tabnasjsonic.Options{Rule: &tabnasjsonic.RuleOptions{Exclude: "yaml"}})`,
 reverting to relaxed-JSON parsing.
 
 The grammar is authored once in the repo-root

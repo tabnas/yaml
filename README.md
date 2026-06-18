@@ -39,9 +39,9 @@ j.parse("name: Alice\nitems:\n  - one\n  - two\n")   // => { name: 'Alice', item
 Go:
 
 ```go
-import yaml "github.com/tabnas/yaml/go"
+import tabnasyaml "github.com/tabnas/yaml/go"
 
-result, _ := yaml.Parse("name: Alice\nitems:\n  - one\n  - two\n")
+result, _ := tabnasyaml.Parse("name: Alice\nitems:\n  - one\n  - two\n")
 // map[items:[one two] name:Alice]
 ```
 
