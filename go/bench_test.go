@@ -17,7 +17,7 @@
 // Fixtures are produced by bench/fixtures/generate.mjs. Each benchmark loads
 // its fixture once (outside the timer) and times only Parse(src).
 
-package yaml
+package tabnasyaml
 
 import (
 	"os"

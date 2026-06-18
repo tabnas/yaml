@@ -19,7 +19,7 @@ There are three layers here:
 - the **YAML plugin** (this package) — which amends that grammar and
   lexer to accept indentation-sensitive YAML.
 
-`MakeJsonic` builds a `*jsonic.Jsonic`, configures it for YAML, and
+`MakeJsonic` builds a `*tabnasjsonic.Jsonic`, configures it for YAML, and
 installs the `Yaml` plugin with `j.Use(Yaml, ...)`. The plugin is not a
 separate parser — it is a set of grammar amendments and lexer matchers
 that ride on the engine jsonic configured. The payoff is that block
@@ -130,11 +130,11 @@ empty-input representation.
 
 | Area | TypeScript | Go |
 | ---- | ---------- | -- |
-| Entry point | register `Yaml` on an engine, then `j.parse(src)` | top-level `yaml.Parse(src) (any, error)`, or build with `MakeJsonic` |
-| Plugin signature | `(tabnas, opts) => void` | `func(j *jsonic.Jsonic, opts map[string]any) error` |
+| Entry point | register `Yaml` on an engine, then `j.parse(src)` | top-level `tabnasyaml.Parse(src) (any, error)`, or build with `MakeJsonic` |
+| Plugin signature | `(tabnas, opts) => void` | `func(j *tabnasjsonic.Jsonic, opts map[string]any) error` |
 | Options | `{ meta?: boolean }` passed to `.use(Yaml, opts)` | `YamlOptions{ Meta bool }` passed to `MakeJsonic` |
 | Parse errors | thrown | returned as `error` (never panics) |
-| Exclude the grammar | `j.options({ rule: { exclude: 'yaml' } })` | `j.SetOptions(jsonic.Options{Rule: &jsonic.RuleOptions{Exclude: "yaml"}})` |
+| Exclude the grammar | `j.options({ rule: { exclude: 'yaml' } })` | `j.SetOptions(tabnasjsonic.Options{Rule: &tabnasjsonic.RuleOptions{Exclude: "yaml"}})` |
 
 There is no standalone `parse()` export in TypeScript — parsing always
 goes through the engine after `.use()`. Go adds the convenience

@@ -24,11 +24,11 @@ package main
 
 import (
     "fmt"
-    yaml "github.com/tabnas/yaml/go"
+    tabnasyaml "github.com/tabnas/yaml/go"
 )
 
 func main() {
-    result, err := yaml.Parse("name: Alice\nitems:\n  - one\n  - two\n")
+    result, err := tabnasyaml.Parse("name: Alice\nitems:\n  - one\n  - two\n")
     if err != nil {
         panic(err)
     }
@@ -37,7 +37,7 @@ func main() {
 }
 ```
 
-For repeated parsing, build a reusable parser with `yaml.MakeJsonic()`.
+For repeated parsing, build a reusable parser with `tabnasyaml.MakeJsonic()`.
 
 
 ## Documentation
