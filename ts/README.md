@@ -77,12 +77,12 @@ make           # embed grammar, build, and test both TS and Go
 make test      # run both test suites
 make test-ts   # Node.js tests only
 make test-go   # Go tests only
-make embed     # re-embed yaml-grammar.jsonic into src/yaml.ts and go/grammar.go
+make embed     # re-embed yaml-grammar.jsonic into ts/src/yaml.ts and go/yaml.go
 make reset     # clean install, rebuild, and re-test everything
 ```
 
-The grammar definition lives in [`yaml-grammar.jsonic`](yaml-grammar.jsonic)
-and is embedded into `src/yaml.ts` and `go/grammar.go` by
+The grammar definition lives in the repo-root [`yaml-grammar.jsonic`](../yaml-grammar.jsonic)
+and is embedded into `ts/src/yaml.ts` and `go/yaml.go` by
 `embed-grammar.js`. After editing the grammar file, run `make embed`
 to re-sync the source files.
 
