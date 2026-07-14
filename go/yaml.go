@@ -43,6 +43,10 @@ type MetaResult struct {
 var (
 	structTagPrefixRe  = regexp.MustCompile(`^!!(seq|map|omap|set|pairs|binary|ordered|python/\S*)`)
 	yamlTagDirectiveRe = regexp.MustCompile(`^%TAG\s+(\S+)\s+(\S+)`)
+	// !!type tag prefix on an explicit (`? `) key (mirrors src/yaml.ts:1457).
+	explicitKeyTagRe = regexp.MustCompile(`^!!(\w+)\s+(.*)$`)
+	// Block scalar indicator used as an explicit key (mirrors src/yaml.ts:1482).
+	explicitKeyBlockScalarRe = regexp.MustCompile(`^([|>])([+-]?)([0-9]?)$`)
 )
 
 // flowScanState caches incremental flow-collection depth and quote state
@@ -638,6 +642,19 @@ func Yaml(j *jsonic.Jsonic, opts map[string]any) error {
 
 				pendingAnchors = append(pendingAnchors, anchorInfo{name: anchorName, inline: anchorInline})
 
+				// Check whether the anchor is the first content on its line
+				// (only whitespace precedes it), and record that indent.
+				// Mirrors src/yaml.ts:1121-1135.
+				lineStandalone := true
+				anchorIndent := 0
+				for bi := pnt.SI - 1; bi >= 0 && lex.Src[bi] != '\n' && lex.Src[bi] != '\r'; bi-- {
+					if lex.Src[bi] != ' ' && lex.Src[bi] != '\t' {
+						lineStandalone = false
+						break
+					}
+					anchorIndent++
+				}
+
 				// Consume the anchor name (and trailing spaces, but NOT the newline).
 				skip := nameEnd
 				for skip < len(fwd) && (fwd[skip] == ' ' || fwd[skip] == '\t') {
@@ -651,6 +668,35 @@ func Yaml(j *jsonic.Jsonic, opts map[string]any) error {
 				}
 				pnt.SI += skip
 				pnt.CI += skip
+
+				// If the anchor is standalone on its own line (followed by a
+				// newline), consume the newline and leading spaces so no extra
+				// IN token is emitted. Only consume when the next line has
+				// content and its indent >= the anchor's indent, otherwise let
+				// the normal indent handler manage the transition.
+				// Mirrors src/yaml.ts:1187-1205.
+				if lineStandalone && pnt.SI < pnt.Len &&
+					(lex.Src[pnt.SI] == '\r' || lex.Src[pnt.SI] == '\n') {
+					nl := pnt.SI
+					if lex.Src[nl] == '\r' {
+						nl++
+					}
+					if nl < pnt.Len && lex.Src[nl] == '\n' {
+						nl++
+					}
+					spaces := 0
+					for nl+spaces < pnt.Len && lex.Src[nl+spaces] == ' ' {
+						spaces++
+					}
+					if nl+spaces < pnt.Len {
+						nextCh := lex.Src[nl+spaces]
+						if nextCh != '\n' && nextCh != '\r' && spaces >= anchorIndent {
+							pnt.SI = nl + spaces
+							pnt.CI = spaces
+							pnt.RI++
+						}
+					}
+				}
 
 				continue // Re-loop to process what follows the anchor
 			}
@@ -762,7 +808,18 @@ func Yaml(j *jsonic.Jsonic, opts map[string]any) error {
 
 			// !!type tags (!!str, !!int, !!float, !!bool, !!null).
 			if fwd[0] == '!' && len(fwd) > 1 && fwd[1] == '!' {
-				return handleTypeTag(lex, pnt, fwd, tagHandles, &pendingAnchors, anchors, TX, NR, VL, ST)
+				preSI := pnt.SI
+				if tkn := handleTypeTag(lex, pnt, fwd, tagHandles, &pendingAnchors, anchors, TX, NR, VL, ST); tkn != nil {
+					return tkn
+				}
+				// Tag followed by a newline was consumed with no token —
+				// re-loop so the value on the next line (possibly an anchor
+				// or another tag) is handled in this same match call
+				// (mirrors TS `continue yamlMatchLoop`, src/yaml.ts:1381-1392).
+				if pnt.SI == preSI {
+					return nil // safety: no progress, avoid infinite loop
+				}
+				continue
 			}
 
 			// Flow-context `?` explicit-key marker: emit #QM. Pair/elem rule
@@ -1298,6 +1355,12 @@ func handleBlockScalar(lex *jsonic.Lex, pnt *jsonic.Point, src, fwd string, ch b
 	containingIndent := 0
 	isDocStart := false
 	li := pnt.SI - 1
+	// Block indicator at the very start of the source: there is no
+	// containing line (TS reads src[-1] as undefined; Go must not index
+	// out of range). containingIndent stays 0 and isDocStart false.
+	if li < 0 {
+		li = 0
+	}
 	for li > 0 && src[li-1] != '\n' && src[li-1] != '\r' {
 		li--
 	}
@@ -1945,6 +2008,10 @@ func handleExplicitKey(lex *jsonic.Lex, pnt *jsonic.Point, fwd string,
 		keyEnd++
 	}
 	key := trimRight(fwd[start:keyEnd])
+	// Strip !!type tags from explicit keys (mirrors src/yaml.ts:1455-1461).
+	if m := explicitKeyTagRe.FindStringSubmatch(key); m != nil {
+		key = m[2]
+	}
 	consumed := keyEnd
 
 	// Skip comment at end of key line.
@@ -1972,51 +2039,129 @@ func handleExplicitKey(lex *jsonic.Lex, pnt *jsonic.Point, fwd string,
 		li++
 	}
 
-	// Scan continuation lines (plain scalar multiline key).
-	for consumed < len(fwd) {
-		lineIndent := 0
-		for consumed+lineIndent < len(fwd) && fwd[consumed+lineIndent] == ' ' {
-			lineIndent++
+	// Count extra rows consumed (for multiline / block scalar keys).
+	extraRows := 0
+
+	// Handle block scalar keys (| or >). Mirrors src/yaml.ts:1481-1530.
+	if bm := explicitKeyBlockScalarRe.FindStringSubmatch(key); bm != nil {
+		isFolded := bm[1] == ">"
+		chomp := bm[2]
+		explicitIndent := 0
+		if bm[3] != "" {
+			explicitIndent, _ = strconv.Atoi(bm[3])
 		}
-		afterSpaces := consumed + lineIndent
-		if afterSpaces < len(fwd) && fwd[afterSpaces] == '#' {
-			for afterSpaces < len(fwd) && fwd[afterSpaces] != '\n' && fwd[afterSpaces] != '\r' {
-				afterSpaces++
+		// Collect block scalar content lines.
+		var blockLines []string
+		contentIndent := 0
+		for consumed < len(fwd) {
+			lineIndent := 0
+			for consumed+lineIndent < len(fwd) && fwd[consumed+lineIndent] == ' ' {
+				lineIndent++
 			}
-			beforeNewline = afterSpaces
-			if afterSpaces < len(fwd) && fwd[afterSpaces] == '\r' {
-				afterSpaces++
-			}
-			if afterSpaces < len(fwd) && fwd[afterSpaces] == '\n' {
-				afterSpaces++
-			}
-			consumed = afterSpaces
-			continue
-		}
-		if lineIndent > qIndent && afterSpaces < len(fwd) &&
-			fwd[afterSpaces] != ':' && fwd[afterSpaces] != '?' && fwd[afterSpaces] != '-' {
-			contEnd := afterSpaces
-			for contEnd < len(fwd) && fwd[contEnd] != '\n' && fwd[contEnd] != '\r' {
-				if fwd[contEnd] == ' ' && contEnd+1 < len(fwd) && fwd[contEnd+1] == '#' {
-					break
+			afterSpaces := consumed + lineIndent
+			// Empty line or line with only spaces.
+			if afterSpaces >= len(fwd) || fwd[afterSpaces] == '\n' || fwd[afterSpaces] == '\r' {
+				blockLines = append(blockLines, "")
+				consumed = afterSpaces
+				if consumed < len(fwd) && fwd[consumed] == '\r' {
+					consumed++
 				}
-				contEnd++
+				if consumed < len(fwd) && fwd[consumed] == '\n' {
+					consumed++
+				}
+				extraRows++
+				continue
 			}
-			contText := trimRight(fwd[afterSpaces:contEnd])
-			if len(contText) > 0 {
-				key += " " + contText
+			// Determine content indent from first non-empty line.
+			if contentIndent == 0 {
+				if explicitIndent > 0 {
+					contentIndent = qIndent + explicitIndent
+				} else {
+					contentIndent = lineIndent
+				}
 			}
-			consumed = contEnd
-			beforeNewline = consumed
+			// Line must be indented more than ? to be content.
+			if lineIndent < contentIndent {
+				break
+			}
+			// Collect line content.
+			lineEnd := afterSpaces
+			for lineEnd < len(fwd) && fwd[lineEnd] != '\n' && fwd[lineEnd] != '\r' {
+				lineEnd++
+			}
+			blockLines = append(blockLines, fwd[consumed+contentIndent:lineEnd])
+			consumed = lineEnd
 			if consumed < len(fwd) && fwd[consumed] == '\r' {
 				consumed++
 			}
 			if consumed < len(fwd) && fwd[consumed] == '\n' {
 				consumed++
 			}
-			continue
+			extraRows++
 		}
-		break
+		// Apply chomping: remove trailing empty lines for non-keep.
+		if chomp != "+" {
+			for len(blockLines) > 0 && blockLines[len(blockLines)-1] == "" {
+				blockLines = blockLines[:len(blockLines)-1]
+			}
+		}
+		if isFolded {
+			key = strings.Join(blockLines, " ") + "\n"
+		} else {
+			key = strings.Join(blockLines, "\n") + "\n"
+		}
+		if chomp == "-" {
+			key = strings.TrimSuffix(key, "\n")
+		}
+	} else {
+		// Scan continuation lines (plain scalar multiline key).
+		for consumed < len(fwd) {
+			lineIndent := 0
+			for consumed+lineIndent < len(fwd) && fwd[consumed+lineIndent] == ' ' {
+				lineIndent++
+			}
+			afterSpaces := consumed + lineIndent
+			if afterSpaces < len(fwd) && fwd[afterSpaces] == '#' {
+				for afterSpaces < len(fwd) && fwd[afterSpaces] != '\n' && fwd[afterSpaces] != '\r' {
+					afterSpaces++
+				}
+				beforeNewline = afterSpaces
+				if afterSpaces < len(fwd) && fwd[afterSpaces] == '\r' {
+					afterSpaces++
+				}
+				if afterSpaces < len(fwd) && fwd[afterSpaces] == '\n' {
+					afterSpaces++
+				}
+				extraRows++
+				consumed = afterSpaces
+				continue
+			}
+			if lineIndent > qIndent && afterSpaces < len(fwd) &&
+				fwd[afterSpaces] != ':' && fwd[afterSpaces] != '?' && fwd[afterSpaces] != '-' {
+				contEnd := afterSpaces
+				for contEnd < len(fwd) && fwd[contEnd] != '\n' && fwd[contEnd] != '\r' {
+					if fwd[contEnd] == ' ' && contEnd+1 < len(fwd) && fwd[contEnd+1] == '#' {
+						break
+					}
+					contEnd++
+				}
+				contText := trimRight(fwd[afterSpaces:contEnd])
+				if len(contText) > 0 {
+					key += " " + contText
+				}
+				consumed = contEnd
+				beforeNewline = consumed
+				if consumed < len(fwd) && fwd[consumed] == '\r' {
+					consumed++
+				}
+				if consumed < len(fwd) && fwd[consumed] == '\n' {
+					consumed++
+				}
+				extraRows++
+				continue
+			}
+			break
+		}
 	}
 
 	// Check if next line starts with ":".
@@ -2038,7 +2183,7 @@ func handleExplicitKey(lex *jsonic.Lex, pnt *jsonic.Point, fwd string,
 
 	if hasValue {
 		pnt.SI += valConsumed
-		pnt.RI++
+		pnt.RI += 1 + extraRows
 		indent := valConsumed - consumed
 		pnt.CI = indent + 1
 
@@ -2091,7 +2236,12 @@ func handleExplicitKey(lex *jsonic.Lex, pnt *jsonic.Point, fwd string,
 		*pendingTokens = append(*pendingTokens, clTkn, vlTkn)
 	}
 
-	tkn := lex.Token("#TX", TX, key, fwd[:keyEnd])
+	// Token source spans the consumed key text (mirrors src/yaml.ts:1587).
+	srcEnd := keyEnd
+	if hasValue {
+		srcEnd = consumed
+	}
+	tkn := lex.Token("#TX", TX, key, fwd[:srcEnd])
 	return tkn
 }
 
@@ -2201,6 +2351,12 @@ func handleDoubleQuotedString(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, ST
 				escapedUpTo = len(val)
 			case '0':
 				val += "\x00"
+				i++
+				escapedUpTo = len(val)
+			case '\t':
+				// Escaped literal tab (mirrors src/yaml.ts:1734): mark it
+				// non-trimmable so line folding preserves it.
+				val += "\t"
 				i++
 				escapedUpTo = len(val)
 			case ' ':
