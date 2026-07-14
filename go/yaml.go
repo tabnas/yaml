@@ -2959,14 +2959,14 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 		}),
 		"@val-set-in-from-o0": jsonic.AltAction(func(r *jsonic.Rule, ctx *jsonic.Context) {
 			if v, ok := toInt(r.O0.Val); ok {
-				r.N["in"] = v
+				r.EnsureN()["in"] = v
 			}
 		}),
 		"@val-set-null": jsonic.AltAction(func(r *jsonic.Rule, ctx *jsonic.Context) {
 			r.Node = nil
 		}),
 		"@val-set-el-in": jsonic.AltAction(func(r *jsonic.Rule, ctx *jsonic.Context) {
-			r.N["in"] = r.O0.CI - 1
+			r.EnsureN()["in"] = r.O0.CI - 1
 		}),
 		"@indent-plain-value": jsonic.AltAction(func(r *jsonic.Rule, ctx *jsonic.Context) {
 			if r.O0.Tin == ST || r.O0.Tin == TX {
@@ -2976,7 +2976,7 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 			}
 		}),
 		"@set-map-in": jsonic.AltAction(func(r *jsonic.Rule, ctx *jsonic.Context) {
-			r.K["yamlMapIn"] = r.N["in"] + 2
+			r.EnsureK()["yamlMapIn"] = r.N["in"] + 2
 		}),
 		"@t0-eq-in": jsonic.AltCond(func(r *jsonic.Rule, ctx *jsonic.Context) bool {
 			if v, ok := toInt(ctx.T0.Val); ok {
@@ -3011,21 +3011,21 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 			return false
 		}),
 		"@elem-key": jsonic.AltAction(func(r *jsonic.Rule, ctx *jsonic.Context) {
-			r.U["key"] = extractKey(r.O0, anchors)
+			r.EnsureU()["key"] = extractKey(r.O0, anchors)
 		}),
 		"@implicit-null-pair": jsonic.AltAction(func(r *jsonic.Rule, _ *jsonic.Context) {
 			key := extractKey(r.O0, anchors)
-			r.U["key"] = key
+			r.EnsureU()["key"] = key
 			if m, ok := r.Node.(map[string]any); ok {
 				m[formatKey(key)] = nil
 			}
 		}),
 		"@qm-pairkey": jsonic.AltAction(func(r *jsonic.Rule, _ *jsonic.Context) {
-			r.U["key"] = extractKey(r.O1, anchors)
+			r.EnsureU()["key"] = extractKey(r.O1, anchors)
 		}),
 		"@qm-implicit-null-pair": jsonic.AltAction(func(r *jsonic.Rule, _ *jsonic.Context) {
 			key := extractKey(r.O1, anchors)
-			r.U["key"] = key
+			r.EnsureU()["key"] = key
 			if m, ok := r.Node.(map[string]any); ok {
 				m[formatKey(key)] = nil
 			}
@@ -3059,8 +3059,8 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 			if len(*pendingAnchors) > 0 {
 				anchorsCopy := make([]anchorInfo, len(*pendingAnchors))
 				copy(anchorsCopy, *pendingAnchors)
-				r.U["yamlAnchors"] = anchorsCopy
-				r.U["yamlAnchorOpenNode"] = r.Node
+				r.EnsureU()["yamlAnchors"] = anchorsCopy
+				r.EnsureU()["yamlAnchorOpenNode"] = r.Node
 				*pendingAnchors = (*pendingAnchors)[:0]
 			}
 		})
@@ -3147,8 +3147,8 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 	j.Rule("yamlBlockList", func(rs *jsonic.RuleSpec, _ *jsonic.Parser) {
 		rs.AddBO(func(r *jsonic.Rule, ctx *jsonic.Context) {
 			r.Node = make([]any, 0)
-			r.K["yamlBlockArr"] = r.Node
-			r.K["yamlListIn"] = r.N["in"]
+			r.EnsureK()["yamlBlockArr"] = r.Node
+			r.EnsureK()["yamlListIn"] = r.N["in"]
 		})
 		rs.AddBC(func(r *jsonic.Rule, ctx *jsonic.Context) {
 			val := r.Child.Node
@@ -3157,7 +3157,7 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 			}
 			if arr, ok := r.K["yamlBlockArr"].([]any); ok {
 				arr = append(arr, val)
-				r.K["yamlBlockArr"] = arr
+				r.EnsureK()["yamlBlockArr"] = arr
 				r.Node = arr
 				pushBack(r)
 			}
@@ -3175,7 +3175,7 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 			}
 			if arr, ok := r.K["yamlBlockArr"].([]any); ok {
 				arr = append(arr, val)
-				r.K["yamlBlockArr"] = arr
+				r.EnsureK()["yamlBlockArr"] = arr
 				r.Node = arr
 				pushBack(r)
 			}
@@ -3184,7 +3184,7 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 
 	j.Rule("list", func(rs *jsonic.RuleSpec, _ *jsonic.Parser) {
 		rs.AddBO(func(r *jsonic.Rule, ctx *jsonic.Context) {
-			r.K["yamlListIn"] = r.N["in"]
+			r.EnsureK()["yamlListIn"] = r.N["in"]
 			// OWN the node-append phase for an indented YAML block sequence.
 			//
 			// jsonic's @array$ only allocates the list's array on the flow
@@ -3209,9 +3209,9 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 	j.Rule("map", func(rs *jsonic.RuleSpec, _ *jsonic.Parser) {
 		rs.AddBO(func(r *jsonic.Rule, ctx *jsonic.Context) {
 			if _, ok := r.N["in"]; !ok {
-				r.N["in"] = 0
+				r.EnsureN()["in"] = 0
 			}
-			r.K["yamlIn"] = r.N["in"]
+			r.EnsureK()["yamlIn"] = r.N["in"]
 		})
 		rs.AddAC(func(r *jsonic.Rule, ctx *jsonic.Context) {
 			m, ok := r.Node.(map[string]any)
