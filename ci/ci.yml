@@ -14,6 +14,3 @@ jobs:
     uses: tabnas/.github/.github/workflows/polyglot-ci.yml@main
     with:
       deps: "parser debug json abnf railroad jsonic"
-      # go/ exists but was not exercised by the old build.yml; preserved.
-      # Flip to true once the go tree is confirmed CI-clean.
-      run-go: false
