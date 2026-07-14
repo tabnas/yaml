@@ -1135,6 +1135,18 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
                 }
                 pnt.sI += skip
                 pnt.cI += skip
+                // Skip an inline comment after the anchor (e.g. `&a # note`),
+                // so the `#` is not mis-lexed as #BD and not captured as the
+                // anchor's scalar value. The following newline is handled next.
+                {
+                  let ci = pnt.sI
+                  while (lex.src[ci] === ' ' || lex.src[ci] === '\t') ci++
+                  if (lex.src[ci] === '#') {
+                    while (ci < lex.src.length && lex.src[ci] !== '\n' && lex.src[ci] !== '\r') ci++
+                    pnt.cI += (ci - pnt.sI)
+                    pnt.sI = ci
+                  }
+                }
                 // Determine if anchor is inline (content follows on same line)
                 // or standalone (only newline follows).
                 let anchorInline = !(isStandalone &&
@@ -1184,6 +1196,18 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
                 }
                 // Push pending anchor with inline flag.
                 pendingAnchors.push({ name: anchorName, inline: anchorInline })
+                // If the anchored value is a flow collection (&a [..] / &a {..}),
+                // emit its opener here: we've advanced past the anchor marker,
+                // so jsonic's fixed-token matcher would mis-lex it as #BD.
+                {
+                  let ac = lex.src[pnt.sI]
+                  if (ac === '[' || ac === '{') {
+                    let tkn = lex.token(ac === '[' ? '#OS' : '#OB', undefined, ac, pnt)
+                    pnt.sI += 1
+                    pnt.cI += 1
+                    return tkn
+                  }
+                }
                 // If anchor is standalone on its own line (followed by newline),
                 // consume the newline and leading spaces so no extra IN token
                 // is emitted. Only consume when next line indent >= anchor indent,
@@ -1312,6 +1336,13 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
                       pnt.sI += skip
                       pnt.cI = spaces
                       pnt.rI++
+                      if (lex.src[pnt.sI] === '[' || lex.src[pnt.sI] === '{') {
+                        let oc = lex.src[pnt.sI]
+                        let tkn = lex.token(oc === '[' ? '#OS' : '#OB', undefined, oc, pnt)
+                        pnt.sI += 1
+                        pnt.cI += 1
+                        return tkn
+                      }
                       fwd = lex.refwd()
                       continue yamlMatchLoop
                     }
@@ -1319,6 +1350,27 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
                 }
                 pnt.sI += skip
                 pnt.cI += skip
+                // Skip an inline comment after the tag (e.g. `!!map # note`),
+                // so the `#` is not mis-lexed as #BD.
+                {
+                  let ci = pnt.sI
+                  while (lex.src[ci] === ' ' || lex.src[ci] === '\t') ci++
+                  if (lex.src[ci] === '#') {
+                    while (ci < lex.src.length && lex.src[ci] !== '\n' && lex.src[ci] !== '\r') ci++
+                    pnt.cI += (ci - pnt.sI)
+                    pnt.sI = ci
+                  }
+                }
+                // A tagged flow collection (!!map {..} / !!seq [..]): emit the
+                // opener here — we've advanced past the tag, so jsonic would
+                // otherwise mis-lex it as #BD (see anchor handler above).
+                if (lex.src[pnt.sI] === '[' || lex.src[pnt.sI] === '{') {
+                  let oc = lex.src[pnt.sI]
+                  let tkn = lex.token(oc === '[' ? '#OS' : '#OB', undefined, oc, pnt)
+                  pnt.sI += 1
+                  pnt.cI += 1
+                  return tkn
+                }
                 // Don't return a token — let the next lex cycle see the actual value.
                 fwd = lex.refwd()
                 continue yamlMatchLoop
@@ -1972,17 +2024,45 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
                 updateFlowState(lex.src as string, pnt.sI)
                 if (_flowDepth > 0) {
                   // Inside flow collection — consume whitespace, don't emit #IN.
+                  // Track rows/last-newline so the point stays consistent: the
+                  // next token must land on a valid 1-based column, else jsonic
+                  // rejects it (a close ] at cI=0 lexes as #BD, not #CS).
                   let pos = 0
+                  let rows = 0
+                  let lastNL = -1
                   while (pos < fwd.length &&
                     (fwd[pos] === '\n' || fwd[pos] === '\r' || fwd[pos] === ' ' || fwd[pos] === '\t')) {
+                    if (fwd[pos] === '\n') { rows++; lastNL = pos }
                     pos++
                   }
                   // Also skip comment lines inside flow collections.
                   if (pos < fwd.length && fwd[pos] === '#') {
                     while (pos < fwd.length && fwd[pos] !== '\n' && fwd[pos] !== '\r') pos++
                   }
+                  // If the whitespace is immediately followed by flow
+                  // punctuation ([ ] { } ,), emit that token here. We've
+                  // already advanced past the newline, so handing back to
+                  // jsonic's fixed-token matcher would mis-lex it as #BD (it
+                  // never gets a clean shot at the advanced position). The
+                  // yaml matcher itself does not otherwise produce these.
+                  let nextCh = fwd[pos]
+                  let punctTin = nextCh === '[' ? '#OS'
+                    : nextCh === '{' ? '#OB'
+                    : nextCh === ']' ? '#CS'
+                    : nextCh === '}' ? '#CB'
+                    : nextCh === ',' ? '#CA' : ''
                   pnt.sI += pos
-                  pnt.cI = 0
+                  pnt.rI += rows
+                  // Column of the next char: chars consumed since the last
+                  // newline (1-based). If no newline was consumed (only spaces
+                  // after a bare \r), advance the existing column instead.
+                  pnt.cI = lastNL >= 0 ? pos - lastNL : pnt.cI + pos
+                  if (punctTin) {
+                    let tkn = lex.token(punctTin, undefined, nextCh, pnt)
+                    pnt.sI += 1
+                    pnt.cI += 1
+                    return tkn
+                  }
                   // Re-run yamlMatcher from new position.
                   fwd = lex.refwd()
                   continue yamlMatchLoop
