@@ -13,7 +13,7 @@ import (
 )
 
 // Version is the module version, injected at release by `make publish-go`.
-const Version = "0.2.0"
+const Version = "0.2.1"
 
 // YamlOptions configures the YAML parser plugin.
 // Currently empty — reserved for future extension.
