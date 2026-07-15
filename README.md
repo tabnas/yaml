@@ -1,5 +1,12 @@
 # @tabnas/yaml
 
+<!-- tabnas-badges -->
+[![npm](https://tabnas.github.io/status/badges/yaml-npm.svg)](https://www.npmjs.com/package/@tabnas/yaml)
+[![CI](https://github.com/tabnas/yaml/actions/workflows/ci.yml/badge.svg)](https://github.com/tabnas/yaml/actions/workflows/ci.yml)
+[![go](https://tabnas.github.io/status/badges/yaml-go.svg)](https://pkg.go.dev/github.com/tabnas/yaml/go)
+[![tabnas standard](https://tabnas.github.io/status/badges/yaml-standard.svg)](https://tabnas.github.io/status/)
+<!-- /tabnas-badges -->
+
 A [Tabnas](https://github.com/tabnas/parser) grammar plugin that parses
 a core subset of YAML into plain values, built on the relaxed-JSON
 [`jsonic`](https://github.com/tabnas/jsonic) grammar. Available for both
