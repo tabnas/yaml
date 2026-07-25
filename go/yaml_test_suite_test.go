@@ -28,6 +28,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	jsonic "github.com/tabnas/jsonic/go"
 )
 
 var suiteDir = filepath.Join("..", "test", "yaml-test-suite")
@@ -250,11 +252,17 @@ func looseNumEq(a, b float64) bool {
 	return a == b && math.Signbit(a) == math.Signbit(b)
 }
 
-// asKeyMap views a JSON-ish composite value ([]any or map[string]any) as
-// a string-keyed map, matching JS Object.keys semantics where array
-// indices become string keys.
+// asKeyMap views a JSON-ish composite value ([]any, map[string]any, or the
+// insertion-ordered *jsonic.OrderedMap the engine now yields for parsed
+// objects) as a string-keyed map, matching JS Object.keys semantics where
+// array indices become string keys. This comparison is value-based (not
+// order-based), so the OrderedMap's key order is intentionally dropped.
 func asKeyMap(v any) (map[string]any, bool) {
 	switch c := v.(type) {
+	case *jsonic.OrderedMap:
+		return c.Vals, true
+	case jsonic.OrderedMap:
+		return c.Vals, true
 	case map[string]any:
 		return c, true
 	case []any:

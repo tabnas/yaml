@@ -35,7 +35,8 @@ is safe for concurrent use.
 
 ```go
 result, err := tabnasyaml.Parse("name: Alice\nitems:\n  - one\n  - two\n")
-// result == map[string]any{"name": "Alice", "items": []any{"one", "two"}}
+// result is a *jsonic.OrderedMap holding, in source order:
+//   "name" -> "Alice", "items" -> []any{"one", "two"}
 ```
 
 ### `MakeJsonic`
@@ -133,9 +134,9 @@ The module version.
 
 The document value follows these YAML-to-Go mappings:
 
-| YAML            | Go                |
-| --------------- | ----------------- |
-| mapping         | `map[string]any`  |
+| YAML            | Go                     |
+| --------------- | ---------------------- |
+| mapping         | `*jsonic.OrderedMap`   |
 | sequence        | `[]any`           |
 | number          | `float64`         |
 | string          | `string`          |

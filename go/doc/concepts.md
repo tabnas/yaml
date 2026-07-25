@@ -144,7 +144,7 @@ goes through the engine after `.use()`. Go adds the convenience
 
 | YAML            | TypeScript            | Go                |
 | --------------- | --------------------- | ----------------- |
-| mapping         | `object`              | `map[string]any`  |
+| mapping         | `object`              | `*jsonic.OrderedMap` |
 | sequence        | `Array`               | `[]any`           |
 | number          | `number`              | `float64`         |
 | string          | `string`              | `string`          |

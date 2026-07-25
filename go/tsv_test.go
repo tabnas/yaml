@@ -79,19 +79,25 @@ func runTSVSuite(t *testing.T, filename string) {
 			if err != nil {
 				t.Fatalf("Parse error: %v\nInput: %q", err, tc.input)
 			}
-			// Normalize through JSON for comparison.
+			// The parser now preserves source key order (parsed objects are
+			// insertion-ordered *jsonic.OrderedMap), and the expected JSON in
+			// these fixtures is authored in source order. Marshaling the
+			// result therefore reproduces the fixture byte-for-byte, so we
+			// compare against the RAW expected string — this verifies both
+			// the values AND the key order. (Re-marshaling the expected via a
+			// plain map[string]any would reorder keys alphabetically and hide
+			// the order, so we validate the expected fixture is itself valid
+			// JSON, then compare strings directly.)
 			gotBytes, err := json.Marshal(result)
 			if err != nil {
 				t.Fatalf("Failed to marshal result: %v", err)
 			}
-			// Parse expected JSON and re-marshal for consistent formatting.
 			var expectedVal any
 			if err := json.Unmarshal([]byte(tc.expected), &expectedVal); err != nil {
 				t.Fatalf("Failed to parse expected JSON %q: %v", tc.expected, err)
 			}
-			wantBytes, _ := json.Marshal(expectedVal)
-			if string(gotBytes) != string(wantBytes) {
-				t.Errorf("Mismatch:\n  Got:  %s\n  Want: %s", gotBytes, wantBytes)
+			if string(gotBytes) != tc.expected {
+				t.Errorf("Mismatch:\n  Got:  %s\n  Want: %s", gotBytes, tc.expected)
 			}
 		})
 	}

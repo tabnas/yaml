@@ -53,7 +53,7 @@ func TestStringWithSpecialChars(t *testing.T) {
 // TS: timestamp-date — should parse as string or date; just non-nil.
 func TestTimestampDate(t *testing.T) {
 	result := y(t, "a: 2024-01-15")
-	m, ok := result.(map[string]any)
+	m, ok := asMap(result)
 	if !ok {
 		t.Fatalf("expected map, got %T", result)
 	}
@@ -65,7 +65,7 @@ func TestTimestampDate(t *testing.T) {
 // TS: timestamp-datetime
 func TestTimestampDatetime(t *testing.T) {
 	result := y(t, "a: 2024-01-15T10:30:00Z")
-	m, ok := result.(map[string]any)
+	m, ok := asMap(result)
 	if !ok {
 		t.Fatalf("expected map, got %T", result)
 	}

@@ -3,7 +3,7 @@
 This walks you from nothing to a working parse, in order. Each step
 builds on the last. When you finish you will have installed the
 package, parsed a small block document with the top-level `Parse`
-function, and read the result back as a Go `map[string]any`.
+function, and read the result back as a `*jsonic.OrderedMap`.
 
 For a recipe-style index of individual tasks, see the
 [how-to guide](guide.md). For exact signatures see the
@@ -54,23 +54,28 @@ flags:
 }
 ```
 
-A top-level mapping comes back as `map[string]any`. The indented `-`
-lines become a `[]any`, `true` becomes a `bool`, and the nested `flags:`
-block becomes a nested `map[string]any`.
+A top-level mapping comes back as a `*jsonic.OrderedMap` (source key order
+preserved). The indented `-` lines become a `[]any`, `true` becomes a
+`bool`, and the nested `flags:` block becomes a nested `*jsonic.OrderedMap`.
 
 
 ## 3. Reach into the result
 
-`Parse` returns `any`, so type-assert to the concrete shape you expect:
+`Parse` returns `any`, so type-assert to the concrete shape you expect. A
+mapping comes back as a `*jsonic.OrderedMap`, which preserves source key
+order; read values with `Get`:
 
 ```go
 result, _ := tabnasyaml.Parse(`name: Alice
 port: 5432
 `)
 
-m := result.(map[string]any)
-name := m["name"].(string)   // "Alice"
-port := m["port"].(float64)  // 5432 — all numbers are float64
+m := result.(*jsonic.OrderedMap)
+name, _ := m.Get("name")     // "Alice"
+port, _ := m.Get("port")     // 5432 — all numbers are float64
+_ = name.(string)
+_ = port.(float64)
+_ = m.Keys                   // ["name", "port"] — in source order
 ```
 
 Numbers always come back as `float64` (the engine's default numeric

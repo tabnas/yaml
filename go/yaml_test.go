@@ -5,6 +5,8 @@ import (
 	"math"
 	"reflect"
 	"testing"
+
+	jsonic "github.com/tabnas/jsonic/go"
 )
 
 // y is a helper that parses YAML and returns the result.
@@ -15,6 +17,22 @@ func y(t *testing.T, src string) any {
 		t.Fatalf("Parse error: %v\nInput: %q", err, src)
 	}
 	return result
+}
+
+// asMap views a parsed object value as a plain map[string]any. The shared
+// jsonic engine now returns parsed objects as an insertion-ordered
+// *jsonic.OrderedMap; this unwraps either shape (dropping order) so tests
+// can index into the result by key.
+func asMap(v any) (map[string]any, bool) {
+	switch m := v.(type) {
+	case *jsonic.OrderedMap:
+		return m.Vals, true
+	case jsonic.OrderedMap:
+		return m.Vals, true
+	case map[string]any:
+		return m, true
+	}
+	return nil, false
 }
 
 // jsonNormalize round-trips through JSON to normalize types (e.g., int→float64).
@@ -174,7 +192,7 @@ func TestHexNumber(t *testing.T) {
 
 func TestPositiveInfinity(t *testing.T) {
 	result := y(t, "a: .inf")
-	m, ok := result.(map[string]any)
+	m, ok := asMap(result)
 	if !ok {
 		t.Fatalf("expected map, got %T", result)
 	}
@@ -186,7 +204,7 @@ func TestPositiveInfinity(t *testing.T) {
 
 func TestNegativeInfinity(t *testing.T) {
 	result := y(t, "a: -.inf")
-	m, ok := result.(map[string]any)
+	m, ok := asMap(result)
 	if !ok {
 		t.Fatalf("expected map, got %T", result)
 	}
@@ -198,7 +216,7 @@ func TestNegativeInfinity(t *testing.T) {
 
 func TestNaN(t *testing.T) {
 	result := y(t, "a: .nan")
-	m, ok := result.(map[string]any)
+	m, ok := asMap(result)
 	if !ok {
 		t.Fatalf("expected map, got %T", result)
 	}

@@ -1,7 +1,6 @@
 package tabnasyaml
 
 import (
-	"encoding/json"
 	"fmt"
 	"math"
 	"regexp"
@@ -154,12 +153,16 @@ func (s *flowScanState) advance(src string, target int) {
 
 // Parse parses a YAML string and returns the resulting Go value.
 // The returned value can be:
-//   - map[string]any for mappings
+//   - *jsonic.OrderedMap for mappings (insertion-ordered: keys are exposed
+//     in source order; use its Get/Has/Len methods, or its exported Keys /
+//     Vals fields, to read entries — Vals is the underlying map[string]any
+//     when order does not matter)
 //   - []any for sequences
 //   - float64 for numbers
 //   - string for strings
 //   - bool for booleans
 //   - nil for null or empty input
+//
 // defaultParser is a lazily-created instance reused by Parse, so repeated
 // calls don't rebuild the engine and grammar each time (building the YAML
 // grammar dominates a parse — see perf_test.go). Parsing builds a fresh
@@ -201,7 +204,7 @@ var yamlValueMap = map[string]any{
 	"true": true, "True": true, "TRUE": true,
 	"false": false, "False": false, "FALSE": false,
 	"null": nil, "Null": nil, "NULL": nil,
-	"~": nil,
+	"~":   nil,
 	"yes": true, "Yes": true, "YES": true,
 	"no": false, "No": false, "NO": false,
 	"on": true, "On": true, "ON": true,
@@ -256,34 +259,173 @@ func parseYamlNumber(text string) (float64, bool) {
 	return 0, false
 }
 
-// deepCopy performs a JSON-based deep copy of a value.
+// deepCopy performs a structural deep copy of a value, preserving both the
+// concrete container type and, for insertion-ordered *jsonic.OrderedMap
+// objects, their source key order. Anchors deep-copy their value so a later
+// merge or mutation of one alias cannot leak into another. (A JSON
+// round-trip would flatten *OrderedMap back to an alphabetical
+// map[string]any, silently dropping source order — hence the manual walk.)
 func deepCopy(v any) any {
-	if v == nil {
-		return nil
-	}
 	switch val := v.(type) {
+	case *jsonic.OrderedMap:
+		out := jsonic.NewOrderedMap()
+		out.Sorted = val.Sorted
+		for _, k := range val.Keys {
+			out.Set(k, deepCopy(val.Vals[k]))
+		}
+		return out
+	case jsonic.OrderedMap:
+		return deepCopy(&val)
 	case map[string]any:
-		data, err := json.Marshal(val)
-		if err != nil {
-			return v
+		out := make(map[string]any, len(val))
+		for k, item := range val {
+			out[k] = deepCopy(item)
 		}
-		var result map[string]any
-		if err := json.Unmarshal(data, &result); err != nil {
-			return v
-		}
-		return result
+		return out
 	case []any:
-		data, err := json.Marshal(val)
-		if err != nil {
-			return v
+		out := make([]any, len(val))
+		for i, item := range val {
+			out[i] = deepCopy(item)
 		}
-		var result []any
-		if err := json.Unmarshal(data, &result); err != nil {
-			return v
-		}
-		return result
+		return out
 	default:
 		return v
+	}
+}
+
+// asStringMap views a parsed object value as a plain map[string]any.
+//
+// The shared jsonic engine now returns parsed JSON objects as an
+// insertion-ordered *jsonic.OrderedMap instead of a bare map[string]any.
+// Grammar text is parsed with the stock jsonic parser, so the values this
+// module reads back from that parse (the embedded grammar spec) are
+// *OrderedMap. This helper unwraps either shape to the underlying map for
+// value-only access; callers that reconstruct typed specs from it do not
+// depend on key order.
+func asStringMap(v any) (map[string]any, bool) {
+	switch m := v.(type) {
+	case *jsonic.OrderedMap:
+		return m.Vals, true
+	case jsonic.OrderedMap:
+		return m.Vals, true
+	case map[string]any:
+		return m, true
+	}
+	return nil, false
+}
+
+// orderedEntries returns the ordered (key, value) entries of a parsed
+// object value. Block maps are *jsonic.OrderedMap (source order); flow /
+// inline element maps built by this plugin are plain map[string]any (whose
+// iteration order is undefined, so keys are visited in Go's map order).
+func orderedEntries(v any) ([]string, map[string]any) {
+	switch m := v.(type) {
+	case *jsonic.OrderedMap:
+		return m.Keys, m.Vals
+	case jsonic.OrderedMap:
+		return m.Keys, m.Vals
+	case map[string]any:
+		keys := make([]string, 0, len(m))
+		for k := range m {
+			keys = append(keys, k)
+		}
+		return keys, m
+	}
+	return nil, nil
+}
+
+// setNodeKey assigns key→val on a parsed mapping node, whether it is an
+// insertion-ordered *OrderedMap (source-order block/flow map) or a plain
+// map[string]any (defensive fallback).
+func setNodeKey(node any, key string, val any) {
+	switch m := node.(type) {
+	case *jsonic.OrderedMap:
+		m.Set(key, val)
+	case map[string]any:
+		m[key] = val
+	}
+}
+
+// applyMergeKeys resolves the YAML `<<` merge key on a parsed mapping node
+// in place, preserving source key order. Explicit keys win over merged
+// keys; the merged (non-duplicate) keys are spliced in at the position the
+// `<<` key occupied. The node may be an insertion-ordered *OrderedMap
+// (block mapping) — the common case — or, defensively, a plain
+// map[string]any (order-free flow mapping).
+func applyMergeKeys(node any) {
+	om, ok := node.(*jsonic.OrderedMap)
+	if !ok {
+		// Plain map (flow mapping): no order to preserve; merge by value.
+		m, ok := node.(map[string]any)
+		if !ok {
+			return
+		}
+		mergeVal, hasMerge := m["<<"]
+		if !hasMerge {
+			return
+		}
+		delete(m, "<<")
+		for _, mm := range mergeSources(mergeVal) {
+			mkeys, mvals := orderedEntries(mm)
+			for _, k := range mkeys {
+				if _, exists := m[k]; !exists {
+					m[k] = mvals[k]
+				}
+			}
+		}
+		return
+	}
+	mergeVal, hasMerge := om.Get("<<")
+	if !hasMerge {
+		return
+	}
+	// Rebuild key order, expanding `<<` into its (non-duplicate) merged
+	// keys at its original position. Explicit keys keep their positions.
+	explicit := make(map[string]bool, len(om.Keys))
+	for _, k := range om.Keys {
+		if k != "<<" {
+			explicit[k] = true
+		}
+	}
+	newKeys := make([]string, 0, len(om.Keys))
+	seen := make(map[string]bool, len(om.Keys))
+	for _, k := range om.Keys {
+		if k == "<<" {
+			for _, mm := range mergeSources(mergeVal) {
+				mkeys, mvals := orderedEntries(mm)
+				for _, mk := range mkeys {
+					if explicit[mk] || seen[mk] {
+						continue
+					}
+					if _, present := om.Vals[mk]; !present {
+						om.Vals[mk] = mvals[mk]
+					}
+					newKeys = append(newKeys, mk)
+					seen[mk] = true
+				}
+			}
+			continue
+		}
+		if seen[k] {
+			continue
+		}
+		newKeys = append(newKeys, k)
+		seen[k] = true
+	}
+	delete(om.Vals, "<<")
+	om.Keys = newKeys
+}
+
+// mergeSources normalizes a `<<` merge value into the list of source
+// mappings to merge, in order. A single mapping merges itself; a sequence
+// merges each element (earlier entries take precedence in YAML merge
+// semantics, matching first-wins insertion below).
+func mergeSources(mergeVal any) []any {
+	switch mv := mergeVal.(type) {
+	case []any:
+		return mv
+	default:
+		return []any{mergeVal}
 	}
 }
 
@@ -1281,6 +1423,7 @@ func Yaml(j *jsonic.Jsonic, opts map[string]any) error {
 func isWordByte(b byte) bool {
 	return (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9')
 }
+
 // handleBlockScalar processes | and > block scalar indicators.
 func handleBlockScalar(lex *jsonic.Lex, pnt *jsonic.Point, src, fwd string, ch byte) *jsonic.LexCheckResult {
 	fold := ch == '>'
@@ -2901,6 +3044,7 @@ const grammarText = `
   }
 }
 `
+
 // --- END EMBEDDED yaml-grammar.jsonic ---
 
 // configureGrammarRules installs the YAML grammar (alts from the declarative
@@ -3016,9 +3160,7 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 		"@implicit-null-pair": jsonic.AltAction(func(r *jsonic.Rule, _ *jsonic.Context) {
 			key := extractKey(r.O0, anchors)
 			r.EnsureU()["key"] = key
-			if m, ok := r.Node.(map[string]any); ok {
-				m[formatKey(key)] = nil
-			}
+			setNodeKey(r.Node, formatKey(key), nil)
 		}),
 		"@qm-pairkey": jsonic.AltAction(func(r *jsonic.Rule, _ *jsonic.Context) {
 			r.EnsureU()["key"] = extractKey(r.O1, anchors)
@@ -3026,9 +3168,7 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 		"@qm-implicit-null-pair": jsonic.AltAction(func(r *jsonic.Rule, _ *jsonic.Context) {
 			key := extractKey(r.O1, anchors)
 			r.EnsureU()["key"] = key
-			if m, ok := r.Node.(map[string]any); ok {
-				m[formatKey(key)] = nil
-			}
+			setNodeKey(r.Node, formatKey(key), nil)
 		}),
 	}
 
@@ -3038,12 +3178,12 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 	if err != nil {
 		panic(fmt.Sprintf("yaml: failed to parse grammar text: %v", err))
 	}
-	parsedMap, ok := parsed.(map[string]any)
+	parsedMap, ok := asStringMap(parsed)
 	if !ok {
 		panic(fmt.Sprintf("yaml: grammar text did not parse to a map: %T", parsed))
 	}
 	gs := &jsonic.GrammarSpec{Ref: refs}
-	if ruleMap, ok := parsedMap["rule"].(map[string]any); ok {
+	if ruleMap, ok := asStringMap(parsedMap["rule"]); ok {
 		gs.Rule = mapToGrammarRules(ruleMap)
 	}
 	if err := j.Grammar(gs); err != nil {
@@ -3088,7 +3228,7 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 					val, exists := anchors[alias]
 					if exists {
 						switch v := val.(type) {
-						case map[string]any, []any:
+						case *jsonic.OrderedMap, jsonic.OrderedMap, map[string]any, []any:
 							r.Node = deepCopy(v)
 						default:
 							r.Node = val
@@ -3104,14 +3244,14 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 							openNode := r.U["yamlAnchorOpenNode"]
 							if openNode != nil {
 								switch openNode.(type) {
-								case map[string]any, []any:
+								case *jsonic.OrderedMap, jsonic.OrderedMap, map[string]any, []any:
 									continue
 								}
 							}
 						}
 						val := r.Node
 						switch v := val.(type) {
-						case map[string]any, []any:
+						case *jsonic.OrderedMap, jsonic.OrderedMap, map[string]any, []any:
 							val = deepCopy(v)
 						}
 						anchors[anchor.name] = val
@@ -3214,48 +3354,25 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 			r.EnsureK()["yamlIn"] = r.N["in"]
 		})
 		rs.AddAC(func(r *jsonic.Rule, ctx *jsonic.Context) {
-			m, ok := r.Node.(map[string]any)
-			if !ok {
-				return
-			}
-			mergeVal, hasMerge := m["<<"]
-			if !hasMerge {
-				return
-			}
-			delete(m, "<<")
-			switch mv := mergeVal.(type) {
-			case []any:
-				for _, item := range mv {
-					if mm, ok := item.(map[string]any); ok {
-						for k, v := range mm {
-							if _, exists := m[k]; !exists {
-								m[k] = v
-							}
-						}
-					}
-				}
-			case map[string]any:
-				for k, v := range mv {
-					if _, exists := m[k]; !exists {
-						m[k] = v
-					}
-				}
-			}
+			applyMergeKeys(r.Node)
 		})
 	})
 
 	j.Rule("yamlElemMap", func(rs *jsonic.RuleSpec, _ *jsonic.Parser) {
 		rs.AddBO(func(r *jsonic.Rule, ctx *jsonic.Context) {
-			r.Node = make(map[string]any)
+			// Build inline/flow element mappings as insertion-ordered maps
+			// so they preserve source key order, matching the block-mapping
+			// path (jsonic core now yields *OrderedMap) and the TS engine.
+			r.Node = jsonic.NewOrderedMap()
 		})
 		rs.AddBC(func(r *jsonic.Rule, ctx *jsonic.Context) {
 			if key := r.U["key"]; key != nil {
-				if m, ok := r.Node.(map[string]any); ok {
+				if m, ok := r.Node.(*jsonic.OrderedMap); ok {
 					val := r.Child.Node
 					if jsonic.IsUndefined(val) {
 						val = nil
 					}
-					m[formatKey(key)] = val
+					m.Set(formatKey(key), val)
 				}
 			}
 		})
@@ -3264,12 +3381,12 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 	j.Rule("yamlElemPair", func(rs *jsonic.RuleSpec, _ *jsonic.Parser) {
 		rs.AddBC(func(r *jsonic.Rule, ctx *jsonic.Context) {
 			if key := r.U["key"]; key != nil {
-				if m, ok := r.Node.(map[string]any); ok {
+				if m, ok := r.Node.(*jsonic.OrderedMap); ok {
 					val := r.Child.Node
 					if jsonic.IsUndefined(val) {
 						val = nil
 					}
-					m[formatKey(key)] = val
+					m.Set(formatKey(key), val)
 				}
 			}
 		})
@@ -3280,7 +3397,7 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 func mapToGrammarRules(ruleMap map[string]any) map[string]*jsonic.GrammarRuleSpec {
 	rules := make(map[string]*jsonic.GrammarRuleSpec, len(ruleMap))
 	for name, v := range ruleMap {
-		rm, ok := v.(map[string]any)
+		rm, ok := asStringMap(v)
 		if !ok {
 			continue
 		}
@@ -3299,42 +3416,44 @@ func mapToGrammarRules(ruleMap map[string]any) map[string]*jsonic.GrammarRuleSpe
 // parseGrammarAltsOrSpec converts parsed JSON-like values into either
 // []*GrammarAltSpec or *GrammarAltListSpec depending on shape.
 func parseGrammarAltsOrSpec(v any) any {
-	switch val := v.(type) {
+	switch v.(type) {
 	case []any:
-		return mapsToAlts(val)
-	case map[string]any:
-		alts, _ := val["alts"].([]any)
-		spec := &jsonic.GrammarAltListSpec{Alts: mapsToAlts(alts)}
-		if inj, ok := val["inject"].(map[string]any); ok {
-			spec.Inject = &jsonic.GrammarInjectSpec{}
-			if app, ok := inj["append"].(bool); ok {
-				spec.Inject.Append = app
-			}
-			if del, ok := inj["delete"].([]any); ok {
-				for _, d := range del {
-					if n, ok := toInt(d); ok {
-						spec.Inject.Delete = append(spec.Inject.Delete, n)
-					}
-				}
-			}
-			if mv, ok := inj["move"].([]any); ok {
-				for _, m := range mv {
-					if n, ok := toInt(m); ok {
-						spec.Inject.Move = append(spec.Inject.Move, n)
-					}
+		return mapsToAlts(v.([]any))
+	}
+	val, ok := asStringMap(v)
+	if !ok {
+		return nil
+	}
+	alts, _ := val["alts"].([]any)
+	spec := &jsonic.GrammarAltListSpec{Alts: mapsToAlts(alts)}
+	if inj, ok := asStringMap(val["inject"]); ok {
+		spec.Inject = &jsonic.GrammarInjectSpec{}
+		if app, ok := inj["append"].(bool); ok {
+			spec.Inject.Append = app
+		}
+		if del, ok := inj["delete"].([]any); ok {
+			for _, d := range del {
+				if n, ok := toInt(d); ok {
+					spec.Inject.Delete = append(spec.Inject.Delete, n)
 				}
 			}
 		}
-		return spec
+		if mv, ok := inj["move"].([]any); ok {
+			for _, m := range mv {
+				if n, ok := toInt(m); ok {
+					spec.Inject.Move = append(spec.Inject.Move, n)
+				}
+			}
+		}
 	}
-	return nil
+	return spec
 }
 
 // mapsToAlts converts an []any of parsed alt maps into []*GrammarAltSpec.
 func mapsToAlts(list []any) []*jsonic.GrammarAltSpec {
 	out := make([]*jsonic.GrammarAltSpec, 0, len(list))
 	for _, item := range list {
-		m, ok := item.(map[string]any)
+		m, ok := asStringMap(item)
 		if !ok {
 			continue
 		}
@@ -3360,13 +3479,13 @@ func mapsToAlts(list []any) []*jsonic.GrammarAltSpec {
 		if g, ok := m["g"].(string); ok {
 			a.G = g
 		}
-		if u, ok := m["u"].(map[string]any); ok {
+		if u, ok := asStringMap(m["u"]); ok {
 			a.U = u
 		}
-		if k, ok := m["k"].(map[string]any); ok {
+		if k, ok := asStringMap(m["k"]); ok {
 			a.K = k
 		}
-		if n, ok := m["n"].(map[string]any); ok {
+		if n, ok := asStringMap(m["n"]); ok {
 			a.N = make(map[string]int, len(n))
 			for nk, nv := range n {
 				if ni, ok := toInt(nv); ok {

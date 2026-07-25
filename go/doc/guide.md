@@ -11,17 +11,21 @@ import tabnasyaml "github.com/tabnas/yaml/go"
 ```
 
 
-## Get a `map[string]any` from arbitrary YAML
+## Get a mapping (`*jsonic.OrderedMap`) from arbitrary YAML
 
 `tabnasyaml.Parse` returns `any`. Type-assert at the call site, and handle the
 case where the top level is not a mapping:
+
+A mapping is returned as a `*jsonic.OrderedMap` (it preserves source key
+order); read entries with `Get`, or reach the underlying `map[string]any`
+via its `Vals` field when order does not matter.
 
 ```go
 result, err := tabnasyaml.Parse(src)
 if err != nil {
     return nil, err
 }
-m, ok := result.(map[string]any)
+m, ok := result.(*jsonic.OrderedMap)
 if !ok {
     return nil, fmt.Errorf("expected mapping at top level, got %T", result)
 }

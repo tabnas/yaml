@@ -28,7 +28,11 @@ func TestParity_TrailingCommaAfterDigitInBlock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	value, ok := got.(map[string]any)["value"].(map[string]any)
+	top, ok := asMap(got)
+	if !ok {
+		t.Fatalf("top is not a map: %#v", got)
+	}
+	value, ok := asMap(top["value"])
 	if !ok {
 		t.Fatalf("missing value map: %#v", got)
 	}
@@ -69,7 +73,11 @@ func TestParity_ExplicitKeyInlineBlockMapping(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	paths, ok := got.(map[string]any)["paths"].(map[string]any)
+	top, ok := asMap(got)
+	if !ok {
+		t.Fatalf("top is not a map: %#v", got)
+	}
+	paths, ok := asMap(top["paths"])
 	if !ok {
 		t.Fatalf("missing paths map: %#v", got)
 	}
@@ -86,12 +94,12 @@ func TestParity_ExplicitKeyInlineBlockMapping(t *testing.T) {
 	if !ok {
 		t.Fatalf("missing %q (or unquoted) in paths: %#v", wantKey, paths)
 	}
-	pathMap, ok := pathVal.(map[string]any)
+	pathMap, ok := asMap(pathVal)
 	if !ok {
 		t.Fatalf("path value is not a map: %#v", pathVal)
 	}
-	get, gok := pathMap["get"].(map[string]any)
-	put, pok := pathMap["put"].(map[string]any)
+	get, gok := asMap(pathMap["get"])
+	put, pok := asMap(pathMap["put"])
 	if !gok || !pok {
 		t.Fatalf("expected both get and put: %#v", pathMap)
 	}
@@ -126,15 +134,19 @@ func TestParity_ApostropheInsideDoubleQuotedString(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	paths, ok := got.(map[string]any)["paths"].(map[string]any)
+	top, ok := asMap(got)
+	if !ok {
+		t.Fatalf("top is not a map: %#v", got)
+	}
+	paths, ok := asMap(top["paths"])
 	if !ok {
 		t.Fatalf("missing paths: %#v", got)
 	}
-	a, ok := paths["/a"].(map[string]any)
+	a, ok := asMap(paths["/a"])
 	if !ok {
 		t.Fatalf("missing /a: %#v", paths)
 	}
-	get, ok := a["get"].(map[string]any)
+	get, ok := asMap(a["get"])
 	if !ok {
 		t.Fatalf("missing get: %#v", a)
 	}
