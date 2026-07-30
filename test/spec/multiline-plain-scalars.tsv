@@ -1,0 +1,3 @@
+input	expected	opts
+a: this is\n  a long string	{"a":"this is a long string"}
+a: line one\n  line two\n  line three	{"a":"line one line two line three"}

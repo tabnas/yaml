@@ -1,0 +1,4 @@
+input	expected	opts
+- name: alice\n  age: 30\n- name: bob\n  age: 25	[{"name":"alice","age":30},{"name":"bob","age":25}]
+- a: 1\n- b: 2\n- c: 3	[{"a":1},{"b":2},{"c":3}]
+people:\n  - name: alice\n  - name: bob	{"people":[{"name":"alice"},{"name":"bob"}]}

@@ -1,0 +1,4 @@
+input	expected	opts
+? a\n: 1	{"a":1}
+? a b\n: 1	{"a b":1}
+1: one\n2: two	{"1":"one","2":"two"}

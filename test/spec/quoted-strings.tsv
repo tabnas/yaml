@@ -1,0 +1,15 @@
+input	expected	opts
+a: "hello"	{"a":"hello"}
+a: 'hello'	{"a":"hello"}
+a: "key: value"	{"a":"key: value"}
+a: 'key: value'	{"a":"key: value"}
+a: "line1\\nline2"	{"a":"line1\nline2"}
+a: "col1\\tcol2"	{"a":"col1\tcol2"}
+a: 'line1\\nline2'	{"a":"line1\\nline2"}
+foo: 'a{{q}}b'	{"foo":"a{{q}}b"}
+foo: "a{{q}}b"	{"foo":"a{{q}}b"}
+a: ""	{"a":""}
+a: ''	{"a":""}
+"a b": 1	{"a b":1}
+a: "42"	{"a":"42"}
+a: "true"	{"a":"true"}

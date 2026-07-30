@@ -1,0 +1,4 @@
+input	expected	opts
+value:\n  id: 12,\n  public_repo: false,\n  title: Intro\n	{"value":{"id":"12,","public_repo":"false,","title":"Intro"}}
+paths:\n  ? "/api/foo"\n  : get:\n      summary: get foo\n    put:\n      summary: put foo\n	{"paths":{"\"/api/foo\"":{"get":{"summary":"get foo"},"put":{"summary":"put foo"}}}}
+paths:\n  /a:\n    get:\n      description: "See [Codat's docs](https://example.com/x) for more info."\n      tags:\n        - api\n	{"paths":{"/a":{"get":{"description":"See [Codat's docs](https://example.com/x) for more info.","tags":["api"]}}}}

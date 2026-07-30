@@ -1,0 +1,10 @@
+input	expected	opts
+- a\n- b\n- c	["a","b","c"]
+- a	["a"]
+items:\n  - a\n  - b	{"items":["a","b"]}
+- 1\n- 2\n- 3	[1,2,3]
+- name: alice\n- name: bob	[{"name":"alice"},{"name":"bob"}]
+items:\n  - name: alice\n    age: 30\n  - name: bob\n    age: 25	{"items":[{"name":"alice","age":30},{"name":"bob","age":25}]}
+- - a\n  - b\n- - c\n  - d	[["a","b"],["c","d"]]
+a:\n  b:\n    - x\n    - y	{"a":{"b":["x","y"]}}
+a: 1\nb:\n  - x\n  - y\nc: 3	{"a":1,"b":["x","y"],"c":3}
