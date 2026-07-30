@@ -113,6 +113,11 @@ function runSpec(file: string) {
           return
         }
 
+        // A fixture that says `null` must not be satisfied by a parse that
+        // produced nothing — UNDEFINED is the spelling for that.
+        assert.notStrictEqual(raw, undefined,
+          `${file}:${row.line}: no value; expected ${row.expected}`)
+
         // Round-trip through JSON so null-prototype maps and numeric types
         // compare structurally against the fixture's decoded shape.
         const got = JSON.parse(JSON.stringify(canon(raw)))
