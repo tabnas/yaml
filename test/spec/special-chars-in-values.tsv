@@ -1,0 +1,6 @@
+input	expected	opts
+a: foo#bar	{"a":"foo#bar"}
+url: http://example.com	{"url":"http://example.com"}
+a long key: value	{"a long key":"value"}
+a: some [text] here	{"a":"some [text] here"}
+a: some {text} here	{"a":"some {text} here"}

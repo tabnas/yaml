@@ -1,0 +1,4 @@
+input	expected	opts
+a: 1\r\nb: 2	{"a":1,"b":2}
+a:\r\n  b: 1\r\n  c: 2	{"a":{"b":1,"c":2}}
+- a\r\n- b	["a","b"]

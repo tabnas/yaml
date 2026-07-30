@@ -1,0 +1,8 @@
+input	expected	opts
+a: !!str 42	{"a":"42"}
+a: !!int "42"	{"a":42}
+a: !!float "3.14"	{"a":3.14}
+a: !!bool "true"	{"a":true}
+a: !!null ""	{"a":null}
+a: !!seq\n  - 1\n  - 2	{"a":[1,2]}
+a: !!map\n  x: 1	{"a":{"x":1}}

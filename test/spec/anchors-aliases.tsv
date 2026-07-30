@@ -1,0 +1,5 @@
+input	expected	opts
+a: &ref hello\nb: *ref	{"a":"hello","b":"hello"}
+defaults: &defaults\n  x: 1\n  y: 2\noverride:\n  <<: *defaults\n  y: 3	{"defaults":{"x":1,"y":2},"override":{"y":3,"x":1}}
+a: &items\n  - 1\n  - 2\nb: *items	{"a":[1,2],"b":[1,2]}
+a: &x 10\nb: &y 20\nc: *x\nd: *y	{"a":10,"b":20,"c":10,"d":20}

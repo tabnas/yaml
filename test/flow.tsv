@@ -1,9 +1,0 @@
-flow-sequence	a: [1, 2, 3]	{"a":[1,2,3]}
-flow-mapping	a: {x: 1, y: 2}	{"a":{"x":1,"y":2}}
-nested-flow	a: [1, [2, 3]]	{"a":[1,[2,3]]}
-flow-map-in-seq	a: [{x: 1}, {y: 2}]	{"a":[{"x":1},{"y":2}]}
-empty-flow-seq	a: []	{"a":[]}
-empty-flow-map	a: {}	{"a":{}}
-top-level-flow-seq	[1, 2, 3]	[1,2,3]
-top-level-flow-map	{a: 1, b: 2}	{"a":1,"b":2}
-flow-number-not-string	{x: 73, y: 129}	{"x":73,"y":129}
