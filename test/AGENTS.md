@@ -1,5 +1,13 @@
 # Agents Guide — shared spec fixtures
 
+This directory holds two different things:
+
+- `spec/*.tsv` — the cross-runtime **parity** fixtures described below.
+- `yaml-test-suite/` — the official third-party **conformance** corpus. It
+  is **gitignored and never committed**; `scripts/fetch-yaml-test-suite.sh`
+  fetches it at a pinned commit. See the repo `AGENTS.md` section "The
+  conformance corpus is fetched, never committed".
+
 `spec/*.tsv` holds the cross-runtime conformance fixtures. Both runtimes
 auto-discover and run **every** file in this directory, so a change here
 affects TypeScript and Go together — edit with that in mind.
@@ -16,6 +24,11 @@ Blank lines are skipped, and so are comment lines — a line starting with
 | `input` | YAML source. Escapes `\n` `\r` `\t` `\\` are decoded. |
 | `expected` | A JSON value (the parse result), or `ERROR` / `ERROR:<substring>` for inputs that must fail. |
 | `opts` | Optional JSON object of plugin options (empty means defaults). |
+
+`ERROR` means the input must be rejected; `UNDEFINED` means the parse must
+yield no value at all — in Go that is `jsonic.IsUndefined`, not merely `nil`
+(a bare `nil` used to satisfy both `UNDEFINED` and `null`, so such a fixture
+could not fail).
 
 `expected` and `opts` are **not** escape-decoded — they are raw JSON, so
 JSON's own escape rules apply (`"a\nb"` is a string containing a newline).

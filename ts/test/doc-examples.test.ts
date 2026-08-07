@@ -186,7 +186,12 @@ describe('doc-examples', () => {
   }
 
   it('found at least one tested example (sanity)', () => {
-    // Not a hard failure if a repo has no `// =>` examples yet.
-    assert.ok(testable >= 0, `tested ${testable} doc example block(s)`)
+    // `testable >= 0` was the old assertion: always true, so this guard could
+    // never fire — if the doc extractor silently stopped matching blocks the
+    // suite still went green with zero examples run. This repo's README and
+    // ts/doc guides do carry `// =>` examples, so demand at least one.
+    assert.ok(0 < testable,
+      `no doc example block with a '// =>' assertion was found — the ` +
+      `extractor is broken or the docs lost their examples`)
   })
 })

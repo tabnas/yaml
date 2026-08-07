@@ -5,13 +5,20 @@
 # repo-set go.work + node_modules symlinks (admin/scripts/link.sh).
 
 .PHONY: all build test clean build-ts build-go test-ts test-go \
-        clean-ts clean-go publish-ts publish-go tags-go reset
+        clean-ts clean-go publish-ts publish-go tags-go reset suite
 
 all: build test
 
 build: build-ts build-go
 
 test: test-ts test-go
+
+# --- Third-party conformance corpus ---
+# The official YAML Test Suite is NOT vendored. Fetch it at its pinned commit
+# before testing; both runners also self-fetch and hard-fail if it is absent,
+# so the conformance run can never silently skip.
+suite:
+	bash scripts/fetch-yaml-test-suite.sh
 
 clean: clean-ts clean-go
 
@@ -33,7 +40,7 @@ publish-ts: test-ts
 build-go:
 	cd go && go build ./...
 
-test-go:
+test-go: suite
 	cd go && go test -v ./...
 
 clean-go:

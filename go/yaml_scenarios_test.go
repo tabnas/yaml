@@ -11,36 +11,26 @@ import (
 	"testing"
 )
 
-// baseline parses src and mirrors the TS baseline pattern:
+// The `baseline` helper used to live here. It mirrored the TS pattern
 //
-//	let result: any
 //	try { result = y(src) } catch (e) { result = 'ERROR' }
 //	assert.ok(result != null)
 //
-// i.e. a parse error is acceptable, but a successful parse must not
-// produce a nil result.
-func baseline(t *testing.T, src string) {
-	t.Helper()
-	result, err := Parse(src)
-	if err != nil {
-		// Acceptable: TS records 'ERROR' and passes.
-		return
-	}
-	if result == nil {
-		t.Errorf("expected non-nil result or error for %q, got nil", src)
-	}
-}
+// which accepted a parse error OR any non-nil value — i.e. it could not fail
+// for any input, in either runtime. Both sides now assert the exact observed
+// value instead, so a behaviour change shows up as a diff.
 
 // ===== BLOCK MAPPINGS =====
 
-// TS: colon-space-required — "a:b" baseline behavior (error or non-nil).
+// TS: colon-space-required — no space after the colon, so the whole line is
+// one plain scalar.
 func TestColonSpaceRequired(t *testing.T) {
-	baseline(t, "a:b")
+	expectEqual(t, y(t, "a:b"), "a:b")
 }
 
-// TS: multiple-trailing-newlines — baseline behavior (error or non-nil).
+// TS: multiple-trailing-newlines
 func TestMultipleTrailingNewlines(t *testing.T) {
-	baseline(t, "a: 1\n\n\n")
+	expectEqual(t, y(t, "a: 1\n\n\n"), map[string]any{"a": float64(1)})
 }
 
 // ===== SCALAR TYPES =====
@@ -50,28 +40,16 @@ func TestStringWithSpecialChars(t *testing.T) {
 	expectEqual(t, y(t, "a: hello, world!"), map[string]any{"a": "hello, world!"})
 }
 
-// TS: timestamp-date — should parse as string or date; just non-nil.
+// TS: timestamp-date — this subset does not resolve the timestamp type: the
+// value stays a plain string. Pinned exactly rather than just "not nil".
 func TestTimestampDate(t *testing.T) {
-	result := y(t, "a: 2024-01-15")
-	m, ok := asMap(result)
-	if !ok {
-		t.Fatalf("expected map, got %T", result)
-	}
-	if m["a"] == nil {
-		t.Errorf("expected non-nil value for a, got nil")
-	}
+	expectEqual(t, y(t, "a: 2024-01-15"), map[string]any{"a": "2024-01-15"})
 }
 
 // TS: timestamp-datetime
 func TestTimestampDatetime(t *testing.T) {
-	result := y(t, "a: 2024-01-15T10:30:00Z")
-	m, ok := asMap(result)
-	if !ok {
-		t.Fatalf("expected map, got %T", result)
-	}
-	if m["a"] == nil {
-		t.Errorf("expected non-nil value for a, got nil")
-	}
+	expectEqual(t, y(t, "a: 2024-01-15T10:30:00Z"),
+		map[string]any{"a": "2024-01-15T10:30:00Z"})
 }
 
 // ===== QUOTED STRINGS =====
@@ -204,35 +182,43 @@ func TestMultilineKey(t *testing.T) {
 
 // ===== INDENTATION EDGE CASES =====
 
-// TS: tab-indentation-rejected — YAML spec disallows tabs for
-// indentation; baseline behavior (error or non-nil).
+// TS: tab-indentation-not-rejected (KNOWN NON-CONFORMANCE) — YAML forbids a
+// tab as indentation, so this document must be REJECTED. It is not: the tab
+// is swallowed and `b` lands at the top level. Pinned as observed so the gap
+// is visible; the conformance dial for it is the yaml-test-suite must-fail
+// group (yaml_test_suite_test.go).
 func TestTabIndentationRejected(t *testing.T) {
-	baseline(t, "a:\n\tb: 1")
+	expectEqual(t, y(t, "a:\n\tb: 1"),
+		map[string]any{"a": nil, "b": float64(1)})
 }
 
-// TS: blank-lines-between-pairs — baseline behavior (error or non-nil).
+// TS: blank-lines-between-pairs
 func TestBlankLinesBetweenPairs(t *testing.T) {
-	baseline(t, "a: 1\n\nb: 2")
+	expectEqual(t, y(t, "a: 1\n\nb: 2"),
+		map[string]any{"a": float64(1), "b": float64(2)})
 }
 
-// TS: blank-lines-in-list — baseline behavior (error or non-nil).
+// TS: blank-lines-in-list
 func TestBlankLinesInList(t *testing.T) {
-	baseline(t, "- a\n\n- b")
+	expectEqual(t, y(t, "- a\n\n- b"), []any{"a", "b"})
 }
 
 // ===== SPECIAL CHARS IN VALUES =====
 
-// TS: value-with-colon-no-space — e.g. URLs; baseline behavior.
+// TS: value-with-colon-no-space — e.g. URLs.
 func TestValueWithColonNoSpace(t *testing.T) {
-	baseline(t, "url: http://example.com")
+	expectEqual(t, y(t, "url: http://example.com"),
+		map[string]any{"url": "http://example.com"})
 }
 
-// TS: value-with-brackets — plain scalar containing brackets; baseline.
+// TS: value-with-brackets — plain scalar containing brackets.
 func TestValueWithBrackets(t *testing.T) {
-	baseline(t, "a: some [text] here")
+	expectEqual(t, y(t, "a: some [text] here"),
+		map[string]any{"a": "some [text] here"})
 }
 
-// TS: value-with-braces — plain scalar containing braces; baseline.
+// TS: value-with-braces — plain scalar containing braces.
 func TestValueWithBraces(t *testing.T) {
-	baseline(t, "a: some {text} here")
+	expectEqual(t, y(t, "a: some {text} here"),
+		map[string]any{"a": "some {text} here"})
 }

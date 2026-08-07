@@ -14,6 +14,16 @@ function y(src: string) {
   return j.parse(src)
 }
 
+// Strict structural equality, with the null-prototype objects the engine
+// returns normalised away. Unlike assert.deepEqual (which the older cases in
+// this file use, and which would let the number 1 match the string '1'), this
+// does NOT coerce types.
+function eq(actual: any, expected: any) {
+  const norm = (v: any) => undefined === v ? '@@UNDEFINED' :
+    JSON.parse(JSON.stringify(v))
+  assert.deepStrictEqual(norm(actual), norm(expected))
+}
+
 
 describe('yaml', () => {
 
@@ -60,12 +70,10 @@ c:
     })
 
     test('colon-space-required', () => {
-      // "a:b" should NOT be treated as key "a" value "b"
-      // Jsonic may parse this differently — baseline the behavior
-      let result: any
-      try { result = y(`a:b`) } catch (e: any) { result = 'ERROR' }
-      // Record whatever happens — this is a baseline
-      assert.ok(result != null)
+      // `a:b` has no space after the colon, so YAML reads the whole thing as
+      // one plain scalar. Pinned exactly: this used to be a `assert.ok(result
+      // != null)` "baseline" that no behaviour change could ever fail.
+      eq(y(`a:b`), 'a:b')
     })
 
     test('colon-at-end-of-line', () => {
@@ -77,9 +85,7 @@ c:
     })
 
     test('multiple-trailing-newlines', () => {
-      let result: any
-      try { result = y(`a: 1\n\n\n`) } catch (e: any) { result = 'ERROR' }
-      assert.ok(result != null)
+      eq(y(`a: 1\n\n\n`), { a: 1 })
     })
   })
 
@@ -229,14 +235,14 @@ c:
     })
 
     test('timestamp-date', () => {
-      // YAML supports dates — should parse as string or Date
-      let result = y(`a: 2024-01-15`)
-      assert.ok(result.a != null)
+      // This subset does not resolve the timestamp type: the value stays a
+      // plain string. Pinned exactly rather than `!= null`.
+      eq(y(`a: 2024-01-15`), { a: '2024-01-15' })
     })
 
     test('timestamp-datetime', () => {
-      let result = y(`a: 2024-01-15T10:30:00Z`)
-      assert.ok(result.a != null)
+      eq(y(`a: 2024-01-15T10:30:00Z`),
+        { a: '2024-01-15T10:30:00Z' })
     })
   })
 
@@ -695,15 +701,12 @@ c:
   describe('directives', () => {
 
     test('yaml-directive', () => {
-      let result: any
-      try { result = y(`%YAML 1.2\n---\na: 1`) } catch (e: any) { result = 'ERROR' }
-      assert.ok(result != null)
+      eq(y(`%YAML 1.2\n---\na: 1`), { a: 1 })
     })
 
     test('tag-directive', () => {
-      let result: any
-      try { result = y(`%TAG ! tag:example.com,2000:\n---\na: 1`) } catch (e: any) { result = 'ERROR' }
-      assert.ok(result != null)
+      eq(y(`%TAG ! tag:example.com,2000:\n---\na: 1`),
+        { a: 1 })
     })
   })
 
@@ -738,30 +741,28 @@ c:
       assert.deepEqual(y(`a:\n  - 1\n  - 2\nb: 3`), { a: [1, 2], b: 3 })
     })
 
-    test('tab-indentation-rejected', () => {
-      // YAML spec says tabs are not allowed for indentation
-      let result: any
-      try { result = y(`a:\n\tb: 1`) } catch (e: any) { result = 'ERROR' }
-      assert.ok(result != null)
+    test('tab-indentation-not-rejected (KNOWN NON-CONFORMANCE)', () => {
+      // YAML forbids a tab as indentation, so this document must be
+      // REJECTED. It is not: the tab is swallowed and `b` lands at the top
+      // level. Pinned as observed so the gap is visible and a fix shows up
+      // as a diff here; the conformance dial for it is the yaml-test-suite
+      // must-fail group (ts/test/yaml-test-suite.test.ts).
+      // The old assertion (`assert.ok(result != null)`) could not fail, and
+      // the test name claimed a rejection that never happened.
+      eq(y(`a:\n\tb: 1`), { a: null, b: 1 })
     })
 
     test('start-of-file-indent', () => {
-      // Content starting with indentation (no leading newline)
-      let result: any
-      try { result = y(`  a: 1`) } catch (e: any) { result = 'ERROR' }
-      assert.ok(result != null)
+      // Content starting with indentation (no leading newline).
+      eq(y(`  a: 1`), { a: 1 })
     })
 
     test('blank-lines-between-pairs', () => {
-      let result: any
-      try { result = y(`a: 1\n\nb: 2`) } catch (e: any) { result = 'ERROR' }
-      assert.ok(result != null)
+      eq(y(`a: 1\n\nb: 2`), { a: 1, b: 2 })
     })
 
     test('blank-lines-in-list', () => {
-      let result: any
-      try { result = y(`- a\n\n- b`) } catch (e: any) { result = 'ERROR' }
-      assert.ok(result != null)
+      eq(y(`- a\n\n- b`), ['a', 'b'])
     })
   })
 
@@ -810,10 +811,9 @@ c:
     })
 
     test('value-with-colon-no-space', () => {
-      // "http://example.com" - colon not followed by space
-      let result: any
-      try { result = y(`url: http://example.com`) } catch (e: any) { result = 'ERROR' }
-      assert.ok(result != null)
+      // "http://example.com" - colon not followed by space.
+      eq(y(`url: http://example.com`),
+        { url: 'http://example.com' })
     })
 
     test('key-with-spaces', () => {
@@ -821,16 +821,12 @@ c:
     })
 
     test('value-with-brackets', () => {
-      // Plain scalar containing brackets
-      let result: any
-      try { result = y(`a: some [text] here`) } catch (e: any) { result = 'ERROR' }
-      assert.ok(result != null)
+      // Plain scalar containing brackets.
+      eq(y(`a: some [text] here`), { a: 'some [text] here' })
     })
 
     test('value-with-braces', () => {
-      let result: any
-      try { result = y(`a: some {text} here`) } catch (e: any) { result = 'ERROR' }
-      assert.ok(result != null)
+      eq(y(`a: some {text} here`), { a: 'some {text} here' })
     })
   })
 

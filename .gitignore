@@ -1,3 +1,7 @@
+# Third-party conformance corpus — NEVER committed. Fetched at a pinned
+# commit by scripts/fetch-yaml-test-suite.sh (see that script for the SHA).
+test/yaml-test-suite/
+
 lib-cov
 *.seed
 *.log

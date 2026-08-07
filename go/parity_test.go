@@ -213,9 +213,14 @@ func runSpecFile(t *testing.T, path string) {
 			}
 
 			// Input that yields no value at all cannot be spelled in JSON.
+			// This used to also accept a plain nil, which meant a Go nil
+			// satisfied BOTH `UNDEFINED` and `null` — so a fixture could not
+			// tell "no document" from "a null document" and passed either
+			// way. TS asserts `=== undefined` here, so Go must too.
 			if row.expected == "UNDEFINED" {
-				if got != nil && !jsonic.IsUndefined(got) {
-					t.Errorf("%s:%d: want no value, got %#v", row.file, row.lineNo, got)
+				if !jsonic.IsUndefined(got) {
+					t.Errorf("%s:%d: want no value (undefined), got %#v",
+						row.file, row.lineNo, got)
 				}
 				return
 			}
