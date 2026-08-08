@@ -63,7 +63,7 @@ j.parse('name: Alice\nitems:\n  - one\n  - two\n')
 | Path | What it is |
 |---|---|
 | [`ts/`](ts/) | **Canonical** TypeScript implementation — the `@tabnas/yaml` package. The entire plugin (lexer matcher + grammar wiring + scalar/anchor/tag handling) lives in the single large [`ts/src/yaml.ts`](ts/src/yaml.ts). Depends on `@tabnas/jsonic` and `@tabnas/parser`. |
-| [`go/`](go/) | Go port — `github.com/tabnas/yaml/go`. The whole plugin is in [`go/yaml.go`](go/yaml.go); the package's `const Version` lives there too. Module path is `github.com/tabnas/yaml/go`, but its only tabnas dependency is **jsonic** (see below). |
+| [`go/`](go/) | Go port — `github.com/tabnas/yaml/go`. The whole plugin is in [`go/yaml.go`](go/yaml.go); the package's `const VERSION` lives there too. Module path is `github.com/tabnas/yaml/go`, but its only tabnas dependency is **jsonic** (see below). |
 | [`yaml-grammar.jsonic`](yaml-grammar.jsonic) | **Single source of truth for the grammar**, written in jsonic syntax. Lives at the **repo root** and is embedded verbatim into `ts/src/yaml.ts` and `go/yaml.go` by [`ts/embed-grammar.js`](ts/embed-grammar.js). Do not edit the embedded copies by hand — edit the `.jsonic` and re-run the embed. |
 | [`test/spec/`](test/spec/) | **Repo-root shared fixtures**, auto-discovered and run by both runtimes: `*.tsv` files with an `input`/`expected`/`opts` header row. See [`test/AGENTS.md`](test/AGENTS.md) for the exact format. |
 | [`test/yaml-test-suite/`](test/yaml-test-suite/) | The upstream YAML Test Suite corpus, vendored verbatim and run by **both** runtimes, plus [`test/yaml-test-suite-lenient.tsv`](test/yaml-test-suite-lenient.tsv), the shared ledger of `error` cases this parser accepts. |
@@ -156,14 +156,18 @@ here. CI checks the whole closure out and builds it first.
 The TS and Go surfaces differ in shape (TS exposes only the plugin; Go
 exposes convenience entry points):
 
-- **TS** (`src/yaml.ts`) exports only the `Yaml` plugin and the
-  `YamlOptions` type. Parse by installing it:
+- **TS** (`src/yaml.ts`) exports the `Yaml` plugin, the `YamlOptions`
+  type, and `const VERSION`. Parse by installing the plugin:
   `new Tabnas().use(jsonic).use(Yaml).parse(src)`. There is **no**
-  exported `parse`/`make`/`Version` on the TS side.
+  exported `parse`/`make` on the TS side.
 - **Go** (`go/yaml.go`) exports `Parse(src) (any, error)` (lazy default
   instance), `MakeJsonic(opts ...YamlOptions) *jsonic.Jsonic` (build a
   configured instance), the `Yaml` plugin (`j.Use(Yaml, opts)`), and
-  `const Version` (kept in sync by `make publish-go`).
+  `const VERSION`.
+- **`VERSION` must always equal `ts/package.json` "version"**, in both
+  runtimes. `go/version_test.go` and `ts/test/version.test.ts` are the CI
+  checks: they read `ts/package.json` and fail (never skip) on drift. The
+  release orchestrator rewrites both constants — never bump one by hand.
 - `YamlOptions{ meta }` exists in both: with `meta: true`, parsing
   returns `{ meta, content }` (per-document `{directives, explicit,
   ended}`) instead of bare content.
@@ -229,7 +233,7 @@ both halves: `make` / `make build` / `make test` run the TS and Go
 sides; `make test-ts` / `make test-go` run one; `make reset` does a
 clean install/rebuild/retest. (The `embed` target lives in `ts/Makefile`,
 not the root one — run `make -C ts embed` or `npm run embed` in `ts/`.)
-`make publish-go V=x.y.z` injects `V` into the `const Version` in
+`make publish-go V=x.y.z` injects `V` into the `const VERSION` in
 `go/yaml.go`, commits, and tags `go/vX.Y.Z`; `make publish-ts` publishes
 the TS package at its `package.json` version.
 

@@ -11,8 +11,10 @@ import (
 	jsonic "github.com/tabnas/jsonic/go"
 )
 
-// Version is the module version, injected at release by `make publish-go`.
-const Version = "0.4.3"
+// VERSION is this module's version. It MUST equal ts/package.json
+// "version": the release orchestrator rewrites both, and
+// TestVersionMatchesPackageJSON fails the build if they drift.
+const VERSION = "0.4.3"
 
 // YamlOptions configures the YAML parser plugin.
 // Currently empty — reserved for future extension.

@@ -113,13 +113,14 @@ type DocMeta struct {
 }
 ```
 
-### `Version`
+### `VERSION`
 
 ```go
-const Version = "0.7.0"
+const VERSION = "0.4.3"
 ```
 
-The module version.
+The module version. It always equals `ts/package.json` "version" —
+`TestVersionMatchesPackageJSON` fails the build if the two drift.
 
 
 ## Return value
