@@ -568,7 +568,16 @@ func Yaml(j *jsonic.Jsonic, opts map[string]any) error {
 
 		// Block scalar: | or >
 		if ch == '|' || ch == '>' {
-			return handleBlockScalar(lex, pnt, src, fwd, ch)
+			if r := handleBlockScalar(lex, pnt, src, fwd, ch); r != nil {
+				return r
+			}
+			// handleBlockScalar returns nil when the indicator is followed by
+			// text on the same line (`a: > x`), which YAML forbids. TS does
+			// not return there — the block-scalar branch is inline and simply
+			// falls through to plain-scalar handling, yielding {"a":"> x"}.
+			// Go must fall through too, or it rejects what TS accepts
+			// (yaml-test-suite S4GJ).
+			return handlePlainScalar(lex, pnt, src, fwd, flowState)
 		}
 
 		// !!type tags in text check context
@@ -1072,9 +1081,35 @@ func Yaml(j *jsonic.Jsonic, opts map[string]any) error {
 						lex.Src[lineStart-1] != '\r' {
 						lineStart--
 					}
+					// Track quoting while scanning: a `#` inside a quoted scalar
+					// is literal, not a comment start. Without this, the value in
+					// {"d":"a #b","e":1} swallows the rest of the line and the
+					// following key never lexes.
 					hashAt := -1
+					quote := byte(0)
 					for li := lineStart; li <= prevI; li++ {
-						if lex.Src[li] == '#' &&
+						qc := lex.Src[li]
+						if quote != 0 {
+							// Double quotes escape with backslash, single quotes
+							// by doubling the quote character.
+							if quote == '"' && qc == '\\' {
+								li++
+								continue
+							}
+							if qc == quote {
+								if quote == '\'' && li+1 <= prevI && lex.Src[li+1] == '\'' {
+									li++
+									continue
+								}
+								quote = 0
+							}
+							continue
+						}
+						if qc == '"' || qc == '\'' {
+							quote = qc
+							continue
+						}
+						if qc == '#' &&
 							(li == lineStart || lex.Src[li-1] == ' ' ||
 								lex.Src[li-1] == '\t') {
 							hashAt = li
@@ -1324,7 +1359,7 @@ func Yaml(j *jsonic.Jsonic, opts map[string]any) error {
 			// or a trailing empty doc in `---\n---\n---`. jsonic's val-close
 			// treats a deliberate @val-set-null as undefined, so the empty
 			// doc's null is lost here; restore it the same way accumChildDoc
-			// / pushEmptyDoc force a null for the non-final empty docs.
+			// forces a null for the non-final empty docs.
 			// Without an open doc (empty or comment-only source) streamCurMeta
 			// stays nil and the stream correctly finalizes to nil/undefined.
 			streamDocs = append(streamDocs, nil)
@@ -1380,10 +1415,6 @@ func Yaml(j *jsonic.Jsonic, opts map[string]any) error {
 		ensureCurMeta()
 		streamCurMeta.Explicit = true
 	}
-	pushEmptyDoc := func(_ *jsonic.Rule, _ *jsonic.Context) {
-		streamDocs = append(streamDocs, nil)
-		flushCurMeta(true)
-	}
 
 	j.Rule("stream", func(rs *jsonic.RuleSpec, _ *jsonic.Parser) {
 		rs.AddOpen(
@@ -1391,8 +1422,11 @@ func Yaml(j *jsonic.Jsonic, opts map[string]any) error {
 			&jsonic.AltSpec{S: [][]jsonic.Tin{{DR}}, A: applyDirective, R: "stream", G: "yaml"},
 			// Explicit doc start: push val for the document content.
 			&jsonic.AltSpec{S: [][]jsonic.Tin{{DS}}, A: markExplicit, P: "val", G: "yaml"},
-			// ... before any content: count as empty doc, look for more.
-			&jsonic.AltSpec{S: [][]jsonic.Tin{{DE}}, A: pushEmptyDoc, R: "stream", G: "yaml"},
+			// `...` with no document open: it terminates nothing, so it does
+			// NOT produce a document. Consume it and look for the next one.
+			// (YAML 1.2 9.1.2; yaml-test-suite HWV9 / QT73 / M7A3, where a
+			// stray or comment-only `...` region yields no document at all.)
+			&jsonic.AltSpec{S: [][]jsonic.Tin{{DE}}, R: "stream", G: "yaml"},
 			// Empty source: end immediately.
 			&jsonic.AltSpec{S: [][]jsonic.Tin{{ZZ}}, B: 1, G: "yaml"},
 			// Implicit first doc.
@@ -1497,13 +1531,12 @@ func handleBlockScalar(lex *jsonic.Lex, pnt *jsonic.Point, src, fwd string, ch b
 	// Determine containing indent.
 	containingIndent := 0
 	isDocStart := false
-	li := pnt.SI - 1
-	// Block indicator at the very start of the source: there is no
-	// containing line (TS reads src[-1] as undefined; Go must not index
-	// out of range). containingIndent stays 0 and isDocStart false.
-	if li < 0 {
-		li = 0
-	}
+	isDocRoot := false
+	// Walk back from the indicator to the start of its own line. Start at
+	// pnt.SI, not pnt.SI - 1: when the indicator IS the first character of
+	// its line, SI - 1 is the preceding newline and the scan would land on
+	// the PREVIOUS line, mis-reading both containingIndent and the --- check.
+	li := pnt.SI
 	for li > 0 && src[li-1] != '\n' && src[li-1] != '\r' {
 		li--
 	}
@@ -1515,6 +1548,12 @@ func handleBlockScalar(lex *jsonic.Lex, pnt *jsonic.Point, src, fwd string, ch b
 	if lineStart+2 < len(src) && src[lineStart] == '-' && src[lineStart+1] == '-' && src[lineStart+2] == '-' {
 		isDocStart = true
 	}
+	// The indicator is the first thing on a column-0 line, so nothing can
+	// enclose it — it can only be a document's root node. YAML gives the root
+	// node parent indent -1, so content at column 0 is "more indented" and the
+	// block is not empty. (yaml-test-suite M7A3: a bare `|` document whose
+	// content starts at column 0.)
+	isDocRoot = containingIndent == 0 && li == pnt.SI
 
 	// Apply explicit indent.
 	if explicitIndent > 0 {
@@ -1571,7 +1610,7 @@ func handleBlockScalar(lex *jsonic.Lex, pnt *jsonic.Point, src, fwd string, ch b
 		}
 	}
 
-	if blockIndent <= containingIndent && !isDocStart && idx < len(fwd) {
+	if blockIndent <= containingIndent && !isDocStart && !isDocRoot && idx < len(fwd) {
 		// Content is not indented enough — empty block scalar.
 		var val string
 		if chomp == "keep" {

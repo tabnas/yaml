@@ -4,3 +4,11 @@ url: http://example.com	{"url":"http://example.com"}
 a long key: value	{"a long key":"value"}
 a: some [text] here	{"a":"some [text] here"}
 a: some {text} here	{"a":"some {text} here"}
+{"d":"a #b","e":1}	{"d":"a #b","e":1}
+{"c":"#fff","bg":"#00ff00 solid","n":3}	{"c":"#fff","bg":"#00ff00 solid","n":3}
+{"d":"issue #123","e":{"f":"PR #5 merged"},"g":2}	{"d":"issue #123","e":{"f":"PR #5 merged"},"g":2}
+[{"m":"a #b","n":1},{"m":"c","n":2}]	[{"m":"a #b","n":1},{"m":"c","n":2}]
+{"e":"a \\" #b","f":1}	{"e":"a \" #b","f":1}
+{'s':'it''s #1','t':2}	{"s":"it's #1","t":2}
+a: "v #1"\nb: 2	{"a":"v #1","b":2}
+a: "x" # note\nb: 2	{"a":"x","b":2}

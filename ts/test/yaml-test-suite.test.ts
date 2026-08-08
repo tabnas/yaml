@@ -31,6 +31,25 @@ const SKIP: Record<string, string> = {
 }
 
 
+// The suite's `error` cases are inputs YAML 1.2 forbids. This plugin parses a
+// documented subset on top of the deliberately lenient jsonic grammar, so it
+// rejects some and accepts others. `test/yaml-test-suite-lenient.tsv` is the
+// checked ledger of exactly which ones it accepts — read here and in
+// go/yaml_test_suite_test.go, so neither runtime can drift on error behaviour
+// and neither can lose coverage silently. See that file's header.
+const LENIENT_FILE = join(__dirname, '..', '..', 'test', 'yaml-test-suite-lenient.tsv')
+
+function loadLenient(): Set<string> {
+  const out = new Set<string>()
+  for (const raw of readFileSync(LENIENT_FILE, 'utf8').split(/\r?\n/)) {
+    const line = raw.trim()
+    if ('' === line || line.startsWith('#')) continue
+    out.add(line.split('\t')[0])
+  }
+  return out
+}
+
+
 // Gather all test case directories (including sub-tests like AB12/00, AB12/01).
 interface TestCase {
   id: string
@@ -250,6 +269,20 @@ describe('yaml-test-suite', () => {
   })
 
   describe('expected-errors', () => {
+    const lenient = loadLenient()
+
+    // The ledger must describe this corpus exactly — a stale id would silently
+    // excuse a case that no longer exists.
+    test('lenient ledger has no unknown ids', () => {
+      const known = new Set(errorCases.map(c => c.id))
+      const unknown = [...lenient].filter(id => !known.has(id))
+      if (0 < unknown.length) {
+        throw new Error(
+          'test/yaml-test-suite-lenient.tsv lists ids that are not error ' +
+          'cases in test/yaml-test-suite: ' + unknown.join(' '))
+      }
+    })
+
     for (const tc of errorCases) {
       const skipReason = SKIP[tc.id]
 
@@ -264,10 +297,26 @@ describe('yaml-test-suite', () => {
           threw = true
         }
 
-        // Note: not all "error" tests will throw — some invalid YAML may
-        // be silently accepted by a lenient parser. We record but don't
-        // fail on these, since Jsonic is intentionally lenient.
-        // Just track it as a known behavior difference.
+        if (lenient.has(tc.id)) {
+          // A documented leniency: the parser is known to accept this
+          // spec-invalid input. If it now rejects it, that is progress —
+          // delete the line so the case is held to the strict expectation.
+          if (threw) {
+            throw new Error(
+              `${tc.id} (${tc.name}) is now REJECTED. Remove its line from ` +
+              'test/yaml-test-suite-lenient.tsv so the strict expectation ' +
+              'applies from here on.')
+          }
+          return
+        }
+
+        // Not on the ledger: the parser must reject it.
+        if (!threw) {
+          throw new Error(
+            `${tc.id} (${tc.name}) parsed without error, but the suite marks ` +
+            'it invalid and it is not listed in ' +
+            'test/yaml-test-suite-lenient.tsv.')
+        }
       })
     }
   })
