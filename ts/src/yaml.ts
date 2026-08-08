@@ -2585,7 +2585,7 @@ Yaml.defaults = ({
 // VERSION is this package's version. It MUST equal package.json "version":
 // the release orchestrator rewrites both, and test/version.test.ts fails the
 // build if they drift. Mirrors `const VERSION` in go/yaml.go.
-const VERSION = '0.4.3'
+const VERSION = '0.5.0'
 
 
 export {
