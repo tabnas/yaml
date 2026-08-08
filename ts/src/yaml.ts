@@ -420,8 +420,14 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
             // the containing indent is effectively -1 so blockIndent 0 is valid.
             let containingIndent = 0
             let isDocStart = false
+            let isDocRoot = false
             {
-              let li = pnt.sI - 1
+              // Walk back from the indicator to the start of its own line.
+              // Start at pnt.sI, not pnt.sI - 1: when the indicator IS the
+              // first character of its line, sI - 1 is the preceding newline
+              // and the scan would land on the PREVIOUS line, mis-reading both
+              // containingIndent and the --- check.
+              let li = pnt.sI
               while (li > 0 && lex.src[li - 1] !== '\n' && lex.src[li - 1] !== '\r') li--
               let lineStart = li
               while (li < pnt.sI && lex.src[li] === ' ') { containingIndent++; li++ }
@@ -429,6 +435,12 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
               if (lex.src[lineStart] === '-' && lex.src[lineStart+1] === '-' && lex.src[lineStart+2] === '-') {
                 isDocStart = true
               }
+              // The indicator is the first thing on a column-0 line, so nothing
+              // can enclose it — it can only be a document's root node. YAML
+              // gives the root node parent indent -1, so content at column 0 is
+              // "more indented" and the block is not empty. (yaml-test-suite
+              // M7A3: a bare `|` document whose content starts at column 0.)
+              isDocRoot = 0 === containingIndent && li === pnt.sI
             }
             // Apply explicit indent relative to containing indent.
             // Per YAML spec, the content indentation = block scalar's indent
@@ -436,8 +448,11 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
             // indent of the containing block (e.g., the mapping key), which
             // may differ from the line's leading spaces (e.g., after "- ").
             if (explicitIndent > 0) {
-              // Find the line containing the block indicator.
-              let li = pnt.sI - 1
+              // Find the line containing the block indicator. Start at pnt.sI
+              // (not pnt.sI - 1) for the same reason as the containingIndent
+              // scan above: an indicator that begins its own line would
+              // otherwise resolve to the PREVIOUS line.
+              let li = pnt.sI
               while (li > 0 && lex.src[li - 1] !== '\n' && lex.src[li - 1] !== '\r') li--
               // li is now at the start of the line. Find the colon position.
               let keyCol = containingIndent
@@ -493,7 +508,8 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
                 containingIndent = parentIndent
               }
             }
-            if (blockIndent <= containingIndent && !isDocStart && idx < fwd.length) {
+            if (blockIndent <= containingIndent && !isDocStart && !isDocRoot &&
+                idx < fwd.length) {
               // Content is not indented enough — empty block scalar.
               // For keep chomping, count trailing blank lines.
               let val: string
@@ -1990,9 +2006,26 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
                   let lineStart = prevI
                   while (lineStart > 0 && lex.src[lineStart - 1] !== '\n' &&
                          lex.src[lineStart - 1] !== '\r') lineStart--
+                  // Track quoting while scanning: a `#` inside a quoted scalar
+                  // is literal, not a comment start. Without this, the value in
+                  // {"d":"a #b","e":1} swallows the rest of the line and the
+                  // following key never lexes.
                   let hashAt = -1
+                  let quote = ''
                   for (let li = lineStart; li <= prevI; li++) {
-                    if (lex.src[li] === '#' &&
+                    let qc = lex.src[li]
+                    if (quote) {
+                      // Double quotes escape with backslash, single quotes by
+                      // doubling the quote character.
+                      if ('"' === quote && '\\' === qc) { li++; continue }
+                      if (qc === quote) {
+                        if ("'" === quote && "'" === lex.src[li + 1]) { li++; continue }
+                        quote = ''
+                      }
+                      continue
+                    }
+                    if ('"' === qc || "'" === qc) { quote = qc; continue }
+                    if ('#' === qc &&
                         (li === lineStart || lex.src[li - 1] === ' ' ||
                          lex.src[li - 1] === '\t')) { hashAt = li; break }
                   }
@@ -2458,10 +2491,6 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
     ensureCurMeta()
     yamlStreamCurMeta!.explicit = true
   }
-  const pushEmptyDoc = (_rule: Rule) => {
-    yamlStreamDocs.push(null)
-    flushCurMeta(true)
-  }
 
   tabnas.rule('stream', (rs: RuleSpec) => {
     rs.open([
@@ -2469,8 +2498,11 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
       { s: '#DR', a: applyDirective, r: 'stream', g: 'yaml' },
       // Explicit doc start: push val for the document content.
       { s: '#DS', a: markExplicit, p: 'val', g: 'yaml' },
-      // ... before any content: count as empty doc, look for more.
-      { s: '#DE', a: pushEmptyDoc, r: 'stream', g: 'yaml' },
+      // `...` with no document open: it terminates nothing, so it does NOT
+      // produce a document. Consume it and look for the next one. (YAML 1.2
+      // 9.1.2; yaml-test-suite HWV9 / QT73 / M7A3, where a stray or
+      // comment-only `...` region yields no document at all.)
+      { s: '#DE', r: 'stream', g: 'yaml' },
       // Empty source: end immediately (stream.close will run).
       { s: '#ZZ', b: 1, g: 'yaml' },
       // Implicit first doc.

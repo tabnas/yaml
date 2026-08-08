@@ -42,6 +42,28 @@ var suiteDir = filepath.Join("..", "test", "yaml-test-suite")
 // coverage improves, entries should be removed and tests should pass.
 var suiteSkip = map[string]string{}
 
+// lenientFile is the shared ledger of suite `error` cases this parser accepts.
+// The TS runner (ts/test/yaml-test-suite.test.ts) reads the same file, so the
+// two runtimes cannot drift on error behaviour. See the file's own header.
+var lenientFile = filepath.Join("..", "test", "yaml-test-suite-lenient.tsv")
+
+func loadLenient(t *testing.T) map[string]bool {
+	t.Helper()
+	data, err := os.ReadFile(lenientFile)
+	if err != nil {
+		t.Fatalf("cannot read %s: %v", lenientFile, err)
+	}
+	out := map[string]bool{}
+	for _, raw := range strings.Split(string(data), "\n") {
+		line := strings.TrimSpace(strings.TrimSuffix(raw, "\r"))
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		out[strings.SplitN(line, "\t", 2)[0]] = true
+	}
+	return out
+}
+
 // suiteCase mirrors the TS TestCase shape.
 type suiteCase struct {
 	id       string
@@ -422,7 +444,28 @@ func TestYamlTestSuite(t *testing.T) {
 	})
 
 	t.Run("expected-errors", func(t *testing.T) {
-		accepted := 0
+		lenient := loadLenient(t)
+
+		// The ledger must describe this corpus exactly — a stale id would
+		// silently excuse a case that no longer exists.
+		t.Run("lenient ledger has no unknown ids", func(t *testing.T) {
+			known := make(map[string]bool, len(errorCases))
+			for _, c := range errorCases {
+				known[c.id] = true
+			}
+			var unknown []string
+			for id := range lenient {
+				if !known[id] {
+					unknown = append(unknown, id)
+				}
+			}
+			sort.Strings(unknown)
+			if len(unknown) > 0 {
+				t.Errorf("%s lists ids that are not error cases in %s: %s",
+					lenientFile, suiteDir, strings.Join(unknown, " "))
+			}
+		})
+
 		for _, tc := range errorCases {
 			tc := tc
 			t.Run(tc.id+": "+tc.name, func(t *testing.T) {
@@ -436,17 +479,26 @@ func TestYamlTestSuite(t *testing.T) {
 					t.Fatalf("Parse panicked for %s (%s): %v", tc.id, tc.name, panicked)
 				}
 
-				// Note: not all "error" tests will throw — some invalid YAML
-				// may be silently accepted by a lenient parser. We record but
-				// don't fail on these, since Jsonic is intentionally lenient.
-				// (Same policy as the TS runner.)
+				if lenient[tc.id] {
+					// A documented leniency: the parser is known to accept
+					// this spec-invalid input. If it now rejects it, that is
+					// progress — delete the line so the case is held to the
+					// strict expectation.
+					if err != nil {
+						t.Errorf("%s (%s) is now REJECTED (%v). Remove its line from %s "+
+							"so the strict expectation applies from here on.",
+							tc.id, tc.name, err, lenientFile)
+					}
+					return
+				}
+
+				// Not on the ledger: the parser must reject it.
 				if err == nil {
-					accepted++
+					t.Errorf("%s (%s) parsed without error, but the suite marks it "+
+						"invalid and it is not listed in %s.", tc.id, tc.name, lenientFile)
 				}
 			})
 		}
-		t.Logf("expected-error cases silently accepted (lenient parser): %d/%d",
-			accepted, len(errorCases))
 	})
 
 	t.Run("suite-stats", func(t *testing.T) {

@@ -11,9 +11,35 @@ anchors (`&name`) / aliases (`*name`) / merge keys (`<<`), multi-document
 streams (`---` / `...`), YAML value keywords
 (`true`/`false`/`yes`/`no`/`on`/`off`, `null`/`~`, `.inf`, `.nan`),
 comments (`#`), tags and `%TAG` directives, and hex/octal/binary integer
-literals. It is **not** a full YAML 1.2 parser; the bar is the
-documented feature set above, exercised against the official
-[YAML Test Suite](https://github.com/yaml/yaml-test-suite).
+literals.
+
+### The conformance bar, measured
+
+It is **not** a full YAML 1.2 parser. The bar is the documented feature
+set above, verified against the **complete** official
+[YAML Test Suite](https://github.com/yaml/yaml-test-suite) (`data`
+branch) — vendored byte-identical at
+[`test/yaml-test-suite/`](test/yaml-test-suite/) and run by **both**
+runtimes. Exactly what that suite measures here:
+
+| Suite bucket | Cases | Result |
+|---|---|---|
+| Valid parse (case has `in.json`) | 279 | **279 pass** — compared across *every* document in the stream, not just the first |
+| Expected error (case has `error`) | 94 | **24 rejected**; the other **70 are accepted** (see below) |
+| No expected output (neither file) | 29 | Gathered but not asserted — the suite states no result to compare |
+| **Total** | **402** | |
+
+Those 70 accepted-but-spec-invalid cases are the plugin's **leniency
+boundary**, and it is a checked one rather than a hand-wave: every id is
+listed in
+[`test/yaml-test-suite-lenient.tsv`](test/yaml-test-suite-lenient.tsv),
+both runners read that one file, and the error-case test fails if a
+listed case starts being *rejected* or if an unlisted `error` case is
+*accepted*. Tightening the parser therefore means deleting lines from
+that file; nothing can drift silently, and the two runtimes cannot
+disagree about which inputs are errors. The leniency is inherited by
+design — this plugin layers on jsonic's deliberately relaxed grammar,
+which does not reject every construct YAML 1.2 forbids.
 
 Unlike most tabnas grammar plugins, this one is **layered on top of
 jsonic, not the bare engine**: it is a plugin for the
@@ -36,26 +62,27 @@ j.parse('name: Alice\nitems:\n  - one\n  - two\n')
 
 | Path | What it is |
 |---|---|
-| [`ts/`](ts/) | **Canonical** TypeScript implementation — the `@tabnas/yaml` package (currently `0.7.0`). The entire plugin (lexer matcher + grammar wiring + scalar/anchor/tag handling) lives in the single large [`ts/src/yaml.ts`](ts/src/yaml.ts). Depends on `@tabnas/jsonic` and `@tabnas/parser`. |
-| [`go/`](go/) | Go port — `github.com/tabnas/yaml/go`. The whole plugin is in [`go/yaml.go`](go/yaml.go); the package's `const Version` lives there too (currently `0.7.0`). Module path is `github.com/tabnas/yaml/go`, but its only tabnas dependency is **jsonic** (see below). |
-| [`yaml-grammar.jsonic`](ts/yaml-grammar.jsonic) | **Single source of truth for the grammar**, written in jsonic syntax. Lives at `ts/yaml-grammar.jsonic` and is embedded verbatim into `src/yaml.ts` and `go/yaml.go` by [`ts/embed-grammar.js`](ts/embed-grammar.js). Do not edit the embedded copies by hand — edit the `.jsonic` and re-run the embed. |
-| [`test/`](test/) | **Repo-root shared fixtures**, run by both runtimes: five `.tsv` files (`basic`, `scalars`, `flow`, `structure`, `realworld`) of `name → input → expected-JSON`, plus the upstream `test/yaml-test-suite/` corpus (TS only). |
-| [`ts/test/`](ts/test/) | TS `*.test.ts` suites (compiled to `dist-test/`): `yaml.test.ts` (unit), `tsv.test.ts` (shared fixtures), `yaml-test-suite.test.ts` (official corpus), `doc-examples.test.ts`, `debug-model.test.ts` (the `@tabnas/debug` composition test). |
-| [`go/`](go/) `*_test.go` | Go suites: `yaml_test.go` (unit), `tsv_test.go` (shared fixtures), `parity_test.go` (TS/Go parity regressions), plus `bench_test.go` / `perf_test.go` / `scaling_test.go` (performance). |
+| [`ts/`](ts/) | **Canonical** TypeScript implementation — the `@tabnas/yaml` package (currently `0.4.1`). The entire plugin (lexer matcher + grammar wiring + scalar/anchor/tag handling) lives in the single large [`ts/src/yaml.ts`](ts/src/yaml.ts). Depends on `@tabnas/jsonic` and `@tabnas/parser`. |
+| [`go/`](go/) | Go port — `github.com/tabnas/yaml/go`. The whole plugin is in [`go/yaml.go`](go/yaml.go); the package's `const Version` lives there too (currently `0.4.1`). Module path is `github.com/tabnas/yaml/go`, but its only tabnas dependency is **jsonic** (see below). |
+| [`yaml-grammar.jsonic`](yaml-grammar.jsonic) | **Single source of truth for the grammar**, written in jsonic syntax. Lives at the **repo root** and is embedded verbatim into `ts/src/yaml.ts` and `go/yaml.go` by [`ts/embed-grammar.js`](ts/embed-grammar.js). Do not edit the embedded copies by hand — edit the `.jsonic` and re-run the embed. |
+| [`test/spec/`](test/spec/) | **Repo-root shared fixtures**, auto-discovered and run by both runtimes: `*.tsv` files with an `input`/`expected`/`opts` header row. See [`test/AGENTS.md`](test/AGENTS.md) for the exact format. |
+| [`test/yaml-test-suite/`](test/yaml-test-suite/) | The upstream YAML Test Suite corpus, vendored verbatim and run by **both** runtimes, plus [`test/yaml-test-suite-lenient.tsv`](test/yaml-test-suite-lenient.tsv), the shared ledger of `error` cases this parser accepts. |
+| [`ts/test/`](ts/test/) | TS `*.test.ts` suites (compiled to `dist-test/`): `yaml.test.ts` (unit), `parity.test.ts` (the shared `test/spec/*.tsv` fixtures), `yaml-test-suite.test.ts` (official corpus), `doc-examples.test.ts`, `debug-model.test.ts` (the `@tabnas/debug` composition test). |
+| [`go/`](go/) `*_test.go` | Go suites: `yaml_test.go` + `yaml_scenarios_test.go` (unit), `parity_test.go` (`TestSpec` runs the shared `test/spec/*.tsv` fixtures), `parity_regression_test.go` (TS/Go parity regressions), `yaml_test_suite_test.go` (official corpus), plus `bench_test.go` / `perf_test.go` / `scaling_test.go` (performance). |
 | [`ts/doc/`](ts/doc/), [`go/doc/`](go/doc/) | Per-runtime Diataxis guides (`yaml-ts.md`, `yaml-go.md`) and the generated railroad diagram (`ts/doc/grammar.{svg,txt}`). |
 | [`bench/`](bench/) | TS benchmark harness (`bench/ts/*.mjs`, fixtures generated by `bench/fixtures/generate.mjs`); the Go side benches via `go/bench_test.go`. |
 
 ## The grammar is embedded — edit `yaml-grammar.jsonic`
 
 The grammar (rule alts, refs, token wiring) is authored once in
-[`ts/yaml-grammar.jsonic`](ts/yaml-grammar.jsonic) and injected between
+[`yaml-grammar.jsonic`](yaml-grammar.jsonic) at the repo root and injected between
 `// --- BEGIN EMBEDDED yaml-grammar.jsonic ---` /
 `// --- END EMBEDDED yaml-grammar.jsonic ---` markers in both `src/yaml.ts` (as a TS template
 literal) and `go/yaml.go` (as a Go raw string). `embed-grammar.js`
 escapes backslashes/backticks/`${` for the TS literal and rejects any
 backtick in the file (it would break the Go raw string). Workflow:
 
-1. Edit `ts/yaml-grammar.jsonic`.
+1. Edit `yaml-grammar.jsonic` (repo root).
 2. Run `npm run embed` in `ts/` (or `make embed` from `ts/`, i.e.
    `make -C ts embed`) to re-sync both copies.
 3. Build/test both sides.
@@ -97,24 +124,32 @@ here. CI checks the whole closure out and builds it first.
 1. **TypeScript is canonical.** When TS and Go disagree on parse
    behavior, TS wins; change Go to match, and add or extend a shared
    `.tsv` fixture when the behavior is expressible as `input → output`.
-2. The shared fixtures in [`test/*.tsv`](test/) are the parity contract.
-   Both suites run them and both must stay green. TS resolves them at
-   `../../test` (`ts/test/tsv.test.ts` `loadTSV`); Go resolves them at
-   `../test` (`go/tsv_test.go` `loadTSV`). Each line is
-   tab-separated `name <tab> input <tab> expected-JSON`; `\n`, `\r`,
-   `\t`, `\\` in the input/expected columns are unescaped by both
-   loaders, and `#`-prefixed / blank lines are skipped.
+2. The shared fixtures in [`test/spec/*.tsv`](test/spec/) are the parity
+   contract. Both suites auto-discover every file in that directory and
+   both must stay green. TS reads it from `dist-test/` at
+   `../../test/spec` (`ts/test/parity.test.ts`); Go globs
+   `../test/spec/*.tsv` (`go/parity_test.go` `TestSpec`). Line 1 is a
+   header naming the columns `input`/`expected`/`opts`; `\n`, `\r`,
+   `\t`, `\\` are unescaped in `input` only (`expected` and `opts` are
+   raw JSON). Full format rules — including the `ERROR`, `UNDEFINED` and
+   `@@Infinity`/`@@NaN` spellings — are in
+   [`test/AGENTS.md`](test/AGENTS.md).
 3. The grammar text in both runtimes is byte-identical because it is
    embedded from the same `yaml-grammar.jsonic`. Keep it that way — make
    grammar changes in the `.jsonic` and re-embed; do not hand-edit one
    runtime's embedded copy.
-4. The `parity_test.go` cases capture real-world YAML (OpenAPI/Swagger)
-   that the Go port once rejected but TS accepted. When you fix a Go
-   parity bug, prefer adding the snippet there or to a shared `.tsv`.
-5. The official YAML Test Suite (`test/yaml-test-suite/`) is run **by TS
-   only** (`yaml-test-suite.test.ts`). Its `SKIP` map (currently empty)
-   records cases beyond this subset; if you regress a case, add it there
-   with a reason rather than silently dropping coverage.
+4. The `parity_regression_test.go` cases capture real-world YAML
+   (OpenAPI/Swagger) that the Go port once rejected but TS accepted.
+   When you fix a Go parity bug, prefer adding the snippet there or to a
+   shared `test/spec/*.tsv`.
+5. The official YAML Test Suite (`test/yaml-test-suite/`) is run by
+   **both** runtimes — `ts/test/yaml-test-suite.test.ts` and
+   `go/yaml_test_suite_test.go`, which mirror each other's gathering and
+   comparison rules. Each has a `SKIP` / `suiteSkip` map (both currently
+   empty) for cases beyond this subset; if you regress a case, add it
+   there with a reason rather than silently dropping coverage. The
+   `error`-case expectations live in the shared
+   `test/yaml-test-suite-lenient.tsv` ledger, not in either runner.
 
 ## Public API
 
@@ -153,9 +188,17 @@ exposes convenience entry points):
   `github.com/jsonicjs/jsonic/go` hash from the pre-rename history — the
   active require/replace points at `github.com/tabnas/jsonic/go =>
   ../../jsonic/go`.
-- The README mentions a `go/grammar.go`; that file does not exist. The
-  embed target on the Go side is `go/yaml.go` (single file), as
-  `embed-grammar.js` and `npm run embed` actually do.
+- **A block scalar indicator followed by text on the same line
+  (`a: > x`) is NOT a block scalar.** YAML calls that an error; this
+  plugin falls through to plain-scalar handling and yields
+  `{"a": "> x"}`. Both runtimes do this — Go's `textCheck` must fall
+  through to `handlePlainScalar` when `handleBlockScalar` returns nil,
+  or it rejects what TS accepts (yaml-test-suite S4GJ).
+- **A `...` with no document open produces no document.** Only a `...`
+  that *terminates* something closes a document; a stray or
+  comment-only `...` region is not a document (`a\n...\n...` is one
+  document, not two). The `stream` rule's open-phase `#DE` alt consumes
+  and rotates without accumulating.
 - A pile of one-off debug scripts (`check_*.js`, `test_*.js`,
   `*_failing.txt`, etc.) are `.gitignore`d; don't commit them.
 

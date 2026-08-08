@@ -1,0 +1,85 @@
+# yaml-test-suite: cases the suite marks invalid that this parser ACCEPTS.
+#
+# This plugin parses a documented subset of YAML on top of the deliberately
+# lenient jsonic grammar, so it does not reject every construct the YAML 1.2
+# spec forbids. This file is the exact, checked ledger of that leniency: every
+# id listed here MUST parse without error, and every other `error` case in
+# test/yaml-test-suite MUST be rejected. Both runners
+# (ts/test/yaml-test-suite.test.ts and go/yaml_test_suite_test.go) read this
+# file, so the two runtimes cannot drift on error behaviour either.
+#
+# When the parser learns to reject one of these, DELETE its line — the test
+# will tell you to. Never add a line to silence a regression in a case that
+# used to be rejected.
+#
+# Format: <case id> <TAB> <suite description>   (# comments and blanks ignored)
+2G84/00	Literal modifers
+2G84/01	Literal modifers
+3HFZ	Invalid content after document end marker
+4EJS	Invalid tabs as indendation in a mapping
+4JVG	Scalar value with two anchors
+55WF	Invalid escape in double quoted string
+5LLU	Block scalar with wrong indented line after spaces only
+5TRB	Invalid document-start marker in doublequoted tring
+62EZ	Invalid block mapping key on same line as previous key
+6S55	Invalid scalar at the end of sequence
+7LBH	Multiline double quoted implicit keys
+9C9N	Wrong indented flow sequence
+9HCY	Need document footer before directives
+9JBA	Invalid comment after end of flow sequence
+9MAG	Flow sequence with invalid comma at the beginning
+9MMA	Directive by itself with no document
+9MQT/01	Scalar doc with '...' in content
+B63P	Directive without document
+CML9	Missing comma in flow
+CQ3W	Double quoted string without closing quote
+CTN5	Flow sequence with invalid extra comma
+CVW2	Invalid comment after comma
+CXX2	Mapping with anchor on document start line
+D49Q	Multiline single quoted implicit keys
+DK4H	Implicit key followed by newline
+DK95/01	Tabs that look like indentation
+DK95/06	Tabs that look like indentation
+EB22	Missing document-end marker before directive
+G5U8	Plain dashes in flow sequence
+G9HC	Invalid anchor in zero indented sequence
+GT5M	Node anchor in sequence
+H7J7	Node anchor not indented
+H7TQ	Extra words on %YAML directive
+HRE5	Double quoted scalar with escaped single quote
+JKF3	Multiline unidented double quoted block key
+JY7Z	Trailing content that looks like a mapping
+LHL4	Invalid tag
+MUS6/00	Directive variants
+MUS6/01	Directive variants
+P2EQ	Invalid sequene item on same line as previous item
+QB6E	Wrong indented multiline quoted scalar
+QLJ7	Tag shorthand used in documents but only defined in the first
+RHX7	YAML directive without document end marker
+RXY3	Invalid document-end marker in single quoted string
+S4GJ	Invalid text after block scalar indicator
+S98Z	Block scalar with more spaces than first content line
+SF5V	Duplicate YAML directive
+SR86	Anchor plus Alias
+SU5Z	Comment without whitespace after doublequoted scalar
+SU74	Anchor and alias as mapping key
+SY6V	Anchor before sequence entry on same line
+T833	Flow mapping missing a separating comma
+TD5N	Invalid scalar after sequence
+U99R	Invalid comma in tag
+VJP3/00	Flow collections over many lines
+W9L4	Literal block scalar with more spaces in first line
+X4QW	Comment without whitespace after block scalar indicator
+Y79Y/000	Tabs in various contexts
+Y79Y/003	Tabs in various contexts
+Y79Y/004	Tabs in various contexts
+Y79Y/005	Tabs in various contexts
+Y79Y/006	Tabs in various contexts
+Y79Y/007	Tabs in various contexts
+Y79Y/008	Tabs in various contexts
+Y79Y/009	Tabs in various contexts
+YJV2	Dash in flow sequence
+ZCZ6	Invalid mapping in plain single line value
+ZL4Z	Invalid nested mapping
+ZVH3	Wrong indented sequence item
+ZXT5	Implicit key followed by newline and adjacent value
