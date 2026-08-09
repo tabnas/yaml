@@ -1,31 +1,40 @@
 /* Copyright (c) 2021-2025 Richard Rodger and other contributors, MIT License */
 
-// Official YAML Test Suite integration tests.
-// Test data from: https://github.com/yaml/yaml-test-suite (data branch),
-// shared with the TS runner at test/yaml-test-suite (relative to repo root).
+// Official YAML Test Suite conformance — the Go half of the repo's
+// conformance dial, and a faithful port of ts/test/yaml-test-suite.test.ts:
+// same case gathering, same three groups, same STRICT comparison, same two
+// shared ledger files. Read that file's header for the full rationale.
 //
-// Each test case has:
-//   in.yaml  — input YAML
-//   in.json  — expected JSON output (if valid parse)
-//   error    — marker file indicating expected parse failure
+// Corpus: https://github.com/yaml/yaml-test-suite (`data` branch), vendored
+// at test/yaml-test-suite (relative to the repo root).
 //
-// Tests without in.json or error are skipped (no way to validate output).
+// EVERY case is asserted. There is no skip list and no group that is merely
+// gathered: a conformance suite that quietly does not run reports green while
+// measuring nothing.
 //
-// Port of ts/test/yaml-test-suite.test.ts — same gathering rules, same
-// loose comparison semantics, same error-case handling (error cases are
-// exercised but not asserted: Jsonic is intentionally lenient, so some
-// invalid YAML is silently accepted; we record but don't fail).
+//	valid-parse          in.json present: must parse AND deep-equal it,
+//	                     strictly, across EVERY document in the stream.
+//	expected-errors      `error` present: must be REJECTED, unless listed in
+//	                     test/yaml-test-suite-lenient.tsv.
+//	valid-parse-novalue  neither file: must PARSE, unless listed in
+//	                     test/yaml-test-suite-unparsed.tsv.
+//
+// The value comparison used to be a `deepLooseEqual` that equated the number
+// 1 with the string "1", and an array with an object carrying the same index
+// keys, and it compared only the FIRST document of a multi-document stream.
+// All of that hid real conformance failures and is gone.
 
 package tabnasyaml
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -34,24 +43,22 @@ import (
 
 var suiteDir = filepath.Join("..", "test", "yaml-test-suite")
 
-// suiteSkip lists known-failing test IDs, skipped with reasons.
-// The TS runner's SKIP list is currently empty; entries here are
-// Go-side-only known behavior differences. These exercise YAML spec
-// features beyond this Jsonic-based subset parser, or edge cases where
-// Jsonic's base grammar conflicts with YAML semantics. As parser
-// coverage improves, entries should be removed and tests should pass.
-var suiteSkip = map[string]string{}
-
 // lenientFile is the shared ledger of suite `error` cases this parser accepts.
-// The TS runner (ts/test/yaml-test-suite.test.ts) reads the same file, so the
-// two runtimes cannot drift on error behaviour. See the file's own header.
-var lenientFile = filepath.Join("..", "test", "yaml-test-suite-lenient.tsv")
+// unparsedFile is the shared ledger of parse-only cases it still rejects.
+// The TS runner (ts/test/yaml-test-suite.test.ts) reads the same two files, so
+// the two runtimes cannot drift. See each file's own header.
+var (
+	lenientFile  = filepath.Join("..", "test", "yaml-test-suite-lenient.tsv")
+	unparsedFile = filepath.Join("..", "test", "yaml-test-suite-unparsed.tsv")
+)
 
-func loadLenient(t *testing.T) map[string]bool {
+// loadLedger reads `<case id> <TAB> <description>`, ignoring # comments and
+// blank lines.
+func loadLedger(t *testing.T, file string) map[string]bool {
 	t.Helper()
-	data, err := os.ReadFile(lenientFile)
+	data, err := os.ReadFile(file)
 	if err != nil {
-		t.Fatalf("cannot read %s: %v", lenientFile, err)
+		t.Fatalf("cannot read %s: %v", file, err)
 	}
 	out := map[string]bool{}
 	for _, raw := range strings.Split(string(data), "\n") {
@@ -93,7 +100,7 @@ func gatherSuiteCases(t *testing.T) []suiteCase {
 
 	var names []string
 	for _, e := range entries {
-		if e.IsDir() {
+		if e.IsDir() && e.Name() != ".git" {
 			names = append(names, e.Name())
 		}
 	}
@@ -125,28 +132,26 @@ func gatherSuiteCases(t *testing.T) []suiteCase {
 			}
 		}
 
+		mk := func(id, d string) suiteCase {
+			return suiteCase{
+				id:       id,
+				dir:      d,
+				name:     readCaseName(d, id),
+				hasJSON:  fileExists(filepath.Join(d, "in.json")),
+				hasError: fileExists(filepath.Join(d, "error")),
+			}
+		}
+
 		if len(subDirs) > 0 {
 			for _, sub := range subDirs {
 				subDir := filepath.Join(dir, sub)
 				if !fileExists(filepath.Join(subDir, "in.yaml")) {
 					continue
 				}
-				cases = append(cases, suiteCase{
-					id:       entry + "/" + sub,
-					dir:      subDir,
-					name:     readCaseName(subDir, entry+"/"+sub),
-					hasJSON:  fileExists(filepath.Join(subDir, "in.json")),
-					hasError: fileExists(filepath.Join(subDir, "error")),
-				})
+				cases = append(cases, mk(entry+"/"+sub, subDir))
 			}
 		} else {
-			cases = append(cases, suiteCase{
-				id:       entry,
-				dir:      dir,
-				name:     readCaseName(dir, entry),
-				hasJSON:  fileExists(filepath.Join(dir, "in.json")),
-				hasError: fileExists(filepath.Join(dir, "error")),
-			})
+			cases = append(cases, mk(entry, dir))
 		}
 	}
 
@@ -162,199 +167,160 @@ func readCaseName(dir, fallback string) string {
 	return strings.TrimSpace(string(data))
 }
 
-// parseExpectedJSON mirrors parseExpectedJson() in the TS runner.
-// Some test cases produce multiple JSON values (one per YAML document);
-// only the first document is extracted for comparison.
-func parseExpectedJSON(raw string) (value any, multiDoc bool) {
-	trimmed := strings.TrimSpace(raw)
+// parseJSONStream mirrors parseJsonStream() in the TS runner. in.json is a
+// STREAM of JSON documents, one per YAML document — not a single JSON value.
+// An empty file is a stream of zero documents, which is a real expectation
+// ("this input yields no document"), not a parse failure.
+func parseJSONStream(raw string) ([]any, error) {
+	var docs []any
+	rest := strings.TrimSpace(raw)
 
-	// Try parsing as a single JSON value first.
-	var single any
-	if err := json.Unmarshal([]byte(trimmed), &single); err == nil {
-		return single, false
-	}
+	for len(rest) > 0 {
+		depth := 0
+		inString := false
+		escape := false
+		cut := -1
 
-	// Multi-document: multiple JSON values concatenated.
-	// Try to extract just the first one by scanning for a balanced
-	// top-level value prefix.
-	depth := 0
-	inString := false
-	escape := false
+		for i := 0; i < len(rest); i++ {
+			ch := rest[i]
 
-	for i := 0; i < len(trimmed); i++ {
-		ch := trimmed[i]
+			switch {
+			case escape:
+				escape = false
+			case inString:
+				if ch == '\\' {
+					escape = true
+				} else if ch == '"' {
+					inString = false
+				}
+			case ch == '"':
+				inString = true
+			case ch == '{' || ch == '[':
+				depth++
+			case ch == '}' || ch == ']':
+				depth--
+			}
 
-		if escape {
-			escape = false
-			continue
-		}
-		if ch == '\\' && inString {
-			escape = true
-			continue
-		}
-		if ch == '"' {
-			inString = !inString
-			continue
-		}
-		if inString {
-			continue
-		}
+			if inString || escape || depth != 0 {
+				continue
+			}
 
-		if ch == '{' || ch == '[' {
-			depth++
-		}
-		if ch == '}' || ch == ']' {
-			depth--
-		}
+			// A document boundary must be end-of-input or whitespace,
+			// otherwise the bare number 123 would be cut after its first digit.
+			if i+1 < len(rest) && !isSpaceByte(rest[i+1]) {
+				continue
+			}
 
-		if depth == 0 && i > 0 {
-			// We might be at the end of a top-level value.
-			candidate := trimmed[:i+1]
 			var v any
-			if err := json.Unmarshal([]byte(candidate), &v); err == nil {
-				return v, true
+			if err := json.Unmarshal([]byte(rest[:i+1]), &v); err == nil {
+				docs = append(docs, v)
+				cut = i + 1
+				break
 			}
 		}
+
+		if cut == -1 {
+			// Not a JSON document stream. Surface it rather than silently
+			// comparing against nil, which is what the old runner did.
+			end := 80
+			if len(rest) < end {
+				end = len(rest)
+			}
+			return nil, fmt.Errorf("unparseable in.json remainder: %q", rest[:end])
+		}
+
+		rest = strings.TrimSpace(rest[cut:])
 	}
 
-	// Last resort: just return nil.
-	return nil, true
+	return docs, nil
 }
 
-// asFloat reports whether v is a numeric value, normalizing to float64.
-func asFloat(v any) (float64, bool) {
-	switch n := v.(type) {
+func isSpaceByte(b byte) bool {
+	return b == ' ' || b == '\t' || b == '\n' || b == '\r' || b == '\f' || b == '\v'
+}
+
+// canon mirrors canon() in the TS runner: canonicalise a parse result for
+// STRICT structural comparison. The engine's insertion-ordered *OrderedMap
+// becomes a plain map (order is not part of the expectation — in.json is
+// JSON), and the non-finite numbers YAML can spell but JSON cannot become
+// marker strings. Nothing here coerces between types: a string "1" stays a
+// string and will NOT match the number 1.
+func canon(v any) any {
+	switch c := v.(type) {
+	case nil:
+		return nil
 	case float64:
-		return n, true
+		return canonFloat(c)
 	case float32:
-		return float64(n), true
+		return canonFloat(float64(c))
 	case int:
-		return float64(n), true
+		return float64(c)
 	case int64:
-		return float64(n), true
+		return float64(c)
 	case json.Number:
-		f, err := n.Float64()
-		return f, err == nil
+		f, err := c.Float64()
+		if err != nil {
+			return c.String()
+		}
+		return canonFloat(f)
+	case *jsonic.OrderedMap:
+		if c == nil {
+			return nil
+		}
+		return canonMap(c.Vals)
+	case jsonic.OrderedMap:
+		return canonMap(c.Vals)
+	case map[string]any:
+		return canonMap(c)
+	case []any:
+		out := make([]any, len(c))
+		for i, e := range c {
+			out[i] = canon(e)
+		}
+		return out
 	}
-	return 0, false
+	if jsonic.IsUndefined(v) {
+		return "@@UNDEFINED"
+	}
+	return v
 }
 
-// jsNumberString renders a float64 the way JavaScript's String(n) does
-// (shortest round-trip form), which is what the TS runner compares
-// against when one side is a string and the other a number.
-func jsNumberString(f float64) string {
+func canonFloat(f float64) any {
 	if math.IsNaN(f) {
-		return "NaN"
+		return "@@NaN"
 	}
 	if math.IsInf(f, 1) {
-		return "Infinity"
+		return "@@Infinity"
 	}
 	if math.IsInf(f, -1) {
-		return "-Infinity"
+		return "@@-Infinity"
 	}
-	abs := math.Abs(f)
-	if f != 0 && (abs >= 1e21 || abs < 1e-6) {
-		// JS switches to exponential notation outside [1e-6, 1e21) and
-		// prints the exponent without leading zeros (e.g. "1.5e-7").
-		s := strconv.FormatFloat(f, 'e', -1, 64)
-		s = strings.Replace(s, "e+0", "e+", 1)
-		s = strings.Replace(s, "e-0", "e-", 1)
-		return s
-	}
-	// Decimal form, shortest round-trip (matches JS String(n)).
-	return strconv.FormatFloat(f, 'f', -1, 64)
+	return f
 }
 
-// looseNumEq mirrors Object.is on JS numbers: NaN equals NaN, and
-// +0 / -0 are distinct.
-func looseNumEq(a, b float64) bool {
-	if math.IsNaN(a) && math.IsNaN(b) {
-		return true
+func canonMap(m map[string]any) any {
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		out[k] = canon(v)
 	}
-	return a == b && math.Signbit(a) == math.Signbit(b)
+	return out
 }
 
-// asKeyMap views a JSON-ish composite value ([]any, map[string]any, or the
-// insertion-ordered *jsonic.OrderedMap the engine now yields for parsed
-// objects) as a string-keyed map, matching JS Object.keys semantics where
-// array indices become string keys. This comparison is value-based (not
-// order-based), so the OrderedMap's key order is intentionally dropped.
-func asKeyMap(v any) (map[string]any, bool) {
-	switch c := v.(type) {
-	case *jsonic.OrderedMap:
-		return c.Vals, true
-	case jsonic.OrderedMap:
-		return c.Vals, true
-	case map[string]any:
-		return c, true
-	case []any:
-		m := make(map[string]any, len(c))
-		for i, e := range c {
-			m[strconv.Itoa(i)] = e
-		}
-		return m, true
-	}
-	return nil, false
+// noDocument reports whether a parse result represents "no document at all",
+// which JSON cannot spell. Go yields nil (or the engine's undefined marker).
+func noDocument(v any) bool {
+	return v == nil || jsonic.IsUndefined(v)
 }
 
-// deepLooseEqual mirrors deepLooseEqual() in the TS runner: a deep
-// comparison tolerant of number/string type differences that arise from
-// YAML type resolution differences.
-func deepLooseEqual(actual, expected any) bool {
-	if actual == nil && expected == nil {
-		return true
+func show(v any) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Sprintf("%#v", v)
 	}
-	if actual == nil || expected == nil {
-		return false
+	if len(b) > 200 {
+		return string(b[:200]) + "..."
 	}
-
-	af, aNum := asFloat(actual)
-	ef, eNum := asFloat(expected)
-
-	// Compare numbers loosely (string "1" vs number 1).
-	if aNum && eNum {
-		return looseNumEq(af, ef)
-	}
-	as, aStr := actual.(string)
-	es, eStr := expected.(string)
-	if eNum && aStr {
-		return jsNumberString(ef) == as
-	}
-	if eStr && aNum {
-		return es == jsNumberString(af)
-	}
-
-	// Boolean strict comparison.
-	ab, aBool := actual.(bool)
-	eb, eBool := expected.(bool)
-	if aBool || eBool {
-		return aBool && eBool && ab == eb
-	}
-
-	// Composites (arrays/objects). Mirrors the TS object branch, where
-	// Object.keys treats arrays and plain objects uniformly, so an array
-	// may loosely equal an object with the same index keys.
-	am, aComp := asKeyMap(actual)
-	em, eComp := asKeyMap(expected)
-	if aComp && eComp {
-		// Array-vs-array compares lengths first in TS; the key-map view
-		// preserves that (same key count requirement).
-		if len(am) != len(em) {
-			return false
-		}
-		for k, ev := range em {
-			if !deepLooseEqual(am[k], ev) {
-				return false
-			}
-		}
-		return true
-	}
-
-	// String comparison fallback.
-	if aStr && eStr {
-		return as == es
-	}
-	return false
+	return string(b)
 }
 
 func readSuiteYaml(t *testing.T, dir string) string {
@@ -379,11 +345,32 @@ func suiteParse(src string) (result any, err error, panicked any) {
 	return
 }
 
+// ledgerIdsAreKnown holds a ledger to its group: an id that no longer names a
+// case there would silently excuse a case that does not exist.
+func ledgerIdsAreKnown(t *testing.T, file string, ledger map[string]bool, cases []suiteCase) {
+	t.Helper()
+	known := make(map[string]bool, len(cases))
+	for _, c := range cases {
+		known[c.id] = true
+	}
+	var unknown []string
+	for id := range ledger {
+		if !known[id] {
+			unknown = append(unknown, id)
+		}
+	}
+	sort.Strings(unknown)
+	if len(unknown) > 0 {
+		t.Errorf("%s lists ids that are not cases in its group: %s",
+			file, strings.Join(unknown, " "))
+	}
+}
+
 // TestYamlTestSuite is the Go port of ts/test/yaml-test-suite.test.ts.
 func TestYamlTestSuite(t *testing.T) {
 	allCases := gatherSuiteCases(t)
 
-	var validCases, errorCases, skipCases []suiteCase
+	var validCases, errorCases, novalueCases []suiteCase
 	for _, c := range allCases {
 		switch {
 		case c.hasJSON && !c.hasError:
@@ -391,90 +378,68 @@ func TestYamlTestSuite(t *testing.T) {
 		case c.hasError:
 			errorCases = append(errorCases, c)
 		default:
-			skipCases = append(skipCases, c)
+			novalueCases = append(novalueCases, c)
 		}
 	}
 
 	t.Run("valid-parse", func(t *testing.T) {
 		for _, tc := range validCases {
-			tc := tc
 			t.Run(tc.id+": "+tc.name, func(t *testing.T) {
-				if reason, skip := suiteSkip[tc.id]; skip {
-					t.Skipf("known failure: %s", reason)
-				}
-
 				inYaml := readSuiteYaml(t, tc.dir)
 				inJSONRaw, err := os.ReadFile(filepath.Join(tc.dir, "in.json"))
 				if err != nil {
 					t.Fatalf("cannot read in.json: %v", err)
 				}
-				expected, multiDoc := parseExpectedJSON(string(inJSONRaw))
+				docs, err := parseJSONStream(string(inJSONRaw))
+				if err != nil {
+					t.Fatalf("%s (%s): %v", tc.id, tc.name, err)
+				}
 
 				actual, err, panicked := suiteParse(inYaml)
 				if panicked != nil {
 					t.Fatalf("Parse panicked for %s (%s): %v", tc.id, tc.name, panicked)
 				}
 				if err != nil {
-					t.Fatalf("Parse failed for %s (%s): %v", tc.id, tc.name, err)
+					t.Fatalf("%s (%s): valid document REJECTED: %v\n  input: %q",
+						tc.id, tc.name, err, inYaml)
 				}
 
-				// The plugin returns a slice when the source has multiple
-				// documents and a scalar otherwise. parseExpectedJSON only
-				// extracts the first expected document, so for multi-doc
-				// inputs compare actual[0].
-				actualForCompare := actual
-				if multiDoc {
-					if arr, ok := actual.([]any); ok && len(arr) > 0 {
-						actualForCompare = arr[0]
+				// A zero-document stream cannot be spelled as a JSON value at
+				// all, so the assertion is "the parse yielded no document".
+				if len(docs) == 0 {
+					if !noDocument(actual) {
+						t.Errorf("%s (%s): expected NO document (in.json is empty), got %s\n  input: %q",
+							tc.id, tc.name, show(canon(actual)), inYaml)
 					}
+					return
 				}
 
-				if !deepLooseEqual(actualForCompare, expected) {
-					tag := ""
-					if multiDoc {
-						tag = " [first doc only]"
-					}
-					expJSON, _ := json.Marshal(expected)
-					actJSON, _ := json.Marshal(actual)
-					t.Errorf("Mismatch for %s (%s)%s:\n  Expected: %s\n  Actual:   %s",
-						tc.id, tc.name, tag, expJSON, actJSON)
+				// The plugin yields the bare value for a single-document
+				// stream and a slice of values for a multi-document one.
+				var expected any = docs
+				if len(docs) == 1 {
+					expected = docs[0]
+				}
+
+				if !reflect.DeepEqual(canon(actual), canon(expected)) {
+					t.Errorf("%s (%s): wrong value\n  input:    %q\n  expected: %s\n  actual:   %s",
+						tc.id, tc.name, inYaml, show(canon(expected)), show(canon(actual)))
 				}
 			})
 		}
 	})
 
 	t.Run("expected-errors", func(t *testing.T) {
-		lenient := loadLenient(t)
+		lenient := loadLedger(t, lenientFile)
 
-		// The ledger must describe this corpus exactly — a stale id would
-		// silently excuse a case that no longer exists.
 		t.Run("lenient ledger has no unknown ids", func(t *testing.T) {
-			known := make(map[string]bool, len(errorCases))
-			for _, c := range errorCases {
-				known[c.id] = true
-			}
-			var unknown []string
-			for id := range lenient {
-				if !known[id] {
-					unknown = append(unknown, id)
-				}
-			}
-			sort.Strings(unknown)
-			if len(unknown) > 0 {
-				t.Errorf("%s lists ids that are not error cases in %s: %s",
-					lenientFile, suiteDir, strings.Join(unknown, " "))
-			}
+			ledgerIdsAreKnown(t, lenientFile, lenient, errorCases)
 		})
 
 		for _, tc := range errorCases {
-			tc := tc
 			t.Run(tc.id+": "+tc.name, func(t *testing.T) {
-				if reason, skip := suiteSkip[tc.id]; skip {
-					t.Skipf("known failure: %s", reason)
-				}
-
 				inYaml := readSuiteYaml(t, tc.dir)
-				_, err, panicked := suiteParse(inYaml)
+				actual, err, panicked := suiteParse(inYaml)
 				if panicked != nil {
 					t.Fatalf("Parse panicked for %s (%s): %v", tc.id, tc.name, panicked)
 				}
@@ -495,17 +460,72 @@ func TestYamlTestSuite(t *testing.T) {
 				// Not on the ledger: the parser must reject it.
 				if err == nil {
 					t.Errorf("%s (%s) parsed without error, but the suite marks it "+
-						"invalid and it is not listed in %s.", tc.id, tc.name, lenientFile)
+						"invalid and it is not listed in %s.\n  input:  %q\n  parsed: %s",
+						tc.id, tc.name, lenientFile, inYaml, show(canon(actual)))
 				}
 			})
 		}
 	})
 
-	t.Run("suite-stats", func(t *testing.T) {
-		t.Logf("yaml-test-suite stats:")
-		t.Logf("  Total test cases: %d", len(allCases))
-		t.Logf("  Valid parse (with in.json): %d", len(validCases))
-		t.Logf("  Error cases: %d", len(errorCases))
-		t.Logf("  Skipped (no in.json, no error): %d", len(skipCases))
+	// The suite publishes no expected value for these, so the value cannot be
+	// checked — but they ARE valid YAML, so "it parses" is a real assertion,
+	// just a partial one. These 29 cases used to be gathered and then dropped
+	// without any assertion at all.
+	t.Run("valid-parse-novalue", func(t *testing.T) {
+		unparsed := loadLedger(t, unparsedFile)
+
+		t.Run("unparsed ledger has no unknown ids", func(t *testing.T) {
+			ledgerIdsAreKnown(t, unparsedFile, unparsed, novalueCases)
+		})
+
+		for _, tc := range novalueCases {
+			t.Run(tc.id+": "+tc.name, func(t *testing.T) {
+				inYaml := readSuiteYaml(t, tc.dir)
+				_, err, panicked := suiteParse(inYaml)
+				if panicked != nil {
+					t.Fatalf("Parse panicked for %s (%s): %v", tc.id, tc.name, panicked)
+				}
+
+				if unparsed[tc.id] {
+					// A documented gap: this valid document is still
+					// rejected. If it now parses, that is progress.
+					if err == nil {
+						t.Errorf("%s (%s) now PARSES. Remove its line from %s "+
+							"so the expectation applies from here on.",
+							tc.id, tc.name, unparsedFile)
+					}
+					return
+				}
+
+				if err != nil {
+					t.Errorf("%s (%s): the suite says this is valid YAML but it was "+
+						"REJECTED (%v), and it is not listed in %s.\n  input: %q",
+						tc.id, tc.name, err, unparsedFile, inYaml)
+				}
+			})
+		}
+	})
+
+	// Not a conformance score — a guard that the corpus scored against is the
+	// whole, expected one. Without it a truncated checkout silently shrinks
+	// the denominator and every ratio above it improves for free.
+	t.Run("suite-census", func(t *testing.T) {
+		for _, c := range []struct {
+			label string
+			got   int
+			want  int
+		}{
+			{"total cases", len(allCases), 402},
+			{"value-checked cases", len(validCases), 279},
+			{"must-fail cases", len(errorCases), 94},
+			{"parse-only cases", len(novalueCases), 29},
+		} {
+			if c.got != c.want {
+				t.Errorf("%s: got %d, want %d — the corpus at %s is not the "+
+					"expected one; refusing to report a conformance number "+
+					"against a different denominator",
+					c.label, c.got, c.want, suiteDir)
+			}
+		}
 	})
 }

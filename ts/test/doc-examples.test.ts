@@ -116,6 +116,14 @@ function importsToRequire(code) {
 
 // Rewrite `<expr>  // => <expected>` lines into __eq(expr, expected) calls.
 const ARROW = /\/\/\s*=>(.*)$/
+
+// The block-level gate. It MUST NOT be the ARROW regex itself: ARROW is
+// `$`-anchored and used without the `m` flag, so testing it against a whole
+// joined block only matches when the `// =>` happens to sit on the block's
+// LAST line — every example that ends with a closing brace, a blank line or
+// any further code was silently dropped and never ran.
+const ARROW_ANYWHERE = /\/\/\s*=>/
+
 function rewriteAssertions(code) {
   let count = 0
   const out = code.split('\n').map((line) => {
@@ -171,7 +179,7 @@ describe('doc-examples', () => {
     blocks.forEach((b, bi) => {
       if (b.ignore) return
       const joined = b.code.join('\n')
-      if (!ARROW.test(joined)) return // no assertions -> skip
+      if (!ARROW_ANYWHERE.test(joined)) return // no assertions -> skip
       const { code, count } = rewriteAssertions(importsToRequire(joined))
       if (count === 0) return
       testable++
@@ -186,7 +194,13 @@ describe('doc-examples', () => {
   }
 
   it('found at least one tested example (sanity)', () => {
-    // Not a hard failure if a repo has no `// =>` examples yet.
-    assert.ok(testable >= 0, `tested ${testable} doc example block(s)`)
+    // `testable >= 0` was the old assertion: true for every possible value,
+    // so this guard could never fire. If the extractor silently stopped
+    // matching blocks the suite still reported green having run nothing —
+    // which is exactly the failure it exists to catch. This repo's README and
+    // ts/doc guides do carry `// =>` examples, so demand at least one.
+    assert.ok(0 < testable,
+      `no doc example block with a '// =>' assertion was found — the ` +
+      `extractor is broken or the docs lost their examples`)
   })
 })

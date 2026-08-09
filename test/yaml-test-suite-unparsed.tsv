@@ -1,0 +1,42 @@
+# yaml-test-suite: parse-only cases (no `in.json`, no `error`) that this
+# parser still REJECTS.
+#
+# These 29 cases publish no expected value, so the strongest honest check is
+# "a valid document parses at all". They used to be gathered and then dropped
+# with no assertion, which meant 29 of the suite's 402 cases were counted by
+# nobody. Now every one of them is asserted, and this file is the exact,
+# checked ledger of the ones that still fail.
+#
+# Semantics mirror test/yaml-test-suite-lenient.tsv:
+#   - every id listed here MUST still be rejected;
+#   - every other parse-only case MUST parse without error.
+# Both runners (ts/test/yaml-test-suite.test.ts and
+# go/yaml_test_suite_test.go) read this one file, so the two runtimes cannot
+# drift on it either.
+#
+# When the parser learns to accept one of these, DELETE its line — the test
+# will tell you to. Never add a line to silence a regression in a case that
+# used to parse.
+#
+# Format: <case id> <TAB> <suite description>   (# comments and blanks ignored)
+2JQS	Block Mapping with Missing Keys
+4FJ6	Nested implicit complex keys
+6BFJ	Mapping, key and flow sequence item anchors
+6M2F	Aliases in Explicit Block Mapping
+6PBE	Zero-indented sequences in explicit mapping keys
+CFD4	Empty implicit key in single pair flow sequences
+FRK4	Spec Example 7.3. Completely Empty Flow Nodes
+LX3P	Implicit Flow Mapping Key on one line
+M5DY	Spec Example 2.11. Mapping between Sequences
+NHX8	Empty Lines at End of Document
+NKF9	Empty keys in block and flow mapping
+PW8X	Anchors on Empty Scalars
+Q9WF	Spec Example 6.12. Separation Spaces
+RZP5	Various Trailing Comments [1.3]
+S3PD	Spec Example 8.18. Implicit Block Mapping Entries
+SBG9	Flow Sequence in Flow Mapping
+SM9W/01	Single character streams
+UKK6/00	Syntax character edge cases
+UKK6/02	Syntax character edge cases
+X38W	Aliases in Flow Objects
+XW4D	Various Trailing Comments
