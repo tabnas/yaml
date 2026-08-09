@@ -24,10 +24,16 @@ runtimes. Exactly what that suite measures here:
 
 | Suite bucket | Cases | Result |
 |---|---|---|
-| Valid parse (case has `in.json`) | 279 | **279 pass** — compared across *every* document in the stream, not just the first |
+| Valid parse (case has `in.json`) | 279 | **279 pass** — a STRICT structural comparison (no `1`/`"1"` coercion) across *every* document in the stream, not just the first |
 | Expected error (case has `error`) | 94 | **24 rejected**; the other **70 are accepted** (see below) |
-| No expected output (neither file) | 29 | Gathered but not asserted — the suite states no result to compare |
+| No expected output (neither file) | 29 | No value is published, so only "a valid document parses" can be checked: **8 parse**, the other **21 are rejected** and listed in [`test/yaml-test-suite-unparsed.tsv`](test/yaml-test-suite-unparsed.tsv) |
 | **Total** | **402** | |
+
+Every one of the 402 is asserted. There is no skip list in either runner,
+and no group is merely gathered — a conformance suite that quietly does not
+run reports green while measuring nothing. A `suite-census` test pins the
+four counts above, so a truncated corpus cannot shrink the denominator and
+improve every ratio for free.
 
 Those 70 accepted-but-spec-invalid cases are the plugin's **leniency
 boundary**, and it is a checked one rather than a hand-wave: every id is
@@ -35,7 +41,9 @@ listed in
 [`test/yaml-test-suite-lenient.tsv`](test/yaml-test-suite-lenient.tsv),
 both runners read that one file, and the error-case test fails if a
 listed case starts being *rejected* or if an unlisted `error` case is
-*accepted*. Tightening the parser therefore means deleting lines from
+*accepted*. The 21 valid-but-rejected parse-only cases are held by the
+same discipline in
+[`test/yaml-test-suite-unparsed.tsv`](test/yaml-test-suite-unparsed.tsv). Tightening the parser therefore means deleting lines from
 that file; nothing can drift silently, and the two runtimes cannot
 disagree about which inputs are errors. The leniency is inherited by
 design — this plugin layers on jsonic's deliberately relaxed grammar,
@@ -66,7 +74,7 @@ j.parse('name: Alice\nitems:\n  - one\n  - two\n')
 | [`go/`](go/) | Go port — `github.com/tabnas/yaml/go`. The whole plugin is in [`go/yaml.go`](go/yaml.go); the package's `const VERSION` lives there too. Module path is `github.com/tabnas/yaml/go`, but its only tabnas dependency is **jsonic** (see below). |
 | [`yaml-grammar.jsonic`](yaml-grammar.jsonic) | **Single source of truth for the grammar**, written in jsonic syntax. Lives at the **repo root** and is embedded verbatim into `ts/src/yaml.ts` and `go/yaml.go` by [`ts/embed-grammar.js`](ts/embed-grammar.js). Do not edit the embedded copies by hand — edit the `.jsonic` and re-run the embed. |
 | [`test/spec/`](test/spec/) | **Repo-root shared fixtures**, auto-discovered and run by both runtimes: `*.tsv` files with an `input`/`expected`/`opts` header row. See [`test/AGENTS.md`](test/AGENTS.md) for the exact format. |
-| [`test/yaml-test-suite/`](test/yaml-test-suite/) | The upstream YAML Test Suite corpus, vendored verbatim and run by **both** runtimes, plus [`test/yaml-test-suite-lenient.tsv`](test/yaml-test-suite-lenient.tsv), the shared ledger of `error` cases this parser accepts. |
+| [`test/yaml-test-suite/`](test/yaml-test-suite/) | The upstream YAML Test Suite corpus, vendored verbatim and run by **both** runtimes, plus the two shared ledgers both runners read: [`test/yaml-test-suite-lenient.tsv`](test/yaml-test-suite-lenient.tsv) (`error` cases this parser accepts) and [`test/yaml-test-suite-unparsed.tsv`](test/yaml-test-suite-unparsed.tsv) (parse-only cases it still rejects). |
 | [`ts/test/`](ts/test/) | TS `*.test.ts` suites (compiled to `dist-test/`): `yaml.test.ts` (unit), `parity.test.ts` (the shared `test/spec/*.tsv` fixtures), `yaml-test-suite.test.ts` (official corpus), `doc-examples.test.ts`, `debug-model.test.ts` (the `@tabnas/debug` composition test). |
 | [`go/`](go/) `*_test.go` | Go suites: `yaml_test.go` + `yaml_scenarios_test.go` (unit), `parity_test.go` (`TestSpec` runs the shared `test/spec/*.tsv` fixtures), `parity_regression_test.go` (TS/Go parity regressions), `yaml_test_suite_test.go` (official corpus), plus `bench_test.go` / `perf_test.go` / `scaling_test.go` (performance). |
 | [`ts/doc/`](ts/doc/), [`go/doc/`](go/doc/) | Per-runtime Diataxis guides (`yaml-ts.md`, `yaml-go.md`) and the generated railroad diagram (`ts/doc/grammar.{svg,txt}`). |
@@ -145,11 +153,15 @@ here. CI checks the whole closure out and builds it first.
 5. The official YAML Test Suite (`test/yaml-test-suite/`) is run by
    **both** runtimes — `ts/test/yaml-test-suite.test.ts` and
    `go/yaml_test_suite_test.go`, which mirror each other's gathering and
-   comparison rules. Each has a `SKIP` / `suiteSkip` map (both currently
-   empty) for cases beyond this subset; if you regress a case, add it
-   there with a reason rather than silently dropping coverage. The
-   `error`-case expectations live in the shared
-   `test/yaml-test-suite-lenient.tsv` ledger, not in either runner.
+   comparison rules. There is deliberately **no skip list**: a
+   conformance figure that can be silenced case by case is worth
+   nothing. Every expectation that is not the strict one lives in a
+   shared, checked ledger read by both runners —
+   `test/yaml-test-suite-lenient.tsv` (must-fail cases that are
+   accepted) and `test/yaml-test-suite-unparsed.tsv` (valid parse-only
+   cases that are rejected). Tightening the parser means DELETING lines
+   from those files; both runners fail if a listed case starts behaving
+   correctly, and fail if an unlisted case regresses.
 
 ## Public API
 

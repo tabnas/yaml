@@ -1,16 +1,44 @@
 /* Copyright (c) 2021-2025 Richard Rodger and other contributors, MIT License */
 
-// Official YAML Test Suite integration tests.
-// Test data from: https://github.com/yaml/yaml-test-suite (data branch)
-//
-// Each test case has:
-//   in.yaml  — input YAML
-//   in.json  — expected JSON output (if valid parse)
-//   error    — marker file indicating expected parse failure
-//
-// Tests without in.json or error are skipped (no way to validate output).
+/* Official YAML Test Suite conformance — the repo's conformance dial.
+ *
+ * Corpus: https://github.com/yaml/yaml-test-suite (`data` branch), vendored
+ * byte-identical at test/yaml-test-suite (relative to the repo root).
+ *
+ * Each case directory holds:
+ *   in.yaml  — the input
+ *   in.json  — the expected value, as a STREAM of JSON documents (one per
+ *              YAML document; an empty file means "no documents at all")
+ *   error    — a marker file: this input MUST be rejected
+ *   ===      — a human-readable case name
+ *
+ * EVERY case is asserted. There is no skip list and no group that is merely
+ * "gathered": a conformance suite that quietly does not run reports green
+ * while measuring nothing. The three groups are
+ *
+ *   valid-parse           in.json present: must parse AND deep-equal it.
+ *   expected-errors       `error` present: must be REJECTED, unless the id is
+ *                         on the checked leniency ledger
+ *                         (test/yaml-test-suite-lenient.tsv).
+ *   valid-parse-novalue   neither file: the suite publishes no expected value,
+ *                         so the strongest honest assertion is that a valid
+ *                         document parses at all. The ones this parser still
+ *                         rejects are enumerated in the checked ledger
+ *                         test/yaml-test-suite-unparsed.tsv — never skipped.
+ *
+ * The value comparison is STRICT and covers EVERY document in the stream. It
+ * used to be a `deepLooseEqual` that equated the number 1 with the string
+ * "1", and equated an array with an object carrying the same index keys, and
+ * it compared only the FIRST document of a multi-document stream — so a
+ * multi-document case was scored on a fraction of its expected output. Both
+ * of those hid real conformance failures and are gone.
+ *
+ * Both ledger files are read by the Go runner (go/yaml_test_suite_test.go)
+ * too, so the two runtimes are scored identically and cannot drift.
+ */
 
 import { test, describe } from 'node:test'
+import assert from 'node:assert'
 
 import { readFileSync, readdirSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
@@ -20,28 +48,39 @@ import { jsonic } from '@tabnas/jsonic'
 import { Yaml } from '../dist/yaml'
 
 
-const SUITE_DIR = join(__dirname, '..', '..', 'test', 'yaml-test-suite')
-
-
-// Known-failing test IDs, skipped with reasons.
-// These exercise YAML spec features beyond this Jsonic-based subset parser,
-// or edge cases where Jsonic's base grammar conflicts with YAML semantics.
-// As parser coverage improves, entries should be removed and tests should pass.
-const SKIP: Record<string, string> = {
-}
-
+const REPO_ROOT = join(__dirname, '..', '..')
+const SUITE_DIR = join(REPO_ROOT, 'test', 'yaml-test-suite')
 
 // The suite's `error` cases are inputs YAML 1.2 forbids. This plugin parses a
 // documented subset on top of the deliberately lenient jsonic grammar, so it
-// rejects some and accepts others. `test/yaml-test-suite-lenient.tsv` is the
-// checked ledger of exactly which ones it accepts — read here and in
-// go/yaml_test_suite_test.go, so neither runtime can drift on error behaviour
-// and neither can lose coverage silently. See that file's header.
-const LENIENT_FILE = join(__dirname, '..', '..', 'test', 'yaml-test-suite-lenient.tsv')
+// rejects some and accepts others. This is the checked ledger of exactly
+// which ones it accepts. See that file's header.
+const LENIENT_FILE = join(REPO_ROOT, 'test', 'yaml-test-suite-lenient.tsv')
 
-function loadLenient(): Set<string> {
+// The parse-only cases (no in.json, no error) that this parser still rejects,
+// although the suite says they are valid YAML. Same discipline as the
+// leniency ledger: a listed id that starts parsing must lose its line.
+const UNPARSED_FILE = join(REPO_ROOT, 'test', 'yaml-test-suite-unparsed.tsv')
+
+
+// This suite must never silently skip. Run at module top level on purpose: a
+// throw inside a describe() body is reported as one failed suite, but a throw
+// here fails the whole file to load, which is impossible to overlook.
+if (!existsSync(join(SUITE_DIR, '229Q', 'in.yaml'))) {
+  throw new Error(
+    'yaml-test-suite corpus is MISSING or truncated at ' + SUITE_DIR + '.\n' +
+    'It is vendored in this repo, so this means the working tree is damaged: ' +
+    'restore it with `git checkout -- test/yaml-test-suite`.\n' +
+    'This suite refuses to skip — without the corpus there is no conformance ' +
+    'measurement, and a green run would be meaningless.')
+}
+
+
+// Read a ledger file: `<case id> <TAB> <description>`, # comments and blanks
+// ignored.
+function loadLedger(file: string): Set<string> {
   const out = new Set<string>()
-  for (const raw of readFileSync(LENIENT_FILE, 'utf8').split(/\r?\n/)) {
+  for (const raw of readFileSync(file, 'utf8').split(/\r?\n/)) {
     const line = raw.trim()
     if ('' === line || line.startsWith('#')) continue
     out.add(line.split('\t')[0])
@@ -62,7 +101,7 @@ interface TestCase {
 function gatherTests(): TestCase[] {
   const cases: TestCase[] = []
   const entries = readdirSync(SUITE_DIR, { withFileTypes: true })
-    .filter(e => e.isDirectory())
+    .filter(e => e.isDirectory() && '.git' !== e.name)
     .map(e => e.name)
     .sort()
 
@@ -83,35 +122,23 @@ function gatherTests(): TestCase[] {
       if (!hasNumberedSubs) continue
     }
 
+    const mk = (id: string, d: string): TestCase => ({
+      id,
+      dir: d,
+      name: existsSync(join(d, '===')) ?
+        readFileSync(join(d, '==='), 'utf8').trim() : id,
+      hasJson: existsSync(join(d, 'in.json')),
+      hasError: existsSync(join(d, 'error')),
+    })
+
     if (subDirs.length > 0) {
       for (const sub of subDirs) {
         const subDir = join(dir, sub)
         if (!existsSync(join(subDir, 'in.yaml'))) continue
-        const id = `${entry}/${sub}`
-        const nameFile = join(subDir, '===')
-        const name = existsSync(nameFile)
-          ? readFileSync(nameFile, 'utf8').trim()
-          : id
-        cases.push({
-          id,
-          dir: subDir,
-          name,
-          hasJson: existsSync(join(subDir, 'in.json')),
-          hasError: existsSync(join(subDir, 'error')),
-        })
+        cases.push(mk(`${entry}/${sub}`, subDir))
       }
     } else {
-      const nameFile = join(dir, '===')
-      const name = existsSync(nameFile)
-        ? readFileSync(nameFile, 'utf8').trim()
-        : entry
-      cases.push({
-        id: entry,
-        dir,
-        name,
-        hasJson: existsSync(join(dir, 'in.json')),
-        hasError: existsSync(join(dir, 'error')),
-      })
+      cases.push(mk(entry, dir))
     }
   }
 
@@ -119,107 +146,112 @@ function gatherTests(): TestCase[] {
 }
 
 
-// Parse multi-document JSON files.
-// Some test cases produce multiple JSON values (one per YAML document).
-// We only compare the first document for simplicity.
-function parseExpectedJson(raw: string): { value: any; multiDoc: boolean } {
-  const trimmed = raw.trim()
+// in.json is a STREAM of JSON documents, one per YAML document — NOT a single
+// JSON value. Split it into all of them; the previous runner kept only the
+// first, so every multi-document case was scored on part of its expectation.
+// An empty file is a stream of zero documents, which is a real expectation
+// ("this input yields no document"), not a parse failure.
+function parseJsonStream(raw: string): any[] {
+  const docs: any[] = []
+  let rest = raw.trim()
 
-  // Try parsing as a single JSON value first.
-  try {
-    return { value: JSON.parse(trimmed), multiDoc: false }
-  } catch {
-    // Multi-document: multiple JSON values concatenated.
-    // Try to extract just the first one.
-    // Strategy: try parsing increasing prefixes until one succeeds.
-    // Common patterns: "value1"\n"value2" or {...}\n{...} or [...]\n[...]
+  while (0 < rest.length) {
     let depth = 0
     let inString = false
     let escape = false
+    let cut = -1
 
-    for (let i = 0; i < trimmed.length; i++) {
-      const ch = trimmed[i]
+    for (let i = 0; i < rest.length; i++) {
+      const ch = rest[i]
 
       if (escape) {
         escape = false
-        continue
+      }
+      else if (inString) {
+        if ('\\' === ch) escape = true
+        else if ('"' === ch) inString = false
+      }
+      else if ('"' === ch) {
+        inString = true
+      }
+      else if ('{' === ch || '[' === ch) {
+        depth++
+      }
+      else if ('}' === ch || ']' === ch) {
+        depth--
       }
 
-      if (ch === '\\' && inString) {
-        escape = true
-        continue
+      if (inString || escape || 0 !== depth) continue
+
+      // A document boundary must be end-of-input or whitespace, otherwise the
+      // bare number 123 would be cut after its first digit.
+      const next = rest[i + 1]
+      if (undefined !== next && !/\s/.test(next)) continue
+
+      try {
+        JSON.parse(rest.slice(0, i + 1))
+        cut = i + 1
+        break
       }
-
-      if (ch === '"') {
-        inString = !inString
-        continue
-      }
-
-      if (inString) continue
-
-      if (ch === '{' || ch === '[') depth++
-      if (ch === '}' || ch === ']') depth--
-
-      if (depth === 0 && i > 0) {
-        // We might be at the end of a top-level value.
-        const candidate = trimmed.slice(0, i + 1)
-        try {
-          const value = JSON.parse(candidate)
-          return { value, multiDoc: true }
-        } catch {
-          // Keep going
-        }
-      }
+      catch { /* not a complete value yet */ }
     }
 
-    // Last resort: just return null
-    return { value: null, multiDoc: true }
+    if (-1 === cut) {
+      // Not a JSON document stream. Surface it rather than silently comparing
+      // against null, which is what the old runner's "last resort" did.
+      throw new Error(
+        'unparseable in.json remainder: ' + JSON.stringify(rest.slice(0, 80)))
+    }
+
+    docs.push(JSON.parse(rest.slice(0, cut)))
+    rest = rest.slice(cut).trim()
   }
+
+  return docs
 }
 
 
-// Deep comparison that's tolerant of number/string type differences
-// that arise from YAML type resolution differences.
-function deepLooseEqual(actual: any, expected: any): boolean {
-  if (actual === expected) return true
-  if (actual == null && expected == null) return true
-  if (actual == null || expected == null) return false
-
-  // Compare numbers loosely (string "1" vs number 1)
-  if (typeof expected === 'number' && typeof actual === 'number') {
-    if (Object.is(actual, expected)) return true
-    if (isNaN(actual) && isNaN(expected)) return true
-    return false
+// Canonicalise a parse result for STRICT structural comparison:
+// null-prototype and ordered-map objects become plain objects, and the
+// non-finite numbers YAML can spell but JSON cannot become marker strings.
+// Nothing here coerces between types — a string '1' stays a string and will
+// NOT match the number 1.
+function canon(v: any): any {
+  if ('number' === typeof v && !Number.isFinite(v)) {
+    return Number.isNaN(v) ? '@@NaN' : 0 < v ? '@@Infinity' : '@@-Infinity'
   }
+  if (undefined === v) return '@@UNDEFINED'
+  if (null === v || 'object' !== typeof v) return v
+  if (Array.isArray(v)) return v.map(canon)
+  const out: Record<string, any> = {}
+  for (const k of Object.keys(v)) out[k] = canon(v[k])
+  return out
+}
 
-  if (typeof expected === 'number' && typeof actual === 'string') {
-    return String(expected) === actual
-  }
-  if (typeof expected === 'string' && typeof actual === 'number') {
-    return expected === String(actual)
-  }
 
-  // Boolean/null loose comparison
-  if (typeof expected === 'boolean' || typeof actual === 'boolean') {
-    return actual === expected
-  }
+function readInput(dir: string): string {
+  return readFileSync(join(dir, 'in.yaml'), 'utf8').replace(/\r\n/g, '\n')
+}
 
-  // Arrays
-  if (Array.isArray(expected) && Array.isArray(actual)) {
-    if (expected.length !== actual.length) return false
-    return expected.every((v: any, i: number) => deepLooseEqual(actual[i], v))
-  }
+function show(v: any): string {
+  const s = JSON.stringify(v)
+  return undefined === s ? String(v) : 200 < s.length ? s.slice(0, 200) + '...' : s
+}
 
-  // Objects
-  if (typeof expected === 'object' && typeof actual === 'object') {
-    const expectedKeys = Object.keys(expected)
-    const actualKeys = Object.keys(actual)
-    if (expectedKeys.length !== actualKeys.length) return false
-    return expectedKeys.every(k => deepLooseEqual(actual[k], expected[k]))
-  }
+function parse(src: string): any {
+  return new Tabnas().use(jsonic).use(Yaml).parse(src)
+}
 
-  // String comparison
-  return String(actual) === String(expected)
+
+// A ledger id that no longer names a case in this group would silently excuse
+// a case that does not exist. Both ledgers are held to that.
+function ledgerIdsAreKnown(file: string, ledger: Set<string>, cases: TestCase[]) {
+  const known = new Set(cases.map(c => c.id))
+  const unknown = [...ledger].filter(id => !known.has(id)).sort()
+  if (0 < unknown.length) {
+    throw new Error(
+      file + ' lists ids that are not cases in its group: ' + unknown.join(' '))
+  }
 }
 
 
@@ -228,71 +260,66 @@ describe('yaml-test-suite', () => {
 
   const validCases = allCases.filter(c => c.hasJson && !c.hasError)
   const errorCases = allCases.filter(c => c.hasError)
-  const skipCases = allCases.filter(c => !c.hasJson && !c.hasError)
+  const novalueCases = allCases.filter(c => !c.hasJson && !c.hasError)
 
+  // Valid documents must parse AND produce the correct value, strictly, for
+  // every document in the stream.
   describe('valid-parse', () => {
     for (const tc of validCases) {
-      const skipReason = SKIP[tc.id]
-
-      test(`${tc.id}: ${tc.name}`, { skip: skipReason || undefined }, () => {
-        const inYaml = readFileSync(join(tc.dir, 'in.yaml'), 'utf8').replace(/\r\n/g, '\n')
-        const inJsonRaw = readFileSync(join(tc.dir, 'in.json'), 'utf8')
-        const { value: expected, multiDoc } = parseExpectedJson(inJsonRaw)
-
-        const j = new Tabnas().use(jsonic).use(Yaml)
+      test(`${tc.id}: ${tc.name}`, () => {
+        const inYaml = readInput(tc.dir)
+        const docs = parseJsonStream(
+          readFileSync(join(tc.dir, 'in.json'), 'utf8'))
 
         let actual: any
         try {
-          actual = j.parse(inYaml)
-        } catch (e: any) {
+          actual = parse(inYaml)
+        }
+        catch (e: any) {
           throw new Error(
-            `Parse failed for ${tc.id} (${tc.name}): ${e.message}`
-          )
+            `${tc.id} (${tc.name}): valid document REJECTED: ${e.message}\n` +
+            `  input: ${JSON.stringify(inYaml)}`)
         }
 
-        // The plugin returns an array when the source has multiple
-        // documents and a scalar otherwise. parseExpectedJson only extracts
-        // the first expected document, so for multi-doc inputs we compare
-        // actual[0] (or the scalar itself if there's somehow only one).
-        const actualForCompare = multiDoc && Array.isArray(actual) ? actual[0] : actual
-
-        if (!deepLooseEqual(actualForCompare, expected)) {
-          const tag = multiDoc ? ' [first doc only]' : ''
-          throw new Error(
-            `Mismatch for ${tc.id} (${tc.name})${tag}:\n` +
-            `  Expected: ${JSON.stringify(expected)}\n` +
-            `  Actual:   ${JSON.stringify(actual)}`
-          )
+        // A zero-document stream cannot be spelled as a JSON value at all, so
+        // the assertion is "the parse yielded no document" — which this
+        // plugin spells as undefined (empty input) or null (comments only).
+        if (0 === docs.length) {
+          assert.ok(undefined === actual || null === actual,
+            `${tc.id} (${tc.name}): expected NO document (in.json is empty), ` +
+            `got ${show(canon(actual))}\n` +
+            `  input: ${JSON.stringify(inYaml)}`)
+          return
         }
+
+        // The plugin yields the bare value for a single-document stream and
+        // an array of values for a multi-document one.
+        const expected = 1 === docs.length ? docs[0] : docs
+
+        assert.deepStrictEqual(canon(actual), canon(expected),
+          `${tc.id} (${tc.name}): wrong value\n` +
+          `  input:    ${JSON.stringify(inYaml)}\n` +
+          `  expected: ${show(canon(expected))}\n` +
+          `  actual:   ${show(canon(actual))}`)
       })
     }
   })
 
   describe('expected-errors', () => {
-    const lenient = loadLenient()
+    const lenient = loadLedger(LENIENT_FILE)
 
-    // The ledger must describe this corpus exactly — a stale id would silently
-    // excuse a case that no longer exists.
     test('lenient ledger has no unknown ids', () => {
-      const known = new Set(errorCases.map(c => c.id))
-      const unknown = [...lenient].filter(id => !known.has(id))
-      if (0 < unknown.length) {
-        throw new Error(
-          'test/yaml-test-suite-lenient.tsv lists ids that are not error ' +
-          'cases in test/yaml-test-suite: ' + unknown.join(' '))
-      }
+      ledgerIdsAreKnown(LENIENT_FILE, lenient, errorCases)
     })
 
     for (const tc of errorCases) {
-      const skipReason = SKIP[tc.id]
-
-      test(`${tc.id}: ${tc.name}`, { skip: skipReason || undefined }, () => {
-        const inYaml = readFileSync(join(tc.dir, 'in.yaml'), 'utf8').replace(/\r\n/g, '\n')
-        const j = new Tabnas().use(jsonic).use(Yaml)
+      test(`${tc.id}: ${tc.name}`, () => {
+        const inYaml = readInput(tc.dir)
 
         let threw = false
+        let actual: any
         try {
-          j.parse(inYaml)
+          actual = parse(inYaml)
         } catch {
           threw = true
         }
@@ -304,8 +331,7 @@ describe('yaml-test-suite', () => {
           if (threw) {
             throw new Error(
               `${tc.id} (${tc.name}) is now REJECTED. Remove its line from ` +
-              'test/yaml-test-suite-lenient.tsv so the strict expectation ' +
-              'applies from here on.')
+              LENIENT_FILE + ' so the strict expectation applies from here on.')
           }
           return
         }
@@ -314,19 +340,64 @@ describe('yaml-test-suite', () => {
         if (!threw) {
           throw new Error(
             `${tc.id} (${tc.name}) parsed without error, but the suite marks ` +
-            'it invalid and it is not listed in ' +
-            'test/yaml-test-suite-lenient.tsv.')
+            'it invalid and it is not listed in ' + LENIENT_FILE + '.\n' +
+            `  input:  ${JSON.stringify(inYaml)}\n` +
+            `  parsed: ${show(canon(actual))}`)
         }
       })
     }
   })
 
-  test('suite-stats', () => {
-    // Just a summary test that always passes, printing stats.
-    console.log(`\n  yaml-test-suite stats:`)
-    console.log(`    Total test cases: ${allCases.length}`)
-    console.log(`    Valid parse (with in.json): ${validCases.length}`)
-    console.log(`    Error cases: ${errorCases.length}`)
-    console.log(`    Skipped (no in.json, no error): ${skipCases.length}`)
+  // The suite publishes no expected value for these, so the value cannot be
+  // checked — but they ARE valid YAML, so "it parses" is a real assertion,
+  // just a partial one. These 29 cases used to be gathered and then dropped
+  // without any assertion at all.
+  describe('valid-parse-novalue', () => {
+    const unparsed = loadLedger(UNPARSED_FILE)
+
+    test('unparsed ledger has no unknown ids', () => {
+      ledgerIdsAreKnown(UNPARSED_FILE, unparsed, novalueCases)
+    })
+
+    for (const tc of novalueCases) {
+      test(`${tc.id}: ${tc.name}`, () => {
+        const inYaml = readInput(tc.dir)
+
+        let threw = false
+        try {
+          parse(inYaml)
+        } catch {
+          threw = true
+        }
+
+        if (unparsed.has(tc.id)) {
+          // A documented gap: this valid document is still rejected. If it
+          // now parses, that is progress — delete the line.
+          if (!threw) {
+            throw new Error(
+              `${tc.id} (${tc.name}) now PARSES. Remove its line from ` +
+              UNPARSED_FILE + ' so the expectation applies from here on.')
+          }
+          return
+        }
+
+        if (threw) {
+          throw new Error(
+            `${tc.id} (${tc.name}): the suite says this is valid YAML but it ` +
+            'was REJECTED, and it is not listed in ' + UNPARSED_FILE + '.\n' +
+            `  input: ${JSON.stringify(inYaml)}`)
+        }
+      })
+    }
+  })
+
+  // Not a conformance score — a guard that the corpus scored against is the
+  // whole, expected one. Without it a truncated checkout silently shrinks the
+  // denominator and every ratio above it improves for free.
+  test('suite-census', () => {
+    assert.strictEqual(allCases.length, 402, 'total cases')
+    assert.strictEqual(validCases.length, 279, 'value-checked cases')
+    assert.strictEqual(errorCases.length, 94, 'must-fail cases')
+    assert.strictEqual(novalueCases.length, 29, 'parse-only cases')
   })
 })

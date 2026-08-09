@@ -1,6 +1,16 @@
 # Agents Guide — shared spec fixtures
 
-`spec/*.tsv` holds the cross-runtime conformance fixtures. Both runtimes
+This directory holds two different things:
+
+- `spec/*.tsv` — the cross-runtime **parity** fixtures described below.
+- `yaml-test-suite/` — the official third-party **conformance** corpus,
+  vendored verbatim, plus the two shared ledgers that record where this
+  parser deviates from it: `yaml-test-suite-lenient.tsv` (must-fail cases
+  it accepts) and `yaml-test-suite-unparsed.tsv` (valid parse-only cases it
+  rejects). Both runners read both files, so the two runtimes cannot drift.
+  Lines are only ever DELETED from a ledger — see each file's header.
+
+`spec/*.tsv` holds the cross-runtime parity fixtures. Both runtimes
 auto-discover and run **every** file in this directory, so a change here
 affects TypeScript and Go together — edit with that in mind.
 
@@ -26,6 +36,14 @@ at any depth they are written as the marker strings `"@@Infinity"`,
 `"@@-Infinity"` and `"@@NaN"`. Both runners rewrite their own result the same
 way before comparing. Input that yields no value at all is spelled with the
 bare token `UNDEFINED` in the `expected` column.
+
+`UNDEFINED` means the parse yielded no document at all, which is distinct
+from a document whose value is null. TS distinguishes them (`undefined` vs
+`null`); the Go port currently returns a bare `nil` for both, so an
+`UNDEFINED` fixture cannot fail in Go today. That divergence is recorded,
+not hidden: `TestUndefinedIsIndistinguishableFromNull` in
+`go/parity_test.go` pins it, and fails as soon as Go grows a real undefined
+result — at which point the allowance in `runSpecFile` is deleted too.
 
 Results are compared after a JSON round-trip, so key order and the
 `OrderedMap` / null-prototype-object representations do not affect the

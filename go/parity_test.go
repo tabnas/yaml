@@ -213,9 +213,20 @@ func runSpecFile(t *testing.T, path string) {
 			}
 
 			// Input that yields no value at all cannot be spelled in JSON.
+			//
+			// A bare nil is accepted here, and that is a KNOWN WEAKNESS, not
+			// an oversight: this Go port spells BOTH "no document" and "a
+			// null document" as nil (see TestUndefinedIsIndistinguishableFromNull
+			// below), so an `UNDEFINED` fixture cannot currently tell them
+			// apart. TS distinguishes them — it returns `undefined` for the
+			// first and `null` for the second. Anything OTHER than nil or the
+			// undefined marker still fails, and the pinning test below fails
+			// the moment Go grows a real undefined result, which is the
+			// signal to delete the `got != nil` half of this condition.
 			if row.expected == "UNDEFINED" {
 				if got != nil && !jsonic.IsUndefined(got) {
-					t.Errorf("%s:%d: want no value, got %#v", row.file, row.lineNo, got)
+					t.Errorf("%s:%d: want no value (undefined), got %#v",
+						row.file, row.lineNo, got)
 				}
 				return
 			}
@@ -228,6 +239,39 @@ func runSpecFile(t *testing.T, path string) {
 				t.Errorf("%s:%d:\n  got  %#v\n  want %#v", row.file, row.lineNo, gotVal, want)
 			}
 		})
+	}
+}
+
+// TestUndefinedIsIndistinguishableFromNull pins a known TS/Go divergence so
+// it cannot be forgotten.
+//
+// TS returns `undefined` for a stream that yields no document and `null` for
+// a document whose value is null. This Go port returns a bare nil for both,
+// never the engine's undefined sentinel — so the `UNDEFINED` spec expectation
+// is unenforceable here and runSpecFile has to accept nil for it.
+//
+// Recorded, not excused: the moment go/yaml.go starts returning a real
+// undefined for the no-document case, THIS test fails, and the fix is to
+// delete it together with the `got != nil` half of the UNDEFINED branch in
+// runSpecFile, at which point Go is held to the same bar as TS.
+func TestUndefinedIsIndistinguishableFromNull(t *testing.T) {
+	noDocument := []string{"", "...", "# c\n..."}
+	nullDocument := []string{"~", "null", "---\nnull"}
+
+	for _, src := range append(append([]string{}, noDocument...), nullDocument...) {
+		got, err := Parse(src)
+		if err != nil {
+			t.Fatalf("Parse(%q): unexpected error: %v", src, err)
+		}
+		if got != nil {
+			t.Fatalf("Parse(%q): expected the pinned nil, got %#v — the "+
+				"divergence changed; re-read this test's comment", src, got)
+		}
+		if jsonic.IsUndefined(got) {
+			t.Errorf("Parse(%q) now yields undefined. The TS/Go divergence is "+
+				"fixed: delete this test and the `got != nil` allowance in "+
+				"runSpecFile's UNDEFINED branch.", src)
+		}
 	}
 }
 
