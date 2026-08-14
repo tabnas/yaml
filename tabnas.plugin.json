@@ -1,0 +1,21 @@
+{
+  "$schema": "https://tabnas.dev/schema/plugin.schema.json",
+  "name": "@tabnas/yaml",
+  "go": "github.com/tabnas/yaml/go",
+  "description": "YAML parsing for the tabnas engine.",
+  "base": "@tabnas/jsonic",
+  "engine": "@tabnas/parser",
+  "grammar": "yaml-grammar.jsonic",
+  "extensions": [
+    ".yaml",
+    ".yml"
+  ],
+  "mediaTypes": [
+    "application/yaml"
+  ],
+  "specDir": "test/spec",
+  "errorCodes": [],
+  "docs": "https://tabnas.dev/docs/packages",
+  "repository": "https://github.com/tabnas/yaml",
+  "versionSource": "ts/package.json"
+}
