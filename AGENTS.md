@@ -343,11 +343,14 @@ debug is a `file:` devDependency, plain `npm test` runs it.
 
 ## CI
 
-`.github/workflows/build.yml` has a single matrix job
-(`ubuntu`/`windows`/`macos`, Node 24). It sets
-`git config --global core.autocrlf false` (CRLF corrupts the `.tsv`
-fixtures), git-clones the tabnas closure
-(`parser debug json abnf railroad jsonic`) as siblings, runs
-`npm i && npm run build --if-present` for each (and `yaml`) in order,
-then `npm test` in `yaml/ts`. There is **no Go CI job** in this repo;
-the Go side is validated locally / via `make test-go`.
+`.github/workflows/ci.yml` is a thin caller to the org-standard reusable
+workflow `tabnas/.github/.github/workflows/polyglot-ci.yml@main`, passing
+`deps: "parser support debug json jsonic"`. The matrix
+(`ubuntu`/`windows`/`macos`), the `core.autocrlf false` setting (CRLF
+corrupts the `.tsv` fixtures) and the sibling-clone strategy all live in
+that reusable workflow, not in this repo.
+
+**A Go job does run.** `run-ts` and `run-go` both default to `true` in the
+reusable workflow and this repo overrides neither, so `go build ./...` and
+`go test ./...` run on `ubuntu` / `macos` alongside the TS matrix.
+`.github/workflows/release.yml` handles releases.
