@@ -2913,10 +2913,10 @@ const grammarText = `
   rule: val: close: {
     alts: [
       # Doc-frame markers terminate val; back up for the stream rule.
-      { s: '#DS' b: 1 g: yaml }
-      { s: '#DE' b: 1 g: yaml }
-      { s: '#DR' b: 1 g: yaml }
-      { s: '#IN' b: 1 g: yaml }
+      { s: '#DS' b: 1 g: 'yaml,end' }
+      { s: '#DE' b: 1 g: 'yaml,end' }
+      { s: '#DR' b: 1 g: 'yaml,end' }
+      { s: '#IN' b: 1 g: 'yaml,close' }
     ]
     inject: { append: false }
   }
@@ -2940,16 +2940,16 @@ const grammarText = `
   ]
   rule: yamlBlockList: close: [
     # Doc-frame markers terminate list; back up for the stream rule.
-    { s: '#DS' b: 1 g: yaml }
-    { s: '#DE' b: 1 g: yaml }
-    { s: '#DR' b: 1 g: yaml }
+    { s: '#DS' b: 1 g: 'yaml,end' }
+    { s: '#DE' b: 1 g: 'yaml,end' }
+    { s: '#DR' b: 1 g: 'yaml,end' }
     # Indent followed by element marker: next element at same level.
-    { s: ['#IN' '#EL'] c: '@t0-eq-in' r: yamlBlockElem g: yaml }
+    { s: ['#IN' '#EL'] c: '@t0-eq-in' r: yamlBlockElem g: 'yaml,comma' }
     # Same or lesser indent: close list.
-    { s: '#IN' c: '@t0-le-in' b: 1 g: yaml }
+    { s: '#IN' c: '@t0-le-in' b: 1 g: 'yaml,close' }
     # Element marker at top level (no preceding newline).
-    { s: '#EL' r: yamlBlockElem g: yaml }
-    { s: '#ZZ' b: 1 g: yaml }
+    { s: '#EL' r: yamlBlockElem g: 'yaml,comma' }
+    { s: '#ZZ' b: 1 g: 'yaml,end' }
   ]
 
   # Subsequent elements in a yamlBlockList (via rotation).
@@ -2959,23 +2959,23 @@ const grammarText = `
   ]
   rule: yamlBlockElem: close: [
     # Doc-frame markers terminate elem; back up for the stream rule.
-    { s: '#DS' b: 1 g: yaml }
-    { s: '#DE' b: 1 g: yaml }
-    { s: '#DR' b: 1 g: yaml }
-    { s: ['#IN' '#EL'] c: '@t0-eq-in' r: yamlBlockElem g: yaml }
-    { s: '#IN' c: '@t0-le-in' b: 1 g: yaml }
-    { s: '#EL' r: yamlBlockElem g: yaml }
-    { s: '#ZZ' b: 1 g: yaml }
+    { s: '#DS' b: 1 g: 'yaml,end' }
+    { s: '#DE' b: 1 g: 'yaml,end' }
+    { s: '#DR' b: 1 g: 'yaml,end' }
+    { s: ['#IN' '#EL'] c: '@t0-eq-in' r: yamlBlockElem g: 'yaml,comma' }
+    { s: '#IN' c: '@t0-le-in' b: 1 g: 'yaml,close' }
+    { s: '#EL' r: yamlBlockElem g: 'yaml,comma' }
+    { s: '#ZZ' b: 1 g: 'yaml,end' }
   ]
 
   # Amend list rule: close on dedent or same-indent non-element.
   rule: list: close: {
     alts: [
       # Doc-frame markers terminate list; back up for the stream rule.
-      { s: '#DS' b: 1 g: yaml }
-      { s: '#DE' b: 1 g: yaml }
-      { s: '#DR' b: 1 g: yaml }
-      { s: '#IN' c: '@t0-le-in' b: 1 g: yaml }
+      { s: '#DS' b: 1 g: 'yaml,end' }
+      { s: '#DE' b: 1 g: 'yaml,end' }
+      { s: '#DR' b: 1 g: 'yaml,end' }
+      { s: '#IN' c: '@t0-le-in' b: 1 g: 'yaml,close' }
     ]
     inject: { append: false }
   }
@@ -2990,10 +2990,10 @@ const grammarText = `
   rule: map: close: {
     alts: [
       # Doc-frame markers terminate map; back up for the stream rule.
-      { s: '#DS' b: 1 g: yaml }
-      { s: '#DE' b: 1 g: yaml }
-      { s: '#DR' b: 1 g: yaml }
-      { s: '#IN' c: '@t0-lt-in' b: 1 g: yaml }
+      { s: '#DS' b: 1 g: 'yaml,end' }
+      { s: '#DE' b: 1 g: 'yaml,end' }
+      { s: '#DR' b: 1 g: 'yaml,end' }
+      { s: '#IN' c: '@t0-lt-in' b: 1 g: 'yaml,close' }
     ]
     inject: { append: false }
   }
@@ -3009,18 +3009,18 @@ const grammarText = `
       { s: ['#QM' '#KEY' '#CL'] p: val u: { pair: true } a: '@qm-pairkey' g: yaml }
       { s: ['#QM' '#KEY' '#CA'] a: '@qm-implicit-null-pair' b: 1 g: yaml }
       { s: ['#QM' '#KEY' '#CB'] a: '@qm-implicit-null-pair' b: 1 g: yaml }
-      { s: '#ZZ' b: 1 g: yaml }
+      { s: '#ZZ' b: 1 g: 'yaml,end' }
     ]
     inject: { append: false }
   }
   rule: pair: close: {
     alts: [
       # Doc-frame markers terminate pair; back up for the stream rule.
-      { s: '#DS' b: 1 g: yaml }
-      { s: '#DE' b: 1 g: yaml }
-      { s: '#DR' b: 1 g: yaml }
-      { s: '#IN' c: '@t0-eq-in' r: pair g: yaml }
-      { s: '#IN' c: '@t0-lt-in' b: 1 g: yaml }
+      { s: '#DS' b: 1 g: 'yaml,end' }
+      { s: '#DE' b: 1 g: 'yaml,end' }
+      { s: '#DR' b: 1 g: 'yaml,end' }
+      { s: '#IN' c: '@t0-eq-in' r: pair g: 'yaml,comma' }
+      { s: '#IN' c: '@t0-lt-in' b: 1 g: 'yaml,close' }
     ]
     inject: { append: false }
   }
@@ -3031,15 +3031,15 @@ const grammarText = `
   ]
   rule: yamlElemMap: close: [
     # Doc-frame markers terminate elem-map; back up for the stream rule.
-    { s: '#DS' b: 1 g: yaml }
-    { s: '#DE' b: 1 g: yaml }
-    { s: '#DR' b: 1 g: yaml }
-    { s: '#IN' c: '@t0-eq-map-in' r: yamlElemPair g: yaml }
-    { s: '#IN' b: 1 g: yaml }
-    { s: '#CA' b: 1 g: yaml }
-    { s: '#CS' b: 1 g: yaml }
-    { s: '#CB' b: 1 g: yaml }
-    { s: '#ZZ' g: yaml }
+    { s: '#DS' b: 1 g: 'yaml,end' }
+    { s: '#DE' b: 1 g: 'yaml,end' }
+    { s: '#DR' b: 1 g: 'yaml,end' }
+    { s: '#IN' c: '@t0-eq-map-in' r: yamlElemPair g: 'yaml,comma' }
+    { s: '#IN' b: 1 g: 'yaml,close' }
+    { s: '#CA' b: 1 g: 'yaml,comma' }
+    { s: '#CS' b: 1 g: 'yaml,close' }
+    { s: '#CB' b: 1 g: 'yaml,close' }
+    { s: '#ZZ' g: 'yaml,end' }
   ]
 
   # Additional pairs in a yamlElemMap.
@@ -3048,15 +3048,15 @@ const grammarText = `
   ]
   rule: yamlElemPair: close: [
     # Doc-frame markers terminate elem-pair; back up for the stream rule.
-    { s: '#DS' b: 1 g: yaml }
-    { s: '#DE' b: 1 g: yaml }
-    { s: '#DR' b: 1 g: yaml }
-    { s: '#IN' c: '@t0-eq-map-in' r: yamlElemPair g: yaml }
-    { s: '#IN' b: 1 g: yaml }
-    { s: '#CA' b: 1 g: yaml }
-    { s: '#CS' b: 1 g: yaml }
-    { s: '#CB' b: 1 g: yaml }
-    { s: '#ZZ' g: yaml }
+    { s: '#DS' b: 1 g: 'yaml,end' }
+    { s: '#DE' b: 1 g: 'yaml,end' }
+    { s: '#DR' b: 1 g: 'yaml,end' }
+    { s: '#IN' c: '@t0-eq-map-in' r: yamlElemPair g: 'yaml,comma' }
+    { s: '#IN' b: 1 g: 'yaml,close' }
+    { s: '#CA' b: 1 g: 'yaml,comma' }
+    { s: '#CS' b: 1 g: 'yaml,close' }
+    { s: '#CB' b: 1 g: 'yaml,close' }
+    { s: '#ZZ' g: 'yaml,end' }
   ]
 
   # Amend elem rule for YAML sequences ("- key: val" at top level of [ ... ]).
@@ -3073,13 +3073,13 @@ const grammarText = `
   rule: elem: close: {
     alts: [
       # Doc-frame markers terminate elem; back up for the stream rule.
-      { s: '#DS' b: 1 g: yaml }
-      { s: '#DE' b: 1 g: yaml }
-      { s: '#DR' b: 1 g: yaml }
-      { s: ['#IN' '#EL'] c: '@t0-eq-in' r: elem g: yaml }
-      { s: '#IN' c: '@t0-eq-in' b: 1 g: yaml }
-      { s: '#IN' c: '@t0-lt-in' b: 1 g: yaml }
-      { s: '#EL' r: elem g: yaml }
+      { s: '#DS' b: 1 g: 'yaml,end' }
+      { s: '#DE' b: 1 g: 'yaml,end' }
+      { s: '#DR' b: 1 g: 'yaml,end' }
+      { s: ['#IN' '#EL'] c: '@t0-eq-in' r: elem g: 'yaml,comma' }
+      { s: '#IN' c: '@t0-eq-in' b: 1 g: 'yaml,close' }
+      { s: '#IN' c: '@t0-lt-in' b: 1 g: 'yaml,close' }
+      { s: '#EL' r: elem g: 'yaml,comma' }
     ]
     inject: { append: false }
   }
