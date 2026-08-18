@@ -274,7 +274,13 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
   let IN = tabnas.token('#IN')
 
   // Shared anchor storage for the plugin instance.
-  let anchors: Record<string, any> = {}
+  // Allocated without a prototype: anchor names come from the document, so on
+  // a plain literal `anchors['__proto__'] = value` never defines a key - it
+  // runs the Object.prototype setter. A map value then reparents this table
+  // and every later alias resolves through attacker-supplied data (*toString
+  // would find a value that was never anchored), while a scalar value is
+  // silently dropped and *__proto__ reads back Object.prototype.
+  let anchors: Record<string, any> = Object.create(null)
   let pendingAnchors: { name: string, inline: boolean }[] = []
   let pendingExplicitCL = false
   // Flag to tell the number matcher to skip, so text.check handles the value.
@@ -1012,7 +1018,7 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
               // #DR tokens consumed by the `stream` rule.
               if (!seenLex.has(lex)) {
                 seenLex.add(lex)
-                anchors = {}
+                anchors = Object.create(null)
                 pendingAnchors = []
                 pendingExplicitCL = false
                 skipNumberMatch = false
