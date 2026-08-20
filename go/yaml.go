@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	jsonic "github.com/tabnas/jsonic/go"
 )
@@ -64,6 +65,29 @@ type flowScanState struct {
 }
 
 // reset clears flow scan state at the start of a new parse.
+
+// advanceCol moves the lex point over the first n BYTES of fwd.
+//
+// SI is a byte offset and CI is a COLUMN, and a column counts characters.
+// These used to be the same statement twice — `pnt.SI += n; pnt.CI += n`
+// — which charged a 2-byte `é` two columns and a 3-byte `€` three, so
+// every diagnostic after a non-ASCII character reported a column past
+// where the problem was.
+//
+// The TypeScript half writes the same expression over UTF-16 indices,
+// where it DOES count characters. The two lines look identical, which is
+// why this survived a port review: a transliteration is not a port when
+// the two languages index strings differently.
+//
+// utf8.RuneCountInString is what the engine's own matchers use, so the
+// two agree by construction. It also matches the engine on malformed
+// UTF-8, counting each invalid byte as one rune — a local "is this a
+// continuation byte" test does not, and gets a stray 0x80 wrong.
+func advanceCol(pnt *jsonic.Point, fwd string, n int) {
+	pnt.SI += n
+	pnt.CI += utf8.RuneCountInString(fwd[:n])
+}
+
 func (s *flowScanState) reset() {
 	s.depth = 0
 	s.pos = 0
@@ -702,14 +726,12 @@ func Yaml(j *jsonic.Jsonic, opts map[string]any) error {
 						// Complex value — use alias marker for later resolution.
 						tkn = lex.Token("#VL", VL, map[string]any{"__yamlAlias": aliasName}, fwd[:nameEnd])
 					}
-					pnt.SI += nameEnd
-					pnt.CI += nameEnd
+					advanceCol(pnt, fwd, nameEnd)
 					return tkn
 				}
 				// Unknown alias — return as marker.
 				tkn := lex.Token("#VL", VL, map[string]any{"__yamlAlias": aliasName}, fwd[:nameEnd])
-				pnt.SI += nameEnd
-				pnt.CI += nameEnd
+				advanceCol(pnt, fwd, nameEnd)
 				return tkn
 			}
 
@@ -819,8 +841,7 @@ func Yaml(j *jsonic.Jsonic, opts map[string]any) error {
 						skip++
 					}
 				}
-				pnt.SI += skip
-				pnt.CI += skip
+				advanceCol(pnt, fwd, skip)
 
 				// If the anchor is standalone on its own line (followed by a
 				// newline), consume the newline and leading spaces so no extra
@@ -865,8 +886,7 @@ func Yaml(j *jsonic.Jsonic, opts map[string]any) error {
 					}
 					rawVal := trimRight(fwd[valStart:valEnd])
 					tkn := lex.Token("#TX", TX, rawVal, fwd[:valEnd])
-					pnt.SI += valEnd
-					pnt.CI += valEnd
+					advanceCol(pnt, fwd, valEnd)
 					return tkn
 				}
 				// Local tag: !name value — skip the tag.
@@ -877,8 +897,7 @@ func Yaml(j *jsonic.Jsonic, opts map[string]any) error {
 				if tagEnd < len(fwd) && fwd[tagEnd] == ' ' {
 					tagEnd++
 				}
-				pnt.SI += tagEnd
-				pnt.CI += tagEnd
+				advanceCol(pnt, fwd, tagEnd)
 				// If tag is standalone, consume newline + spaces.
 				if pnt.SI < pnt.Len && (lex.Src[pnt.SI] == '\n' || lex.Src[pnt.SI] == '\r') {
 					tagStandalone := true
@@ -954,8 +973,7 @@ func Yaml(j *jsonic.Jsonic, opts map[string]any) error {
 						continue
 					}
 				}
-				pnt.SI += skip
-				pnt.CI += skip
+				advanceCol(pnt, fwd, skip)
 				continue
 			}
 
@@ -1009,8 +1027,7 @@ func Yaml(j *jsonic.Jsonic, opts map[string]any) error {
 					pos++
 				}
 				directiveSrc := fwd[:pos]
-				pnt.SI += pos
-				pnt.CI += pos
+				advanceCol(pnt, fwd, pos)
 				return lex.Token("#DR", DR, directiveSrc, directiveSrc)
 			}
 
@@ -1023,8 +1040,7 @@ func Yaml(j *jsonic.Jsonic, opts map[string]any) error {
 				}
 				rawVal := trimRight(fwd[valStart:valEnd])
 				tkn := lex.Token("#TX", TX, rawVal, fwd[:valEnd])
-				pnt.SI += valEnd
-				pnt.CI += valEnd
+				advanceCol(pnt, fwd, valEnd)
 				return tkn
 			}
 
@@ -1151,15 +1167,24 @@ func Yaml(j *jsonic.Jsonic, opts map[string]any) error {
 					// Bump RI for each consumed newline so error positions stay accurate.
 					pos := 0
 					rows := 0
+					// Index of the last consumed \n, for the column below.
+					// Only \n is tracked, matching the TypeScript half — a
+					// bare \r leaves the column advancing rather than
+					// restarting there.
+					lastNL := -1
 					for pos < len(fwd) && (fwd[pos] == '\n' || fwd[pos] == '\r' ||
 						fwd[pos] == ' ' || fwd[pos] == '\t') {
 						if fwd[pos] == '\r' && pos+1 < len(fwd) && fwd[pos+1] == '\n' {
+							lastNL = pos + 1
 							pos += 2
 							rows++
 							continue
 						}
 						if fwd[pos] == '\n' || fwd[pos] == '\r' {
 							rows++
+							if fwd[pos] == '\n' {
+								lastNL = pos
+							}
 						}
 						pos++
 					}
@@ -1170,7 +1195,25 @@ func Yaml(j *jsonic.Jsonic, opts map[string]any) error {
 					}
 					pnt.SI += pos
 					pnt.RI += rows
-					pnt.CI = 0
+					// The column of the NEXT character, 1-based: characters
+					// since the last newline. This was the constant 0 — not a
+					// valid 1-based column at all, and TypeScript's comment
+					// beside its own version says why that matters (a close
+					// `]` at column 0 lexes as #BD rather than #CS).
+					//
+					// TypeScript computes `pos - lastNL`, so a newline
+					// followed by three spaces puts the next token at column
+					// 4. The constant put it at 1 whatever the indent:
+					//
+					//     [a,<LF> }        TS col 2   Go was 1
+					//     [a,<LF>   }      TS col 4   Go was 1
+					//
+					// Counted in characters, like every other column here.
+					if lastNL >= 0 {
+						pnt.CI = utf8.RuneCountInString(fwd[lastNL:pos])
+					} else {
+						pnt.CI += utf8.RuneCountInString(fwd[:pos])
+					}
 					continue
 				}
 
@@ -1858,8 +1901,7 @@ func handleTagInTextCheck(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, tagHan
 	}
 
 	tkn := lex.Token(tinToName(tknTin), tknTin, result, fwd[:valEnd])
-	pnt.SI += valEnd
-	pnt.CI += valEnd
+	advanceCol(pnt, fwd, valEnd)
 	return &jsonic.LexCheckResult{Done: true, Token: tkn}
 }
 
@@ -2030,24 +2072,41 @@ func handlePlainScalar(lex *jsonic.Lex, pnt *jsonic.Point, src, fwd string, flow
 	// Check if this is a YAML value keyword.
 	if val, ok := isYamlValue(text); ok {
 		tkn := lex.Token("#VL", jsonic.TinVL, val, text)
-		pnt.SI += len(text)
-		pnt.CI += len(text)
+		// Correct today by accident of the keyword set — `true`, `null`,
+		// `~` and the rest are ASCII — and written in the unit the column
+		// actually means, so it stays correct if that ever changes.
+		advanceCol(pnt, text, len(text))
 		return &jsonic.LexCheckResult{Done: true, Token: tkn}
 	}
 
 	// Check if it's a number.
 	if num, ok := parseYamlNumber(text); ok {
 		tkn := lex.Token("#NR", jsonic.TinNR, num, text)
-		pnt.SI += len(text)
-		pnt.CI += len(text)
+		// Correct today by accident of the grammar — a YAML number is
+		// ASCII, so bytes and characters coincide — and written in the
+		// unit the column actually means, so it stays correct if that
+		// ever changes.
+		advanceCol(pnt, text, len(text))
 		return &jsonic.LexCheckResult{Done: true, Token: tkn}
 	}
 
-	// Plain text.
+	// Plain text. THE path a non-ASCII scalar takes, and the one the
+	// column bug lived on: `pnt.CI += totalConsumed` charged a byte
+	// count. Traced rather than guessed — instrumenting every CI site
+	// and parsing `{a: é, ]` showed this line and one other firing, out
+	// of forty.
+	//
+	// The TypeScript half is `pnt.cI += totalConsumed  // approximate`,
+	// and the approximation is the multi-row case below: when `rows > 0`
+	// the column should restart on the last line rather than accumulate
+	// across the newlines. That is true in BOTH ports and is not what
+	// this changes — the two are now approximate in the same way and in
+	// the same unit, which is the parity claim. Making them exact is a
+	// separate question, and one the TypeScript comment has been asking
+	// for longer.
 	tkn := lex.Token("#TX", jsonic.TinTX, text, fwd[:totalConsumed])
-	pnt.SI += totalConsumed
 	pnt.RI += rows
-	pnt.CI += totalConsumed
+	advanceCol(pnt, fwd, totalConsumed)
 	return &jsonic.LexCheckResult{Done: true, Token: tkn}
 }
 
@@ -2114,8 +2173,7 @@ func handleTypeTag(lex *jsonic.Lex, pnt *jsonic.Point, fwd string,
 			tknTin = VL
 		}
 		tkn := lex.Token(tinToName(tknTin), tknTin, result, fwd[:valEnd])
-		pnt.SI += valEnd
-		pnt.CI += valEnd
+		advanceCol(pnt, fwd, valEnd)
 		return tkn
 	}
 
@@ -2168,8 +2226,7 @@ func handleTypeTag(lex *jsonic.Lex, pnt *jsonic.Point, fwd string,
 		tknTin = VL
 	}
 	tkn := lex.Token(tinToName(tknTin), tknTin, result, fwd[:valEnd])
-	pnt.SI += valEnd
-	pnt.CI += valEnd
+	advanceCol(pnt, fwd, valEnd)
 	return tkn
 }
 
@@ -2368,7 +2425,10 @@ func handleExplicitKey(lex *jsonic.Lex, pnt *jsonic.Point, fwd string,
 	if hasValue {
 		pnt.SI += valConsumed
 		pnt.RI += 1 + extraRows
-		indent := valConsumed - consumed
+		// Characters, not bytes: `consumed` and `valConsumed` are BYTE
+		// indices into fwd, so a non-ASCII key set the following indent
+		// column too far right by that key's extra bytes.
+		indent := utf8.RuneCountInString(fwd[consumed:valConsumed])
 		pnt.CI = indent + 1
 
 		// If there's inline content after `: ` on the same line that itself
@@ -2413,8 +2473,7 @@ func handleExplicitKey(lex *jsonic.Lex, pnt *jsonic.Point, fwd string,
 			*pendingExplicitCL = true
 		}
 	} else {
-		pnt.SI += beforeNewline
-		pnt.CI += beforeNewline
+		advanceCol(pnt, fwd, beforeNewline)
 		clTkn := lex.Token("#CL", CL, 1, ": ")
 		vlTkn := lex.Token("#VL", VL, nil, "")
 		*pendingTokens = append(*pendingTokens, clTkn, vlTkn)
@@ -2461,7 +2520,11 @@ func handleDocMarker(lex *jsonic.Lex, pnt *jsonic.Point, fwd string,
 		}
 		pnt.CI = 1 // column 1 at start of next line
 	} else {
-		pnt.CI += pos
+		// Characters, not bytes — `pos` is a BYTE index into fwd, and the
+		// TypeScript half advances by the same expression over UTF-16
+		// indices. Inline content after a `---` marker is where this
+		// shows.
+		pnt.CI += utf8.RuneCountInString(fwd[:pos])
 	}
 	var tkn *jsonic.Token
 	if isEnd {
@@ -2667,10 +2730,20 @@ func handleDoubleQuotedString(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, ST
 	tkn := lex.Token("#ST", ST, val, fwd[:i])
 	pnt.SI += i
 	pnt.RI += rows
+	// Characters, not bytes — `i` and `lastNewlineEnd` are BYTE indices
+	// into fwd. See advanceCol.
+	//
+	// The `rows > 0` branch has no TypeScript counterpart at all: that
+	// port does a bare `pnt.cI += i` for a quoted scalar and never
+	// touches `rI`, so a multi-line quoted string leaves its row and
+	// column wrong there in a way this port does not. Deliberately left
+	// as it is — this change is about the UNIT, and closing that
+	// structural gap means deciding which port is right about rows,
+	// which is a separate question with its own answer.
 	if rows > 0 {
-		pnt.CI = i - lastNewlineEnd
+		pnt.CI = utf8.RuneCountInString(fwd[lastNewlineEnd:i])
 	} else {
-		pnt.CI += i
+		pnt.CI += utf8.RuneCountInString(fwd[:i])
 	}
 	return tkn
 }
@@ -2727,10 +2800,20 @@ func handleSingleQuotedString(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, ST
 	tkn := lex.Token("#ST", ST, val, fwd[:i])
 	pnt.SI += i
 	pnt.RI += rows
+	// Characters, not bytes — `i` and `lastNewlineEnd` are BYTE indices
+	// into fwd. See advanceCol.
+	//
+	// The `rows > 0` branch has no TypeScript counterpart at all: that
+	// port does a bare `pnt.cI += i` for a quoted scalar and never
+	// touches `rI`, so a multi-line quoted string leaves its row and
+	// column wrong there in a way this port does not. Deliberately left
+	// as it is — this change is about the UNIT, and closing that
+	// structural gap means deciding which port is right about rows,
+	// which is a separate question with its own answer.
 	if rows > 0 {
-		pnt.CI = i - lastNewlineEnd
+		pnt.CI = utf8.RuneCountInString(fwd[lastNewlineEnd:i])
 	} else {
-		pnt.CI += i
+		pnt.CI += utf8.RuneCountInString(fwd[:i])
 	}
 	return tkn
 }
@@ -2793,8 +2876,7 @@ func handleNumericColon(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, TX jsoni
 			}
 			text := fwd[:end]
 			tkn := lex.Token("#TX", TX, text, text)
-			pnt.SI += end
-			pnt.CI += end
+			advanceCol(pnt, fwd, end)
 			return tkn
 		}
 	}
@@ -2816,8 +2898,7 @@ func handleNumericColon(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, TX jsoni
 	}
 	text := fwd[:end]
 	tkn := lex.Token("#TX", TX, text, text)
-	pnt.SI += end
-	pnt.CI += end
+	advanceCol(pnt, fwd, end)
 	return tkn
 }
 
