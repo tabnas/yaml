@@ -19,11 +19,11 @@ name: Docs
 on:
   push:
     paths:
-      - 'go/**'
       - 'go/doc/**'
-      - 'ts/**'
       - 'ts/doc/**'
       - 'README.md'
+      - 'go/README.md'
+      - 'ts/README.md'
       - 'docs/STYLE-GUIDE.md'
       - 'ts/scripts/gated-docs.cjs'
       - '.vale.ini'
@@ -31,11 +31,11 @@ on:
       - '.github/workflows/docs.yml'
   pull_request:
     paths:
-      - 'go/**'
       - 'go/doc/**'
-      - 'ts/**'
       - 'ts/doc/**'
       - 'README.md'
+      - 'go/README.md'
+      - 'ts/README.md'
       - 'docs/STYLE-GUIDE.md'
       - 'ts/scripts/gated-docs.cjs'
       - '.vale.ini'
