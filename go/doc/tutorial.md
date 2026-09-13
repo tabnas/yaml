@@ -121,7 +121,7 @@ for _, src := range inputs {
 
 Building the YAML grammar dominates a parse, so reusing the instance is
 the meaningful optimisation. (The package-level `Parse` already shares a
-single lazily-built instance internally; `MakeJsonic` gives you your own
+single lazily built instance internally; `MakeJsonic` gives you your own
 to configure.)
 
 

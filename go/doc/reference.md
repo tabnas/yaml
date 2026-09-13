@@ -28,7 +28,7 @@ func Parse(src string) (any, error)
 ```
 
 Parses a YAML string and returns the resulting Go value. Uses a single
-lazily-built parser instance shared across calls (building the YAML
+lazily built parser instance shared across calls (building the YAML
 grammar dominates a parse), so repeated calls do not rebuild the engine.
 The shared instance only reads instance state during a parse, so `Parse`
 is safe for concurrent use.
