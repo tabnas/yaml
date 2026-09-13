@@ -1,7 +1,7 @@
 # Concepts
 
 Background on how the YAML plugin works, and why it is built the way it
-is. This is understanding-oriented reading — for steps see the
+is. This is understanding-oriented reading; for steps see the
 [tutorial](tutorial.md) and [how-to guide](guide.md), and for exact
 signatures see the [reference](reference.md).
 
@@ -10,16 +10,16 @@ signatures see the [reference](reference.md).
 
 There are three layers here:
 
-- the **Tabnas engine** (`@tabnas/parser`) — a rule-based parser over a
+- the **Tabnas engine** (`@tabnas/parser`), a rule-based parser over a
   configurable, matcher-based lexer;
-- the **relaxed-JSON grammar** (`@tabnas/jsonic`) — the rules that turn
+- the **relaxed-JSON grammar** (`@tabnas/jsonic`), the rules that turn
   `a:1,b:2` into an object, installed on the engine;
-- the **YAML plugin** (this package) — which amends that grammar and
+- the **YAML plugin** (this package), which amends that grammar and
   lexer to accept indentation-sensitive YAML.
 
 This is why registration is `new Tabnas().use(jsonic).use(Yaml)`: each
 `.use()` layers more grammar onto the same engine instance. The YAML
-plugin is not a separate parser — it is a set of grammar amendments and
+plugin is not a separate parser: it is a set of grammar amendments and
 lexer matchers that ride on the engine jsonic already configured. The
 payoff is that block YAML, flow collections, and relaxed JSON all share
 one engine and one set of value rules.
@@ -32,11 +32,11 @@ A parse runs in two cooperating stages, and the plugin extends both.
 The **lexer** turns source text into tokens. It is built from
 independent matchers that run in priority order; the first to produce a
 token at each position wins. The plugin installs a `yaml` matcher at
-priority `5e5` — ahead of jsonic's built-ins — so YAML-only syntax is
+priority `5e5` (ahead of jsonic's built-ins) so YAML-only syntax is
 recognised first: block scalars (`|` / `>`), single- and double-quoted
 scalars, anchors (`&`) and aliases (`*`), tags (`!!type`),
 document-frame markers (`---` / `...` / `%…`), the explicit-key marker
-(`?`), and — crucially — **indentation**, emitted as an `#IN` token
+(`?`), and (crucially) **indentation**, emitted as an `#IN` token
 carrying the leading-space count of each line.
 
 It also reconfigures the lexer: jsonic's single-colon fixed token is
@@ -46,8 +46,8 @@ inside the plugin's own matcher.
 
 The **parser** consumes those tokens by named rules. The plugin
 *amends* jsonic's `val`, `map`, `pair`, `list`, and `elem` rules
-(prepending alternates) and introduces block-specific rules — `indent`,
-`yamlBlockList`, `yamlBlockElem`, `yamlElemMap`, `yamlElemPair` — plus a
+(prepending alternates) and introduces block-specific rules (`indent`,
+`yamlBlockList`, `yamlBlockElem`, `yamlElemMap`, `yamlElemPair`) plus a
 `stream` rule that becomes the parser's start rule.
 
 
@@ -60,9 +60,9 @@ lexer emits an `#IN` token (with the indent count as its value) at line
 starts, and the block rules compare that count against the indent
 recorded for the enclosing collection.
 
-The decisions are small numeric comparisons — "is this line indented
+The decisions are small numeric comparisons, "is this line indented
 more than the parent (open a nested block), equal (continue the
-collection), or less (close back out)?" — encoded as alternate
+collection), or less (close back out)?", encoded as alternate
 *conditions* in the grammar (`@val-indent-deeper`, `@t0-eq-in`,
 `@t0-le-in`, …). Sequences are likewise made explicit: a `- ` becomes an
 `#EL` element-marker token, so `yamlBlockList` can recognise sequence
@@ -113,8 +113,8 @@ the mapping declares itself.
 
 ## Accepted vs rejected
 
-The plugin targets a **core subset** of YAML 1.2 — the constructs that
-appear in real configuration files — not the entire specification.
+The plugin targets a **core subset** of YAML 1.2, the constructs that
+appear in real configuration files, not the entire specification.
 
 Accepted: block and flow collections, sequences of mappings, single-
 and double-quoted scalars (with escape processing in double quotes and
@@ -129,7 +129,7 @@ Not handled: non-scalar complex mapping keys, set (`!!set`) and ordered
 map (`!!omap`) shorthand, and some folding corner cases. Keyword
 handling is deliberately YAML-1.1-flavoured, so `yes`/`no` are booleans;
 quote them when you need the literal strings. There is no "safe" mode or
-tag restriction — review parsed output before trusting untrusted input.
+tag restriction; review parsed output before trusting untrusted input.
 
 
 ## Why the grammar is a separate file

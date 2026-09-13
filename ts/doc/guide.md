@@ -1,6 +1,6 @@
 # How-to guide
 
-Focused recipes for the YAML plugin. Each is self-contained — copy the
+Focused recipes for the YAML plugin. Each is self-contained; copy the
 block, change the input. For a guided introduction start with the
 [tutorial](tutorial.md); for exact signatures and the full syntax list
 see the [reference](reference.md).
@@ -222,7 +222,7 @@ the structured fields:
 try {
   j.parse('a: 1\n  : oops')
 } catch (err) {
-  err.code          // a stable error code, e.g. 'unexpected'
+  err.code          // a stable error code, for example 'unexpected'
   err.lineNumber    // 1-based line of the failure
   err.columnNumber  // 1-based column
   err.message       // formatted report with a source extract
@@ -238,7 +238,7 @@ to branch on.
 ## Turn the YAML grammar back off
 
 Every rule and alternate the plugin adds is tagged `g: yaml`. To strip
-them from an instance — reverting to plain relaxed-JSON parsing —
+them from an instance (reverting to plain relaxed-JSON parsing),
 exclude that group:
 
 ```js ignore

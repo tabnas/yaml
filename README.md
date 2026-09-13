@@ -60,19 +60,19 @@ result, _ := tabnasyaml.Parse("name: Alice\nitems:\n  - one\n  - two\n")
 The docs follow the [Diátaxis](https://diataxis.fr) four-quadrant
 structure (learning / tasks / reference / explanation):
 
-**TypeScript / JavaScript** — [`ts/doc/`](ts/doc/)
+**TypeScript / JavaScript**: [`ts/doc/`](ts/doc/)
 
-- [Tutorial](ts/doc/tutorial.md) — parse your first document, step by step.
-- [How-to guide](ts/doc/guide.md) — focused task recipes.
-- [Reference](ts/doc/reference.md) — API, options, accepted syntax.
-- [Concepts](ts/doc/concepts.md) — how it works, and why.
+- [Tutorial](ts/doc/tutorial.md). Parse your first document, step by step.
+- [How-to guide](ts/doc/guide.md). Focused task recipes.
+- [Reference](ts/doc/reference.md). API, options, accepted syntax.
+- [Concepts](ts/doc/concepts.md). How it works, and why.
 
-**Go** — [`go/doc/`](go/doc/)
+**Go**: [`go/doc/`](go/doc/)
 
-- [Tutorial](go/doc/tutorial.md) — parse your first document, step by step.
-- [How-to guide](go/doc/guide.md) — focused task recipes.
-- [Reference](go/doc/reference.md) — API, options, accepted syntax.
-- [Concepts](go/doc/concepts.md) — how it works, and the differences from TS.
+- [Tutorial](go/doc/tutorial.md). Parse your first document, step by step.
+- [How-to guide](go/doc/guide.md). Focused task recipes.
+- [Reference](go/doc/reference.md). API, options, accepted syntax.
+- [Concepts](go/doc/concepts.md). How it works, and the differences from TS.
 
 
 ## Grammar
