@@ -8,7 +8,7 @@ task recipes see the [how-to guide](guide.md); for design background see
 
 ## Package
 
-`@tabnas/yaml` — a Tabnas plugin. Peer dependencies: `@tabnas/jsonic`
+`@tabnas/yaml`, a Tabnas plugin. Peer dependencies: `@tabnas/jsonic`
 (>= 2) and `@tabnas/parser` (>= 2).
 
 ```bash
@@ -46,7 +46,7 @@ const j = new Tabnas().use(jsonic).use(Yaml)
 ```
 
 The plugin is idempotent: registering it twice on the same instance is a
-no-op (it guards against re-entry). Order matters — `jsonic` must be
+no-op (it guards against re-entry). Order matters: `jsonic` must be
 applied before `Yaml`, because `Yaml` amends the relaxed-JSON grammar
 `jsonic` installs.
 
@@ -108,13 +108,13 @@ The document value follows these YAML-to-JavaScript mappings:
 
 `parse` returns `{ meta, content }`:
 
-- `content` — exactly what the `meta: false` path returns.
-- `meta` — for a single document, one `DocMeta`; for a stream, an array
+- `content`. Exactly what the `meta: false` path returns.
+- `meta`. For a single document, one `DocMeta`; for a stream, an array
   of `DocMeta` parallel to the `content` array.
 
 ```typescript
 type DocMeta = {
-  directives: string[]   // raw directive lines for this doc, e.g. ['%YAML 1.2']
+  directives: string[]   // raw directive lines for this doc, for example ['%YAML 1.2']
   explicit: boolean      // true if the doc was opened with `---`
   ended: boolean         // true if the doc was closed with `...`
 }
@@ -173,7 +173,7 @@ diagram legend (`ts/doc/grammar.svg`):
 | `#EL` | block sequence item dash `- ` |
 | `#DS` | document start marker `---` (column 0) |
 | `#DE` | document end marker `...` (column 0) |
-| `#DR` | directive line, e.g. `%YAML` / `%TAG` (column 0) |
+| `#DR` | directive line, for example `%YAML` / `%TAG` (column 0) |
 | `#QM` | explicit-key marker `?` in flow `{? k : v }` |
 
 It also removes jsonic's single-colon fixed token and clears jsonic's

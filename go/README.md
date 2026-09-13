@@ -45,12 +45,12 @@ For repeated parsing, build a reusable parser with `tabnasyaml.MakeJsonic()`.
 The docs follow the [Diátaxis](https://diataxis.fr) four-quadrant
 structure:
 
-- [Tutorial](doc/tutorial.md) — parse your first document, step by step.
-- [How-to guide](doc/guide.md) — focused task recipes (flow collections,
+- [Tutorial](doc/tutorial.md). Parse your first document, step by step.
+- [How-to guide](doc/guide.md). Focused task recipes (flow collections,
   block scalars, anchors, multi-document streams, the `Meta` option).
-- [Reference](doc/reference.md) — the public API, every option, and the
+- [Reference](doc/reference.md). The public API, every option, and the
   full list of accepted syntax.
-- [Concepts](doc/concepts.md) — how the plugin extends the engine, and
+- [Concepts](doc/concepts.md). How the plugin extends the engine, and
   the differences from the TypeScript version.
 
 The TypeScript port lives in [`../ts`](../ts) with its own

@@ -107,7 +107,7 @@ m := mr.Meta.(*tabnasyaml.DocMeta)   // single doc
 
 ```go
 type DocMeta struct {
-    Directives []string // raw directive lines for this doc, e.g. ["%YAML 1.2"]
+    Directives []string // raw directive lines for this doc, for example ["%YAML 1.2"]
     Explicit   bool     // true if the doc was opened with `---`
     Ended      bool     // true if the doc was closed with `...`
 }
@@ -119,7 +119,7 @@ type DocMeta struct {
 const VERSION = "0.4.3"
 ```
 
-The module version. It always equals `ts/package.json` "version" —
+The module version. It always equals `ts/package.json` "version";
 `TestVersionMatchesPackageJSON` fails the build if the two drift.
 
 
@@ -145,7 +145,7 @@ The document value follows these YAML-to-Go mappings:
 | `null` / `~`    | `nil`             |
 | `.inf` / `.nan` | `math.Inf(1)`, `math.NaN()` |
 
-All numbers — including hex/octal/binary integers — come back as
+All numbers (including hex/octal/binary integers) come back as
 `float64`. Cast to `int` at the call site when appropriate.
 
 ### With `Meta: true`
@@ -205,7 +205,7 @@ diagram legend (`ts/doc/grammar.svg`):
 | `#EL` | block sequence item dash `- ` |
 | `#DS` | document start marker `---` (column 0) |
 | `#DE` | document end marker `...` (column 0) |
-| `#DR` | directive line, e.g. `%YAML` / `%TAG` (column 0) |
+| `#DR` | directive line, for example `%YAML` / `%TAG` (column 0) |
 | `#QM` | explicit-key marker `?` in flow `{? k : v }` |
 
 

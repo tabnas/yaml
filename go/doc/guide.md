@@ -206,7 +206,7 @@ result, err := j.Parse(src)
 ## Turn the YAML grammar back off
 
 Every rule and alternate the plugin adds is tagged with the rule group
-`yaml`. To strip them — reverting to plain relaxed-JSON parsing —
+`yaml`. To strip them (reverting to plain relaxed-JSON parsing),
 exclude that group with `SetOptions`:
 
 ```go

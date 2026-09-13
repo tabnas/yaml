@@ -2,7 +2,7 @@
 
 Background on how the YAML plugin works, and how the Go port differs
 from the canonical TypeScript one. This is understanding-oriented
-reading — for steps see the [tutorial](tutorial.md) and
+reading; for steps see the [tutorial](tutorial.md) and
 [how-to guide](guide.md), and for exact signatures see the
 [reference](reference.md).
 
@@ -12,16 +12,16 @@ reading — for steps see the [tutorial](tutorial.md) and
 There are three layers here:
 
 - the **Tabnas engine** (`github.com/tabnas/parser` in TypeScript;
-  bundled into `github.com/tabnas/jsonic/go` for Go) — a rule-based
+  bundled into `github.com/tabnas/jsonic/go` for Go), a rule-based
   parser over a configurable, matcher-based lexer;
-- the **relaxed-JSON grammar** (`jsonic`) — the rules that turn
+- the **relaxed-JSON grammar** (`jsonic`), the rules that turn
   `a:1,b:2` into a map, installed on the engine;
-- the **YAML plugin** (this package) — which amends that grammar and
+- the **YAML plugin** (this package), which amends that grammar and
   lexer to accept indentation-sensitive YAML.
 
 `MakeJsonic` builds a `*tabnasjsonic.Jsonic`, configures it for YAML, and
 installs the `Yaml` plugin with `j.Use(Yaml, ...)`. The plugin is not a
-separate parser — it is a set of grammar amendments and lexer matchers
+separate parser: it is a set of grammar amendments and lexer matchers
 that ride on the engine jsonic configured. The payoff is that block
 YAML, flow collections, and relaxed JSON all share one engine and one
 set of value rules.
@@ -34,17 +34,17 @@ A parse runs in two cooperating stages, and the plugin extends both.
 The **lexer** turns source text into tokens from independent matchers
 that run in priority order; the first to produce a token at each
 position wins. The plugin installs a `yaml` matcher at priority
-`500000` — ahead of jsonic's built-ins — so YAML-only syntax is
+`500000` (ahead of jsonic's built-ins) so YAML-only syntax is
 recognised first: block scalars (`|` / `>`), single- and double-quoted
 scalars, anchors (`&`) and aliases (`*`), tags (`!!type`),
 document-frame markers (`---` / `...` / `%…`), the explicit-key marker
-(`?`), and — crucially — **indentation**, emitted as an `#IN` token
+(`?`), and (crucially) **indentation**, emitted as an `#IN` token
 carrying the leading-space count of each line.
 
 The **parser** consumes those tokens by named rules. The plugin
 *amends* jsonic's `val`, `map`, `pair`, `list`, and `elem` rules
-(prepending alternates) and introduces block-specific rules — `indent`,
-`yamlBlockList`, `yamlBlockElem`, `yamlElemMap`, `yamlElemPair` — plus a
+(prepending alternates) and introduces block-specific rules (`indent`,
+`yamlBlockList`, `yamlBlockElem`, `yamlElemMap`, `yamlElemPair`) plus a
 `stream` rule that becomes the parser's start rule.
 
 
@@ -57,9 +57,9 @@ lexer emits an `#IN` token (with the indent count as its value) at line
 starts, and the block rules compare that count against the indent
 recorded for the enclosing collection.
 
-The decisions are small numeric comparisons — "is this line indented
+The decisions are small numeric comparisons, "is this line indented
 more than the parent (open a nested block), equal (continue), or less
-(close back out)?" — encoded as alternate *conditions* in the grammar.
+(close back out)?", encoded as alternate *conditions* in the grammar.
 Sequences are likewise made explicit: a `- ` becomes an `#EL`
 element-marker token, so `yamlBlockList` recognises sequence items
 without ever seeing a `[`. This is the central design choice: rather
@@ -100,8 +100,8 @@ the mapping declares itself.
 
 ## Accepted vs rejected
 
-The plugin targets a **core subset** of YAML 1.2 — the constructs that
-appear in real configuration files — not the entire specification.
+The plugin targets a **core subset** of YAML 1.2, the constructs that
+appear in real configuration files, not the entire specification.
 
 Accepted: block and flow collections, sequences of mappings, single-
 and double-quoted scalars (with escape processing in double quotes and
@@ -136,7 +136,7 @@ empty-input representation.
 | Parse errors | thrown | returned as `error` (never panics) |
 | Exclude the grammar | `j.options({ rule: { exclude: 'yaml' } })` | `j.SetOptions(tabnasjsonic.Options{Rule: &tabnasjsonic.RuleOptions{Exclude: "yaml"}})` |
 
-There is no standalone `parse()` export in TypeScript — parsing always
+There is no standalone `parse()` export in TypeScript; parsing always
 goes through the engine after `.use()`. Go adds the convenience
 `Parse`/`MakeJsonic` functions on top of the same `Yaml` plugin.
 
@@ -152,7 +152,7 @@ goes through the engine after `.use()`. Go adds the convenience
 | `null` / `~`    | `null`                | `nil`             |
 | `.inf` / `.nan` | `Infinity` / `NaN`    | `math.Inf(1)` / `math.NaN()` |
 
-All Go numbers — including hex/octal/binary integers and `!!int` tags —
+All Go numbers (including hex/octal/binary integers and `!!int` tags)
 are `float64`; cast at the call site.
 
 ### The `meta` envelope

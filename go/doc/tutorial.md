@@ -1,4 +1,4 @@
-# Tutorial — parse your first YAML document
+# Tutorial: parse your first YAML document
 
 This walks you from nothing to a working parse, in order. Each step
 builds on the last. When you finish you will have installed the
@@ -7,8 +7,8 @@ function, and read the result back as a `*jsonic.OrderedMap`.
 
 For a recipe-style index of individual tasks, see the
 [how-to guide](guide.md). For exact signatures see the
-[reference](reference.md). For how it all fits together — and how the Go
-port differs from the TypeScript one — see [concepts](concepts.md).
+[reference](reference.md). For how it all fits together (and how the Go
+port differs from the TypeScript one), see [concepts](concepts.md).
 
 
 ## 1. Install
@@ -97,8 +97,8 @@ title: hello world
 // map[enabled:true note:<nil> port:5432 title:hello world]
 ```
 
-`yes` is a `bool` (YAML's keyword set is broad — `yes`/`no`, `on`/`off`,
-`true`/`false`), `~` is `nil`, and `hello world` — spaces and all — is a
+`yes` is a `bool` (YAML's keyword set is broad: `yes`/`no`, `on`/`off`,
+`true`/`false`), `~` is `nil`, and `hello world` (spaces and all) is a
 single unquoted string up to the end of the line.
 
 
@@ -127,9 +127,9 @@ to configure.)
 
 ## Where to go next
 
-- [How-to guide](guide.md) — focused recipes (flow collections, block
+- [How-to guide](guide.md). Focused recipes (flow collections, block
   scalars, anchors, multi-document streams, the `Meta` option).
-- [Reference](reference.md) — the public API, every option, and the full
+- [Reference](reference.md). The public API, every option, and the full
   list of accepted syntax.
-- [Concepts](concepts.md) — how the plugin extends the engine, and how
+- [Concepts](concepts.md). How the plugin extends the engine, and how
   the Go port differs from TypeScript.

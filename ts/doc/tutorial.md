@@ -1,4 +1,4 @@
-# Tutorial — parse your first YAML document
+# Tutorial: parse your first YAML document
 
 This walks you from nothing to a working parse, in order. Each step
 builds on the last. When you finish you will have installed the plugin,
@@ -21,7 +21,7 @@ npm install @tabnas/yaml @tabnas/jsonic @tabnas/parser
 ```
 
 `@tabnas/jsonic` (>= 2) and `@tabnas/parser` (>= 2) are peer
-dependencies — you supply them.
+dependencies; you supply them.
 
 
 ## 2. Register the plugin
@@ -39,7 +39,7 @@ const j = new Tabnas().use(jsonic).use(Yaml)
 
 The order matters: `Yaml` amends the relaxed-JSON grammar that `jsonic`
 installs, so `jsonic` must come first. The resulting `j` is a reusable
-parser — make it once, parse as many times as you like.
+parser: make it once, parse as many times as you like.
 
 
 ## 3. Parse a document
@@ -67,7 +67,7 @@ out   // => { name: 'Alice', items: ['one', 'two'], flags: { debug: true } }
 
 You get back an ordinary object. Strings stay strings, `true` becomes a
 boolean, the indented `-` lines become an array, and the nested
-`flags:` block becomes a nested object — no schema, no annotations.
+`flags:` block becomes a nested object: no schema, no annotations.
 
 
 ## 4. Look at how scalars are typed
@@ -92,9 +92,9 @@ title: hello world
 out   // => { port: 5432, enabled: true, note: null, title: 'hello world' }
 ```
 
-`yes` is a boolean (YAML's keyword set is broad — `yes`/`no`,
-`on`/`off`, `true`/`false`), `~` is null, and `hello world` — spaces and
-all — is a single unquoted string up to the end of the line.
+`yes` is a boolean (YAML's keyword set is broad: `yes`/`no`,
+`on`/`off`, `true`/`false`), `~` is null, and `hello world` (spaces and
+all) is a single unquoted string up to the end of the line.
 
 
 ## 5. Parse a nested structure
@@ -125,8 +125,8 @@ object.
 
 ## Where to go next
 
-- [How-to guide](guide.md) — focused recipes (flow collections, block
+- [How-to guide](guide.md). Focused recipes (flow collections, block
   scalars, anchors, multi-document streams, the `meta` option).
-- [Reference](reference.md) — the public API, every option, and the full
+- [Reference](reference.md). The public API, every option, and the full
   list of accepted syntax.
-- [Concepts](concepts.md) — how the plugin extends the engine, and why.
+- [Concepts](concepts.md). How the plugin extends the engine, and why.
