@@ -2827,9 +2827,12 @@ func handleSingleQuotedString(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, ST
 // NumberCheck callback skips the number matcher and lets TextCheck handle
 // the scalar (with multiline continuation support).
 func handleNumericColon(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, TX jsonic.Tin, skipNumberMatch *bool, flowState *flowScanState) *jsonic.Token {
+	flowState.advance(lex.Src, pnt.SI)
+	inFlow := flowState.depth > 0
+
 	hasEmbeddedColon := false
 	hasTrailingText := false
-	hasTrailingComma := false
+	hasBlockComma := false
 	pi := 1
 	for pi < len(fwd) && fwd[pi] != '\n' && fwd[pi] != '\r' {
 		if fwd[pi] == ':' && pi+1 < len(fwd) && fwd[pi+1] != ' ' && fwd[pi+1] != '\t' &&
@@ -2837,18 +2840,27 @@ func handleNumericColon(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, TX jsoni
 			hasEmbeddedColon = true
 			break
 		}
-		// Trailing comma at end of line means plain scalar in block context
-		// (e.g. "12,"). In flow context commas are separators followed by
-		// more values on the same line.
+		// A COMMA IS NOT A SEPARATOR IN BLOCK CONTEXT.
+		//
+		// Flow indicators only indicate inside a flow collection, so in block
+		// context `example: 1,2,3` is the plain scalar "1,2,3" — not a number,
+		// a separator, and two more numbers.
+		//
+		// Only a comma at END of line was accepted before, which left `1,2,3`
+		// to the number matcher: it took the `1`, the `,` became a structural
+		// token, and the parse died on the `2`.
+		//
+		// The scan CONTINUES rather than breaking, so a scalar that also has a
+		// space with text after it ("12, hexadecimal") still reaches the
+		// trailing-text branch, which handles spaces and multiline
+		// continuation that the token scan cannot.
 		if fwd[pi] == ',' {
-			ci := pi + 1
-			for ci < len(fwd) && (fwd[ci] == ' ' || fwd[ci] == '\t') {
-				ci++
+			if inFlow {
+				break
 			}
-			if ci >= len(fwd) || fwd[ci] == '\n' || fwd[ci] == '\r' {
-				hasTrailingComma = true
-			}
-			break
+			hasBlockComma = true
+			pi++
+			continue
 		}
 		if fwd[pi] == ' ' || fwd[pi] == '\t' {
 			// Check if after the space there are non-separator characters,
@@ -2865,28 +2877,23 @@ func handleNumericColon(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, TX jsoni
 		}
 		pi++
 	}
-	if hasTrailingComma {
-		// Block-context only — in flow context the comma is a real separator.
-		flowState.advance(lex.Src, pnt.SI)
-		if flowState.depth == 0 {
-			end := 0
-			for end < len(fwd) && fwd[end] != ' ' && fwd[end] != '\t' &&
-				fwd[end] != '\n' && fwd[end] != '\r' {
-				end++
-			}
-			text := fwd[:end]
-			tkn := lex.Token("#TX", TX, text, text)
-			advanceCol(pnt, fwd, end)
-			return tkn
-		}
+	// TRAILING TEXT FIRST. A scalar can be both ("12, hexadecimal"), and the
+	// token scan below stops at the first space, which would truncate it to
+	// "12,". TextCheck takes the whole scalar, continuation lines included.
+	if hasTrailingText && !inFlow {
+		*skipNumberMatch = true
+		return nil
 	}
-	if hasTrailingText {
-		// Check if we're in a flow context — if so, the number is standalone.
-		flowState.advance(lex.Src, pnt.SI)
-		if flowState.depth == 0 {
-			*skipNumberMatch = true
-			return nil
+	if hasBlockComma {
+		end := 0
+		for end < len(fwd) && fwd[end] != ' ' && fwd[end] != '\t' &&
+			fwd[end] != '\n' && fwd[end] != '\r' {
+			end++
 		}
+		text := fwd[:end]
+		tkn := lex.Token("#TX", TX, text, text)
+		advanceCol(pnt, fwd, end)
+		return tkn
 	}
 	if !hasEmbeddedColon {
 		return nil

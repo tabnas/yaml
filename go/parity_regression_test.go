@@ -189,3 +189,61 @@ func TestParity_MappingKeySourceOrder(t *testing.T) {
 		t.Fatalf("marshal = %s, want %s (source order)", raw, want)
 	}
 }
+
+// TestParity_InternalCommaAfterDigitInBlock — captured from Intercom's
+// OpenAPI 2.16 document (`example: 1,2,3` on a tag_ids query parameter).
+//
+// Trigger: a value that starts with a digit and contains a comma with more
+// content after it, in block context. Only a comma at END of line was
+// accepted, so `1,2,3` fell through to the number matcher: it took the `1`,
+// the `,` became a structural token, and the parse died on the `2` with
+// "unexpected character(s): 3". The whole 1.3 MB document failed to parse.
+//
+// Fix: a comma in block context is part of the plain scalar. The scan
+// continues rather than breaking, so a scalar with a space and trailing text
+// ("12, hexadecimal") still reaches TextCheck, which handles spaces and
+// multiline continuation that the token scan cannot.
+func TestParity_InternalCommaAfterDigitInBlock(t *testing.T) {
+	cases := []struct {
+		src  string
+		key  string
+		want any
+	}{
+		{"a: 1,2,3", "a", "1,2,3"},
+		{"a: 1, 2", "a", "1, 2"},
+		{"a: 12,", "a", "12,"},
+		{"a: 12, hexadecimal.", "a", "12, hexadecimal."},
+		{"a: 64 characters, hexadecimal.", "a", "64 characters, hexadecimal."},
+		{"a: 12", "a", 12},
+	}
+
+	for _, c := range cases {
+		got, err := Parse(c.src)
+		if err != nil {
+			t.Fatalf("parse(%q): %v", c.src, err)
+		}
+		top, ok := asMap(got)
+		if !ok {
+			t.Fatalf("parse(%q): top is not a map: %#v", c.src, got)
+		}
+		gotJSON, _ := json.Marshal(top[c.key])
+		wantJSON, _ := json.Marshal(c.want)
+		if string(gotJSON) != string(wantJSON) {
+			t.Errorf("parse(%q)[%s] = %s, want %s", c.src, c.key, gotJSON, wantJSON)
+		}
+	}
+}
+
+// In FLOW context a comma is still a separator.
+func TestParity_CommaStillSeparatesInFlow(t *testing.T) {
+	got, err := Parse("a: [1,2,3]\nb: {x: 1, y: 2}\n")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	top, _ := asMap(got)
+	gotJSON, _ := json.Marshal(top)
+	want := `{"a":[1,2,3],"b":{"x":1,"y":2}}`
+	if string(gotJSON) != want {
+		t.Errorf("got %s, want %s", gotJSON, want)
+	}
+}
