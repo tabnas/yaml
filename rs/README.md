@@ -156,7 +156,7 @@ shared fixture runner.
 
 Every parse result is the TypeScript one, and the shared fixtures in
 [`../test/spec`](../test/spec) and the vendored conformance suite hold all
-three runtimes to it. What differs is the shape of the API and five
+three runtimes to it. What differs is the shape of the API and six
 recorded points where a result or a diagnostic does not match, each of
 them written up with a measured table in
 [`../DIVERGENCE.md`](../DIVERGENCE.md):
@@ -187,6 +187,12 @@ them written up with a measured table in
   surrogate is not one, where a TypeScript string is UTF-16 and keeps it.
   Two of them side by side are one astral character in both runtimes,
   which is what `tests/js_semantics_test.rs` measures.
+- **An unterminated typed tag folds a split astral character.** The
+  canonical handler ends an unterminated `!!str "` at the source end and
+  keeps everything up to the last UTF-16 unit. An astral character is two
+  of those units and one Rust scalar, so where TypeScript keeps a lone
+  high surrogate this port writes the replacement character. The same
+  trade in a different handler.
 
 ## Untrusted input
 
@@ -203,7 +209,38 @@ sanitising.
 The crate itself is held to the boundary by `tests/untrusted_test.rs`:
 deep nesting, two megabytes of one scalar, unterminated constructs, empty
 input, control characters and odd Unicode neither panic, hang, overflow
-the stack nor take super-linear time.
+the stack nor take super-linear time. That file also sweeps a list of
+constructs at every character boundary, each cut given a multibyte tail,
+because every offset this port computes comes from a scan over bytes
+standing in for the canonical scan over UTF-16 code units, and the two
+disagree exactly there.
+
+One shape sits outside that boundary, in all three runtimes rather than
+in this one. An alias expands: the canonical handler deep copies the
+anchored value into each use, so a chain of anchors that each alias the
+one before twice doubles the tree on every line, and a few dozen short
+lines exhaust memory while the nesting never approaches the parse budget.
+Measured on `k0: &k0 [x,x]` followed by one line per level, each
+aliasing the level before it twice, with the leaf count identical
+everywhere:
+
+| lines | leaves | TypeScript | Go | Rust |
+|---|---|---|---|---|
+| 12 | 8,190 | 15 ms | 5 ms | 30 ms |
+| 16 | 131,070 | 122 ms | 126 ms | 219 ms |
+| 20 | 2,097,150 | 2.4 s | 1.8 s | 3.2 s |
+| 22 | 8,388,606 | 7.2 s | 5.9 s | 13.7 s |
+| 24 | 33,554,430 | heap limit reached | 55 s | killed |
+| 26 | 134,217,726 | not run | killed | not run |
+
+TypeScript ran under Node 22 with a 2 GB heap, Go under `go test` with
+no hard ceiling, Rust in release mode. Each one dies where its own
+ceiling falls, and the curve is the same in all three. This port does
+not cap the shape, because a cap would reject documents the canonical
+accepts, which is a divergence and not a repair. Reuse of one anchor,
+as against a chain of them, stays linear, and `tests/untrusted_test.rs`
+pins that. A caller parsing YAML from outside the system should bound
+the process rather than the parser.
 
 ## Build and test
 

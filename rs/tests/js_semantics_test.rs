@@ -219,3 +219,96 @@ fn a_tag_directive_splits_on_javascript_whitespace() {
     assert_eq!(json("%TAG !! tag:x,2000:\n--- !!int 007"), j!("007"));
     assert_eq!(json("--- !!int 007"), j!(7));
 }
+
+/// A `\x` or `\u` escape's digits are a FIXED WIDTH WINDOW read with
+/// `parseInt`, not a run of hexadecimal digits. `parseInt` skips leading
+/// whitespace, takes the longest prefix it can and answers `NaN` for
+/// nothing at all; `String.fromCharCode` then takes `ToUint16` of that,
+/// which turns `NaN` into NUL rather than raising anything. So a short,
+/// padded or unreadable window is a character, never a refusal, and the
+/// window keeps consuming its full width whatever is in it.
+///
+/// Measured. `a: "\x4"`: TypeScript `{"a":"\u0004"}` (ts/src/yaml.ts run
+/// under Node 22), Go `{"a":"x4"}`, Rust `{"a":"\u0004"}`.
+/// `a: "\xZZ"`: TypeScript `{"a":"\u0000"}`, Go `{"a":"xZZ"}`, Rust
+/// `{"a":"\u0000"}`.
+#[test]
+fn a_hexadecimal_escape_window_is_parse_int() {
+    let parser = tabnas_yaml::make();
+    for (src, want) in [
+        // A well formed window, the control.
+        ("a: \"\\x41\"", "A"),
+        ("a: \"\\u0041\"", "A"),
+        // Short: the window runs into the closing quote, and `parseInt`
+        // reads the digits in front of it.
+        ("a: \"\\x4\"", "\u{4}"),
+        ("a: \"\\u00\"", "\u{0}"),
+        // No digit at all: `NaN`, and `ToUint16(NaN)` is zero.
+        ("a: \"\\xZZ\"", "\u{0}"),
+        ("a: \"\\uZZZZ\"", "\u{0}"),
+        ("a: \"\\x\"", "\u{0}"),
+        // A window that is not ASCII at all is still just a window: the
+        // canonical one counts UTF-16 units and this one characters, and
+        // neither reads a digit out of it.
+        ("a: \"\\x\u{4e2d}\"", "\u{0}"),
+    ] {
+        let value = parser
+            .parse(src)
+            .unwrap_or_else(|error| panic!("{src:?}: {error}"));
+        assert_eq!(plain(&value), j!({ "a": want }), "{src:?}");
+    }
+}
+
+/// A `\U` escape is `String.fromCodePoint`, which THROWS a `RangeError`
+/// where `fromCharCode` folds. Nothing in the canonical matcher catches
+/// it, so the token is never produced and the document is REFUSED.
+///
+/// That covers a value past U+10FFFF, a negative one, and a window with
+/// no hexadecimal digit in it at all. It does not generalise to `\x` and
+/// `\u`, which take `ToUint16` and cannot throw: the test above measures
+/// those.
+///
+/// Measured. `a: "\U00110000"`: TypeScript refuses with `unexpected`
+/// (ts/src/yaml.ts under Node 22), Go `{"a":"\u{FFFD}"}`, Rust refuses.
+/// `a: "\U0010FFFF"`: all three give U+10FFFF. `a: "\UFFFFFFFF"`:
+/// TypeScript refuses, Go `{"a":"UFFFFFFFF"}`, Rust refuses.
+#[test]
+fn an_escape_past_the_last_code_point_is_refused() {
+    let parser = tabnas_yaml::make();
+
+    // The last code point there is, and one past it.
+    let value = parser
+        .parse("a: \"\\U0010FFFF\"")
+        .expect("U+10FFFF is a code point");
+    assert_eq!(plain(&value), j!({ "a": "\u{10FFFF}" }));
+    for src in [
+        "a: \"\\U00110000\"",
+        "a: \"\\U0011FFFF\"",
+        "a: \"\\UFFFFFFFF\"",
+        "a: \"\\U80000000\"",
+        // No digits in the window at all: `parseInt` gives `NaN`, and
+        // `fromCodePoint(NaN)` throws too.
+        "a: \"\\U\"",
+        "a: \"\\Uzzzzzzzz\"",
+        "a: \"\\U\u{4e2d}\u{4e2d}\u{4e2d}\u{4e2d}\u{4e2d}\u{4e2d}\u{4e2d}\u{4e2d}\"",
+    ] {
+        let error = parser
+            .parse(src)
+            .map(|value| value.to_string())
+            .expect_err(&format!("{src:?} is refused in TypeScript too"));
+        assert_eq!(error.code, "unexpected", "{src:?}");
+    }
+
+    // `parseInt` skips JavaScript whitespace and reads a prefix, so a
+    // padded or short window still names a code point and is accepted.
+    for (src, want) in [
+        ("a: \"\\U 0000041\"", "A"),
+        ("a: \"\\U0000004\"", "\u{4}"),
+        ("a: \"\\U00000041\"", "A"),
+    ] {
+        let value = parser
+            .parse(src)
+            .unwrap_or_else(|error| panic!("{src:?}: {error}"));
+        assert_eq!(plain(&value), j!({ "a": want }), "{src:?}");
+    }
+}

@@ -167,6 +167,79 @@ pub(crate) fn trim_end(text: &str) -> &str {
     text.trim_end_matches(crate::js_space)
 }
 
+/// The largest character boundary at or before `index`, clamping an
+/// index past the end to the end.
+///
+/// Every offset this plugin computes comes from a scan over BYTES that
+/// stands in for the canonical scan over UTF-16 code units. A scan that
+/// runs off the end of an unterminated construct, or one that steps over
+/// a fixed width of escape digits, can leave an offset past the string
+/// or inside a multibyte character, and slicing at either would panic on
+/// input a caller does not control.
+#[inline]
+pub(crate) fn floor_boundary(text: &str, index: usize) -> usize {
+    let mut index = index.min(text.len());
+    while !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
+/// `text.substring(from, to)` as JavaScript spells it: each index is
+/// clamped into the string, and a pair the wrong way round is SWAPPED
+/// rather than treated as empty. Both are first moved back to a
+/// character boundary, per [`floor_boundary`].
+pub(crate) fn js_substring(text: &str, from: usize, to: usize) -> &str {
+    let from = floor_boundary(text, from);
+    let to = floor_boundary(text, to);
+    &text[from.min(to)..from.max(to)]
+}
+
+/// `text.substring(from, to - 1)` where `to` is a byte offset standing in
+/// for a UTF-16 code-unit index, so the step back is ONE CODE UNIT.
+///
+/// `substring` clamps after the subtraction and swaps a reversed pair,
+/// and both are load bearing: a scan that overran the end by one leaves
+/// `to - 1` exactly at the end, and an empty value leaves the pair the
+/// wrong way round, where the canonical yields the opening quote.
+///
+/// One unit back from just past an astral character lands BETWEEN its two
+/// surrogates, and the canonical keeps the high one. A Rust string has no
+/// place for an unpaired surrogate, so this folds it to the replacement
+/// character, exactly as [`push_code_point`] folds an escape naming one.
+/// A character inside the Basic Multilingual Plane is one unit and one
+/// scalar, so stepping back drops the whole of it in both runtimes.
+pub(crate) fn js_substring_less_one_unit(text: &str, from: usize, to: usize) -> String {
+    let unit = to.saturating_sub(1);
+    let end = floor_boundary(text, unit);
+    let split_astral = unit < text.len()
+        && end < unit
+        && text[end..]
+            .chars()
+            .next()
+            .is_some_and(|character| character.len_utf8() == 4);
+    let from = floor_boundary(text, from);
+    let mut out = text[from.min(end)..from.max(end)].to_string();
+    if split_astral && from <= end {
+        out.push('\u{fffd}');
+    }
+    out
+}
+
+/// `text.substring(from, from + count)` where `count` is a number of
+/// CHARACTERS rather than bytes: the fixed-width window an escape's
+/// digits live in. Fewer than `count` characters are left at `from` is
+/// not an error, exactly as a `substring` past the end is not.
+pub(crate) fn take_chars(text: &str, from: usize, count: usize) -> &str {
+    let from = floor_boundary(text, from);
+    let tail = &text[from..];
+    let width = tail
+        .char_indices()
+        .nth(count)
+        .map_or(tail.len(), |(offset, _)| offset);
+    &tail[..width]
+}
+
 /// Advance a `(si, ri, ci)` triple over `count` bytes of `src` starting
 /// at `si`, charging one column per CHARACTER: the canonical
 /// `pnt.sI += n; pnt.cI += n` over UTF-16 units, which count characters
@@ -1241,20 +1314,35 @@ fn double_quoted(src: &str, fwd: &str, cursor: (usize, usize, usize)) -> Act {
                 } else {
                     8
                 };
+                // `fwd.substring(i + 1, i + 1 + width)`: a FIXED WIDTH
+                // window, not a run of hexadecimal digits. It routinely
+                // holds the closing quote or the rest of the line, and
+                // the canonical handler reads a number out of it with
+                // `parseInt`, which takes the longest prefix it can. The
+                // window is counted in characters here and UTF-16 units
+                // there; taking whole characters is what keeps the
+                // cursor on a boundary, and a byte count would not.
                 let from = index + 1;
-                let mut to = (from + width).min(fwd.len());
-                while to < fwd.len() && !fwd.is_char_boundary(to) {
-                    to += 1;
-                }
-                let digits = if from <= to { &fwd[from..to] } else { "" };
-                match crate::code_point(digits) {
-                    Some(code) => push_code_point(code, &mut pending, &mut value),
-                    None => {
-                        flush_surrogate(&mut pending, &mut value);
-                        value.push('\u{fffd}');
+                let digits = take_chars(fwd, from, width);
+                let number = crate::parse_int_16(digits);
+                if escape == i32::from(b'U') {
+                    // `String.fromCodePoint` THROWS a RangeError on
+                    // anything that is not a code point, and nothing in
+                    // the canonical matcher catches it, so the token is
+                    // never produced and the document is refused. That
+                    // covers a value past U+10FFFF, a negative one, and
+                    // a window with no hexadecimal digit in it at all.
+                    match crate::from_code_point(number) {
+                        Some(code) => push_code_point(code, &mut pending, &mut value),
+                        None => return Act::refuse(cursor),
                     }
+                } else {
+                    // `String.fromCharCode` takes `ToUint16` of its
+                    // argument instead, so it never throws and an
+                    // unreadable window is a NUL.
+                    push_code_point(crate::to_uint16(number), &mut pending, &mut value);
                 }
-                index += 1 + width;
+                index = from + digits.len();
                 escaped_upto = value.len();
                 continue;
             }

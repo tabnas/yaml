@@ -8,7 +8,7 @@ None of these can be written as a row of `test/spec/*.tsv`, which is why
 this repository still has no divergence register: one is invisible to the
 value those fixtures compare, two concern a diagnostic's position, which
 no fixture pins, one needs a nesting depth far past anything a fixture
-cell would hold, and one needs a lone UTF-16 surrogate in an expected
+cell would hold, and two need a lone UTF-16 surrogate in an expected
 cell, which a UTF-8 file cannot carry. The last entry is a Go defect
 rather than a standing difference: it is written down so a shared row is
 not added over it before the repair lands. A divergence a row could
@@ -149,13 +149,15 @@ lone surrogate has no UTF-8 spelling and a byte-order mark is invisible.
 | `a: "\U0000D83D\uDE00"` | U+1F600 | U+FFFD U+FFFD | U+1F600 |
 | `a: "\uD83D"` | a lone high surrogate | U+FFFD | U+FFFD |
 | `a: "\uDE00"` | a lone low surrogate | U+FFFD | U+FFFD |
+| `a: "\U0000D83D"` | a lone high surrogate | U+FFFD | U+FFFD |
 
-The canonical handler builds the scalar with `String.fromCharCode`,
-which appends one UTF-16 CODE UNIT, so a high escape and the low escape
-beside it are one astral character rather than two escapes. A Rust
-string holds Unicode scalars, so this port pairs the two before
-converting (`push_code_point` in `rs/src/lex.rs`) and reaches the
-canonical value. The Go port converts each escape on its own with
+The canonical handler builds the scalar with `String.fromCharCode` for
+`\x` and `\u`, and `String.fromCodePoint` for `\U`. Both take a UTF-16
+CODE UNIT for a surrogate value, so a high escape and the low escape
+beside it are one astral character rather than two escapes, in either
+spelling. A Rust string holds Unicode scalars, so this port pairs the
+two before converting (`push_code_point` in `rs/src/lex.rs`) and reaches
+the canonical value. The Go port converts each escape on its own with
 `string(rune(n))`, which folds every surrogate to U+FFFD, so the pair is
 lost there.
 
@@ -179,6 +181,84 @@ and the unpaired rows by
 
 Owner for the unpaired rows: the string model, as upstream. Owner for
 the pair rows: the Go port, where they are a defect and not a trade.
+
+A MALFORMED escape is a Go defect in the same handler, recorded here so
+a shared fixture row is not added over it. The canonical window is a
+fixed width read with `parseInt`, and what it yields goes to
+`fromCharCode`, which takes `ToUint16` and turns a `NaN` into NUL, or to
+`fromCodePoint`, which THROWS and so refuses the document. This port
+matches both; Go drops the backslash and keeps the rest as text.
+
+| input | TypeScript | Go | Rust |
+|---|---|---|---|
+| `a: "\x4"` | U+0004 | `"x4"` | U+0004 |
+| `a: "\xZZ"` | U+0000 | `"xZZ"` | U+0000 |
+| `a: "\u00"` | U+0000 | `"u00"` | U+0000 |
+| `a: "\U 0000041"` | `"A"` | `"U 0000041"` | `"A"` |
+| `a: "\U0010FFFF"` | U+10FFFF | U+10FFFF | U+10FFFF |
+| `a: "\U00110000"` | `ERROR:unexpected` | U+FFFD | `ERROR:unexpected` |
+| `a: "\UFFFFFFFF"` | `ERROR:unexpected` | `"UFFFFFFFF"` | `ERROR:unexpected` |
+
+Measured the same way as the table above. The Rust rows are pinned by
+`rs/tests/js_semantics_test.rs::a_hexadecimal_escape_window_is_parse_int`
+and
+`rs/tests/js_semantics_test.rs::an_escape_past_the_last_code_point_is_refused`.
+Owner: the Go port.
+
+## An unterminated typed tag folds a split astral character (Rust)
+
+Written with `U+XXXX` again, for the same reason.
+
+| input | TypeScript | Go | Rust |
+|---|---|---|---|
+| `a: !!str "` + U+1F600 | U+D83D | three U+FFFD | U+FFFD |
+| `a: !!str "a` + U+1F600 | `a` then U+D83D | `a` then three U+FFFD | `a` then U+FFFD |
+| `a: !!str '` + U+1F600 | U+D83D | three U+FFFD | U+FFFD |
+| `a: !!str "` + U+4E2D U+6587 | U+4E2D | U+4E2D then two U+FFFD | U+4E2D |
+| `a: !!str "` | `"` | `ERROR:internal` | `"` |
+
+An unterminated quoted value after a typed tag ends at the end of the
+source, and the canonical handler then takes
+`fwd.substring(valStart + 1, valEnd - 1)`: everything up to the last
+UTF-16 CODE UNIT. An astral character is two of those units and one Rust
+scalar, so dropping one unit leaves a LONE HIGH SURROGATE, which a Rust
+string has no place for. This port folds it to the replacement
+character, which is what it does with every other unpaired surrogate.
+Only the astral rows differ; the rest of the table is the control, the
+reversed-index row included, where `substring` swaps its arguments and
+yields the quote itself.
+
+This is the same trade as "UTF-16 escapes in a double quoted scalar"
+above, in a different handler, and it has the same owner: the string
+model, as upstream.
+
+There is a second repair, and it is the better one: the canonical
+truncation is itself hard to defend. Nothing about an unterminated
+`!!str "abc` calls for the value `ab`, and the `valEnd - 1` that
+produces it is the same arithmetic whether or not a closing quote was
+found. Fixing the CANONICAL to drop the final unit only when it closed
+the value would retire this entry outright, and the astral half
+character with it. That is a change to `ts/src/yaml.ts` and to every
+port, so it is named here rather than made here.
+
+The Go column is a DEFECT of the same class and not a trade. Go steps
+back one BYTE rather than one unit, which cuts a multibyte character in
+half and leaves invalid UTF-8 in the value, and where the canonical
+`substring` would swap a reversed pair Go panics on the slice and the
+engine reports `internal`. It is written down here so a shared fixture
+row is not added over it before the repair lands.
+
+Provenance: the TypeScript column was produced by running
+`ts/src/yaml.ts` under Node 22; the Go column by `tabnasyaml.Parse` in
+`go/`; the Rust column by `tabnas_yaml::parse`. No row of
+`test/spec/*.tsv` can carry the TypeScript answers, because an expected
+cell is UTF-8 text and a lone surrogate has no UTF-8 encoding. Pinned by
+`rs/tests/divergence_test.rs::an_unterminated_typed_tag_folds_a_split_astral_character`,
+whose control rows fail if the Basic Multilingual Plane cases drift and
+whose astral rows fail if the fold changes.
+
+Owner: the string model, as upstream, for the Rust rows; the Go port for
+the Go column.
 
 ## JavaScript whitespace and word characters (Go)
 

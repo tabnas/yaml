@@ -17,8 +17,8 @@
 use tabnas::{Context, Lexer, Rule, Token, Value};
 
 use crate::lex::{
-    advance_cols, apply, at, blank, blank_line_end_or_eof, is, is_doc_marker, line_end, trim_end,
-    Act, Tok,
+    advance_cols, apply, at, blank, blank_line_end_or_eof, is, is_doc_marker, js_substring,
+    js_substring_less_one_unit, line_end, trim_end, Act, Tok,
 };
 use crate::state;
 
@@ -768,14 +768,19 @@ pub(crate) fn type_tag(
         if at(fwd, value_end) == quote {
             value_end += 1;
         }
-        let raw =
-            fwd[value_start + 1..value_end.saturating_sub(1).max(value_start + 1)].to_string();
+        // `fwd.substring(valStart + 1, valEnd - 1)`. An unterminated quote
+        // leaves `value_end` at the end of the source, and an escape at
+        // the very end leaves it one past: neither index can be sliced
+        // directly, and stepping one BYTE back from the end lands inside
+        // a multibyte character where the canonical steps one UTF-16
+        // unit.
+        let raw = js_substring_less_one_unit(fwd, value_start + 1, value_end);
         let value = convert_tag(&tag, &raw, redefined, true);
         if !anchor_name.is_empty() {
             state::map_set(context, state::ANCHORS, anchor_name, value.clone());
         }
         let name = token_name_for(&value, false);
-        let source = fwd[..value_end].to_string();
+        let source = js_substring(fwd, 0, value_end).to_string();
         let next = advance_cols(src, cursor, value_end);
         return Err(Box::new(Act::moved(
             next,

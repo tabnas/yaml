@@ -140,3 +140,59 @@ fn a_flow_collection_at_column_zero_after_a_line_break_is_refused() {
     let error = parser.parse("# c\n{a: 1}").expect_err("refused");
     assert_eq!((error.row, error.col), (2, 0));
 }
+
+/// **An unterminated typed tag folds a split astral character** to the
+/// replacement character, where TypeScript keeps half of one.
+///
+/// The canonical handler ends an unterminated `!!str "` at the end of the
+/// source and takes `fwd.substring(valStart + 1, valEnd - 1)`, whose
+/// indices count UTF-16 CODE UNITS: the value it keeps is everything up
+/// to the last unit. An astral character is two of those units and one
+/// Rust scalar, so dropping one unit leaves a LONE HIGH SURROGATE, which
+/// a Rust string cannot hold; this port folds it exactly as it folds an
+/// escape naming one. A character inside the Basic Multilingual Plane is
+/// one unit and one scalar, and agrees exactly.
+///
+/// Same trade as "UTF-16 escapes in a double quoted scalar", and the same
+/// owner: the string model. Measured, with `U+XXXX` for what the table is
+/// about, because a lone surrogate has no UTF-8 spelling:
+///
+///  input                        TypeScript        Go                   Rust
+///  `a: !!str "<emoji>`          U+D83D            three U+FFFD         U+FFFD
+///  `a: !!str "a<emoji>`         `a` then U+D83D   `a`, three U+FFFD    `a` U+FFFD
+///  `a: !!str "<U+4E2D><U+6587>` U+4E2D            U+4E2D, two U+FFFD   U+4E2D
+///  `a: !!str "`                 `"`               refused, `internal`  `"`
+#[test]
+fn an_unterminated_typed_tag_folds_a_split_astral_character() {
+    let parser = tabnas_yaml::make();
+    for (src, want) in [
+        ("a: !!str \"\u{1F600}", "\u{FFFD}"),
+        ("a: !!str \"a\u{1F600}", "a\u{FFFD}"),
+        ("a: !!str '\u{1F600}", "\u{FFFD}"),
+    ] {
+        let value = parser
+            .parse(src)
+            .unwrap_or_else(|error| panic!("{src:?}: {error}"));
+        assert_eq!(
+            plain(&value),
+            j!({ "a": want }),
+            "{src:?}: TypeScript keeps the lone high surrogate"
+        );
+    }
+
+    // The control. A tail inside the Basic Multilingual Plane is one
+    // UTF-16 unit and one Rust scalar, so the two runtimes agree, and so
+    // does the reversed-index case a `substring` swaps.
+    for (src, want) in [
+        ("a: !!str \"\u{4e2d}\u{6587}", "\u{4e2d}"),
+        ("a: !!str \"\u{e9}", ""),
+        ("a: !!str \"ab", "a"),
+        ("a: !!str \"", "\""),
+        ("a: !!str '", "'"),
+    ] {
+        let value = parser
+            .parse(src)
+            .unwrap_or_else(|error| panic!("{src:?}: {error}"));
+        assert_eq!(plain(&value), j!({ "a": want }), "{src:?}");
+    }
+}

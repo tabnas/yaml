@@ -16,6 +16,7 @@
 [Ll]ockfile
 [Ll]ookahead
 [Mm]atchers
+[Mm]ultibyte
 [Mm]ultiline
 [Nn]pm
 [Pp]arser

@@ -617,12 +617,68 @@ pub(crate) fn parse_float(text: &str) -> f64 {
         .unwrap_or(f64::NAN)
 }
 
-/// The code point a hexadecimal escape's digits name. A surrogate is a
-/// code point with no Unicode scalar of its own, so the caller pairs an
-/// adjacent high and low one before converting; digits with no value at
-/// all have no code point.
-pub(crate) fn code_point(digits: &str) -> Option<u32> {
-    u32::from_str_radix(digits, 16).ok()
+/// `parseInt(text, 16)`. Like `parse_int` it skips JavaScript's leading
+/// whitespace, takes an optional sign and then the LONGEST PREFIX that
+/// reads as hexadecimal, rather than demanding the whole string: the
+/// digits of a `\x`, `\u` or `\U` escape are a fixed-width window that
+/// routinely holds the closing quote or the rest of the line, and the
+/// canonical handler reads a number out of the window all the same.
+/// `NaN` when the prefix has no digit.
+pub(crate) fn parse_int_16(text: &str) -> f64 {
+    let trimmed = text.trim_start_matches(js_space);
+    let bytes = trimmed.as_bytes();
+    let mut index = 0;
+    let negative = bytes.first() == Some(&b'-');
+    if index < bytes.len() && (bytes[index] == b'+' || bytes[index] == b'-') {
+        index += 1;
+    }
+    // `parseInt` allows the `0x` prefix when the radix is 16.
+    if bytes.len() > index + 1
+        && bytes[index] == b'0'
+        && (bytes[index + 1] == b'x' || bytes[index + 1] == b'X')
+    {
+        index += 2;
+    }
+    let start = index;
+    let mut value = 0f64;
+    while index < bytes.len() && bytes[index].is_ascii_hexdigit() {
+        value = value * 16.0 + f64::from((bytes[index] as char).to_digit(16).expect("hex digit"));
+        index += 1;
+    }
+    if index == start {
+        return f64::NAN;
+    }
+    if negative {
+        -value
+    } else {
+        value
+    }
+}
+
+/// `String.fromCharCode(n)`, whose argument goes through `ToUint16`: a
+/// `NaN` becomes NUL rather than an error, which is why an unreadable
+/// `\x` or `\u` escape is a NUL in the canonical handler.
+pub(crate) fn to_uint16(number: f64) -> u32 {
+    if !number.is_finite() {
+        return 0;
+    }
+    let truncated = number.trunc();
+    let wrapped = truncated.rem_euclid(65536.0);
+    wrapped as u32
+}
+
+/// `String.fromCodePoint(n)`, which THROWS a `RangeError` for anything
+/// that is not a code point. `None` stands for the throw: the canonical
+/// matcher does not catch it, so the token is never produced and the
+/// document is refused.
+pub(crate) fn from_code_point(number: f64) -> Option<u32> {
+    if !number.is_finite() || number.trunc() != number {
+        return None;
+    }
+    if !(0.0..=1_114_111.0).contains(&number) {
+        return None;
+    }
+    Some(number as u32)
 }
 
 /// The YAML value keywords, and the three non-finite numbers that have

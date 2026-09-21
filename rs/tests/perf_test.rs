@@ -65,9 +65,11 @@ fn parse_reuses_its_instance() {
 }
 
 fn block_map(count: usize) -> String {
-    (0..count)
-        .map(|index| format!("key_{index}: value {index}\n"))
-        .collect()
+    let mut src = String::new();
+    for index in 0..count {
+        src.push_str(&format!("key_{index}: value {index}\n"));
+    }
+    src
 }
 
 fn flow_map(count: usize) -> String {
