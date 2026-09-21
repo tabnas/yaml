@@ -10,3 +10,5 @@ a: !!str &n\tfoo	{"a":""}
 a: !!str &n foo	{"a":"foo"}
 a: !!str x:\ty	{"a":"x:\ty"}
 a: !!str x: y	{"a":{"x":"y"}}
+a: !!binary 1_000	{"a":1000}
+a: !t 1_000	{"a":1000}
