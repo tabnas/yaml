@@ -1920,7 +1920,7 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
                 let inFlow = _flowDepth > 0
                 let hasEmbeddedColon = false
                 let hasTrailingText = false
-                let hasTrailingComma = false
+                let hasBlockComma = false
                 let pi = 1
                 while (pi < fwd.length && fwd[pi] !== '\n' && fwd[pi] !== '\r') {
                   if (fwd[pi] === ':' && fwd[pi + 1] !== ' ' && fwd[pi + 1] !== '\t' &&
@@ -1928,16 +1928,31 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
                     hasEmbeddedColon = true
                     break
                   }
-                  // Trailing comma at end of line means plain scalar in block
-                  // context (e.g. "12,"). In flow context commas are always
-                  // separators, so don't treat the digits as a plain scalar.
+                  // A COMMA IS NOT A SEPARATOR IN BLOCK CONTEXT.
+                  //
+                  // Flow indicators only indicate inside a flow collection, so
+                  // in block context `example: 1,2,3` is the plain scalar
+                  // "1,2,3" — not a number, a separator, and two more numbers.
+                  //
+                  // This used to accept only a comma at END of line ("12,"),
+                  // which left `1,2,3` to the number matcher: it took the `1`,
+                  // the `,` became a structural token, and the parse died on
+                  // the `2` with "unexpected character(s)". Intercom's OpenAPI
+                  // document carries `example: 1,2,3` and failed to parse at
+                  // all because of it.
+                  //
+                  // The scan CONTINUES rather than breaking, so a scalar that
+                  // also has a space with text after it ("12, hexadecimal")
+                  // still reaches the trailing-text branch below, which handles
+                  // spaces and multiline continuation that the token scan here
+                  // cannot.
                   if (fwd[pi] === ',') {
-                    let ci = pi + 1
-                    while (ci < fwd.length && (fwd[ci] === ' ' || fwd[ci] === '\t')) ci++
-                    if (!inFlow && (ci >= fwd.length || fwd[ci] === '\n' || fwd[ci] === '\r')) {
-                      hasTrailingComma = true
+                    if (inFlow) {
+                      break
                     }
-                    break
+                    hasBlockComma = true
+                    pi++
+                    continue
                   }
                   if (fwd[pi] === ' ' || fwd[pi] === '\t') {
                     // Check if after the space there are non-separator characters,
@@ -1957,7 +1972,19 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
                   }
                   pi++
                 }
-                if (hasEmbeddedColon || hasTrailingComma) {
+                // TRAILING TEXT FIRST. A scalar can be both ("12, hexadecimal"),
+                // and the token scan below stops at the first space, which
+                // would truncate it to "12,". The text handler takes the whole
+                // scalar, continuation lines included.
+                if (hasTrailingText) {
+                  // Flag that the number matcher should skip this value,
+                  // so the text.check handler can process it as a plain
+                  // scalar (including multiline continuation support).
+                  skipNumberMatch = true
+                  return null
+                }
+
+                if (hasEmbeddedColon || hasBlockComma) {
                   // Scan to end of plain scalar token (space, tab, newline, eof).
                   let end = 0
                   while (end < fwd.length && fwd[end] !== ' ' && fwd[end] !== '\t' &&
@@ -1967,13 +1994,6 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
                   pnt.sI += end
                   pnt.cI += end
                   return tkn
-                }
-                if (hasTrailingText) {
-                  // Flag that the number matcher should skip this value,
-                  // so the text.check handler can process it as a plain
-                  // scalar (including multiline continuation support).
-                  skipNumberMatch = true
-                  return null
                 }
               }
 
