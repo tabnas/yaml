@@ -5,8 +5,9 @@
 // divergence that quietly goes away should be deleted from the register
 // in the same change, not left behind as a claim nobody checks.
 //
-// The one divergence not pinned here is UNDEFINED against null, which has
-// its own file, `undefined_test.rs`.
+// Three divergences are pinned elsewhere: UNDEFINED against null, in
+// `undefined_test.rs`, and the two that turn on JavaScript's own string
+// semantics, in `js_semantics_test.rs` beside the fixes they belong to.
 
 mod common;
 

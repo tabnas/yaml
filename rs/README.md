@@ -142,20 +142,21 @@ them:
 [dependencies]
 tabnas-yaml = { path = "../yaml/rs" }
 tabnas = { path = "../parser/rs" }
+tabnas-jsonic = { path = "../jsonic/rs" }
 ```
 
-Both entries are needed. A crate's dependencies are not passed on to its
-dependents, so `tabnas-yaml` alone does not put `tabnas` in the extern
-prelude, and the examples above that name `tabnas_jsonic` need
-`tabnas-jsonic` as well. Only `YamlError` is re-exported. The test suite
-additionally needs `https://github.com/tabnas/support` beside the
-repository, for the shared fixture runner.
+All three entries are needed. A crate's dependencies are not passed on
+to its dependents, so `tabnas-yaml` alone puts neither `tabnas` nor
+`tabnas-jsonic` in the extern prelude, and the examples above name both.
+Only `YamlError` is re-exported. The test suite additionally needs
+`https://github.com/tabnas/support` beside the repository, for the
+shared fixture runner.
 
 ## Differences from the canonical TypeScript
 
 Every parse result is the TypeScript one, and the shared fixtures in
 [`../test/spec`](../test/spec) and the vendored conformance suite hold all
-three runtimes to it. What differs is the shape of the API and four
+three runtimes to it. What differs is the shape of the API and five
 recorded points where a result or a diagnostic does not match, each of
 them written up with a measured table in
 [`../DIVERGENCE.md`](../DIVERGENCE.md):
@@ -181,6 +182,11 @@ them written up with a measured table in
   where a refusal all three runtimes make is reported. Both come from the
   order the engine's lexer offers a moved cursor to its remaining
   matchers. The register names the inputs.
+- **A `\u` escape naming an unpaired UTF-16 surrogate becomes the
+  replacement character.** A Rust string holds Unicode scalars and a lone
+  surrogate is not one, where a TypeScript string is UTF-16 and keeps it.
+  Two of them side by side are one astral character in both runtimes,
+  which is what `tests/js_semantics_test.rs` measures.
 
 ## Untrusted input
 

@@ -18,7 +18,8 @@ and this file only covers what is specific to this crate.
 | `tests/parity_regression_test.rs` | the TypeScript/Go parity regressions captured from real OpenAPI and Swagger files |
 | `tests/column_units_test.rs` | the sixteen error-column cases the other two runtimes assert |
 | `tests/untrusted_test.rs` | deep nesting, long input, unterminated constructs, control characters, odd Unicode |
-| `tests/divergence_test.rs` | every entry in `../DIVERGENCE.md` a fixture cannot express |
+| `tests/js_semantics_test.rs` | where JavaScript's whitespace, word characters and UTF-16 code units decide a parse; not fixture rows, because Go answers them natively |
+| `tests/divergence_test.rs` | every entry in `../DIVERGENCE.md` a fixture cannot express, bar the two `tests/js_semantics_test.rs` pins |
 | `tests/undefined_test.rs` | the UNDEFINED against null divergence |
 | `tests/grammar_test.rs` | the embedded grammar is still the file on disk, in all three runtimes |
 | `tests/perf_test.rs` | `parse` reuses its instance; parse time grows about linearly |
@@ -182,17 +183,20 @@ the engine's grammar document. jsonic's numbers are doubles, so
 `integral_numbers` puts whole ones back into integer form before the
 alternate decoder reads `b: 2` as a backtrack count.
 
-## The docs are gated, and this crate's page is not yet in the set
+## The docs are gated, and this crate's page is in the set
 
-`README.md` is written to the published-set rules (no em dash, no first
-person, no links to any `AGENTS.md`, no project history), but it is NOT
-yet listed in `ts/scripts/gated-docs.cjs`, so Vale and
-`ts/test/docs.test.js` do not see it. Adding it takes three changes in
-`ts/` and `.github/`, which this port was not scoped to make: the page
-list, the re-measured counts in `.vale.ini` and `docs/STYLE-GUIDE.md`
-(`node ts/scripts/vale-counts.cjs --write`), and `rs/README.md` in both
-`paths:` lists of the docs workflow. This file is internal and may be
-blunt.
+`README.md` is a published page, written to the published-set rules: no
+em dash, no first person, no links to any `AGENTS.md`, no project
+history. It is listed in `ts/scripts/gated-docs.cjs`, so Vale, the
+`docs-style` suite in `ts/test/docs.test.js` and the docs workflow all
+read it. Four terms it needed are accepted by name in
+`.vale/styles/config/vocabularies/Tabnas/accept.txt`, and the alert
+counts `.vale.ini` and `docs/STYLE-GUIDE.md` record were re-measured
+when the page joined the set. Editing the page moves those counts, so
+re-measure with `node ts/scripts/vale-counts.cjs --write` (or
+`make prose-counts`) and run `make prose` before calling it done.
+
+This file is internal, is not in that set, and may be blunt.
 
 ## The README is doctested
 

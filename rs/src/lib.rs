@@ -547,9 +547,11 @@ fn is_decimal_literal(body: &str) -> bool {
     index == bytes.len()
 }
 
-/// `parseInt(text, 10)`.
+/// `parseInt(text, 10)`. The leading run it skips is JavaScript's
+/// whitespace, which is not Rust's: `trim_start` would leave a
+/// byte-order mark in place and strip a next-line character.
 pub(crate) fn parse_int(text: &str) -> f64 {
-    let trimmed = text.trim_start();
+    let trimmed = text.trim_start_matches(js_space);
     let bytes = trimmed.as_bytes();
     let mut index = 0;
     if index < bytes.len() && (bytes[index] == b'+' || bytes[index] == b'-') {
@@ -565,9 +567,10 @@ pub(crate) fn parse_int(text: &str) -> f64 {
     trimmed[..index].parse::<f64>().unwrap_or(f64::NAN)
 }
 
-/// `parseFloat(text)`.
+/// `parseFloat(text)`, skipping the same JavaScript whitespace
+/// `parse_int` skips.
 pub(crate) fn parse_float(text: &str) -> f64 {
-    let trimmed = text.trim_start();
+    let trimmed = text.trim_start_matches(js_space);
     let bytes = trimmed.as_bytes();
     let mut index = 0;
     if index < bytes.len() && (bytes[index] == b'+' || bytes[index] == b'-') {
@@ -614,14 +617,12 @@ pub(crate) fn parse_float(text: &str) -> f64 {
         .unwrap_or(f64::NAN)
 }
 
-/// One Unicode scalar from a hexadecimal escape's digits. A code point
-/// with no scalar of its own, which is every lone surrogate, folds to the
-/// replacement character, as the engine's own string lexer folds one.
-pub(crate) fn code_point(digits: &str) -> char {
-    u32::from_str_radix(digits, 16)
-        .ok()
-        .and_then(char::from_u32)
-        .unwrap_or('\u{fffd}')
+/// The code point a hexadecimal escape's digits name. A surrogate is a
+/// code point with no Unicode scalar of its own, so the caller pairs an
+/// adjacent high and low one before converting; digits with no value at
+/// all have no code point.
+pub(crate) fn code_point(digits: &str) -> Option<u32> {
+    u32::from_str_radix(digits, 16).ok()
 }
 
 /// The YAML value keywords, and the three non-finite numbers that have
@@ -885,12 +886,16 @@ fn apply_directive(rule: &mut Rule, context: &mut Context) {
 }
 
 /// `%TAG <handle> <prefix>`, the only directive that changes a parse.
+/// The canonical pattern is `^%TAG\s+(\S+)\s+(\S+)`, so the separator
+/// is JavaScript's whitespace: `is_whitespace` and `split_whitespace`
+/// would read a next-line character as a separator and a byte-order mark
+/// as part of a field.
 fn tag_directive(source: &str) -> Option<(String, String)> {
     let rest = source.strip_prefix("%TAG")?;
-    if !rest.starts_with(|character: char| character.is_whitespace()) {
+    if !rest.starts_with(js_space) {
         return None;
     }
-    let mut fields = rest.split_whitespace();
+    let mut fields = rest.split(js_space).filter(|field| !field.is_empty());
     let handle = fields.next()?;
     let prefix = fields.next()?;
     Some((handle.to_string(), prefix.to_string()))

@@ -7,9 +7,13 @@ the same input**, and why the difference is allowed to stand.
 None of these can be written as a row of `test/spec/*.tsv`, which is why
 this repository still has no divergence register: one is invisible to the
 value those fixtures compare, two concern a diagnostic's position, which
-no fixture pins, and one needs a nesting depth far past anything a
-fixture cell would hold. A divergence a row could express belongs in a
-register, with a `rust` column, per [`AGENTS.md`](AGENTS.md).
+no fixture pins, one needs a nesting depth far past anything a fixture
+cell would hold, and one needs a lone UTF-16 surrogate in an expected
+cell, which a UTF-8 file cannot carry. The last entry is a Go defect
+rather than a standing difference: it is written down so a shared row is
+not added over it before the repair lands. A divergence a row could
+express belongs in a register, with a `rust` column, per
+[`AGENTS.md`](AGENTS.md).
 
 Every entry is pinned by a test, so it fails on REPAIR as loudly as on
 regression. Repairing one means deleting its entry here and its test in
@@ -133,3 +137,82 @@ Owner: this port. The repair is to reproduce the canonical chain's number
 matcher exactly rather than standing in for it, which means porting
 `Lexer::match_number` and its options; that is a larger change than the
 two shapes justify today.
+
+## UTF-16 escapes in a double quoted scalar (Go and Rust)
+
+Written with `U+XXXX` for the characters the table is about, because a
+lone surrogate has no UTF-8 spelling and a byte-order mark is invisible.
+
+| input | TypeScript | Go | Rust |
+|---|---|---|---|
+| `a: "\uD83D\uDE00"` | U+1F600 | U+FFFD U+FFFD | U+1F600 |
+| `a: "\U0000D83D\uDE00"` | U+1F600 | U+FFFD U+FFFD | U+1F600 |
+| `a: "\uD83D"` | a lone high surrogate | U+FFFD | U+FFFD |
+| `a: "\uDE00"` | a lone low surrogate | U+FFFD | U+FFFD |
+
+The canonical handler builds the scalar with `String.fromCharCode`,
+which appends one UTF-16 CODE UNIT, so a high escape and the low escape
+beside it are one astral character rather than two escapes. A Rust
+string holds Unicode scalars, so this port pairs the two before
+converting (`push_code_point` in `rs/src/lex.rs`) and reaches the
+canonical value. The Go port converts each escape on its own with
+`string(rune(n))`, which folds every surrogate to U+FFFD, so the pair is
+lost there.
+
+An UNPAIRED surrogate is the part neither port can reach. TypeScript
+keeps the code unit, because a JavaScript string is UTF-16 and permits
+one; Go and Rust fold it to the replacement character, because neither
+string model has a place to put it. That is the same trade the engine
+records for its own quoted strings, under "Lone surrogates in quoted
+strings" in `parser/DIVERGENCE.md`, and the string model decides it
+rather than this plugin.
+
+Provenance: the TypeScript column was produced by running
+`ts/src/yaml.ts` under Node 22; the Go column by `tabnasyaml.Parse` in
+`go/`; the Rust column by `tabnas_yaml::parse`. No row of
+`test/spec/*.tsv` can carry the TypeScript answers, because an expected
+cell is UTF-8 text and a lone surrogate has no UTF-8 encoding. The pair
+rows are pinned by
+`rs/tests/js_semantics_test.rs::a_surrogate_pair_escape_is_one_character`
+and the unpaired rows by
+`rs/tests/js_semantics_test.rs::an_unpaired_surrogate_escape_folds`.
+
+Owner for the unpaired rows: the string model, as upstream. Owner for
+the pair rows: the Go port, where they are a defect and not a trade.
+
+## JavaScript whitespace and word characters (Go)
+
+`NL` below is the newline a source carries, and `U+XXXX` again stands
+for a character the table is about.
+
+| input | TypeScript | Go | Rust |
+|---|---|---|---|
+| `a: !!float U+FEFF 1` | `1` | `"U+FEFF 1"` | `1` |
+| `a: !!float U+0085 1` | `NaN` | `"1"` | `NaN` |
+| `a: !!python/ [1]` | `ERROR:unexpected` | `{"a":[1]}` | `ERROR:unexpected` |
+| `U+FEFF` alone | `null` | `"U+FEFF"` | `null` |
+| `U+0085` alone | `"U+0085"` | `null` | `"U+0085"` |
+| `&n U+FEFF v: 1 NL b: *n` | `{"U+FEFF v":1,"b":"v"}` | `{"U+FEFF v":1,"b":"U+FEFF v"}` | `{"U+FEFF v":1,"b":"v"}` |
+| `%TAG U+FEFF !! t: NL --- !!int 007` | `"007"` | `7` | `"007"` |
+
+The canonical plugin is JavaScript, so its `\s` is the `White_Space`
+property MINUS U+0085 and PLUS U+FEFF, and its `\w` and `\b` are ASCII.
+Go's `unicode.IsSpace` and `strings.TrimSpace` answer the other way on
+both characters, which is what every row above measures: a tagged
+number's `parseFloat`, the `\b` on the `python/` structural tag, the
+whitespace-only source test, the trim on an inline anchor's scalar, and
+the `^%TAG\s+(\S+)\s+(\S+)` split. This port spells the JavaScript rule
+out as `crate::js_space` and reaches the canonical answer in each.
+
+Provenance: the TypeScript column was produced by running
+`ts/src/yaml.ts` under Node 22; the Go column by `tabnasyaml.Parse` in
+`go/`; the Rust column by `tabnas_yaml::parse`. Pinned by
+`rs/tests/js_semantics_test.rs`, one test per row group. The one case of
+this shape the Go port already answers correctly, an explicit key tagged
+`!!` plus a non-ASCII name, is a shared fixture row instead, in
+`test/spec/complex-keys.tsv`.
+
+Owner: the Go port. These are defects there, not trades, and the entry
+exists so a shared fixture row is not added over them before the repair
+lands. Delete this entry, and move its rows into `test/spec/*.tsv`, when
+Go answers them the canonical way.

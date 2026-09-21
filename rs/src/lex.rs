@@ -334,7 +334,13 @@ fn decide(src: &str, start: (usize, usize, usize), context: &mut Context) -> Act
     // parser yields null rather than refusing the document.
     if !state::flag(context, state::INIT) {
         state::initialise(context);
-        if src.trim().is_empty() || strip_comment_lines(src).trim().is_empty() {
+        // `src.trim() === '' || stripped === ''` in the canonical port,
+        // where `trim` strips JavaScript's whitespace rather than Rust's.
+        if src.trim_matches(crate::js_space).is_empty()
+            || strip_comment_lines(src)
+                .trim_matches(crate::js_space)
+                .is_empty()
+        {
             return Act::moved(
                 (src.len(), start.1, start.2),
                 Some(Tok::new("#VL", Value::Null, "", start)),
@@ -670,7 +676,18 @@ fn is_struct_tag(fwd: &str) -> bool {
             }
         }
     }
-    starts_with_at(fwd, 2, "python/")
+    if !starts_with_at(fwd, 2, "python/") {
+        return false;
+    }
+    // `python/` carries the same trailing `\b`, and `/` is not a word
+    // character, so the boundary holds only where the non-blank run after
+    // the slash carries one: `\S*` backtracks to the first of them. The
+    // word characters are JavaScript's ASCII `\w`, and the run ends at
+    // JavaScript's `\s`. `!!python/ [1]` therefore keeps its `[1]`.
+    fwd["!!python/".len()..]
+        .chars()
+        .take_while(|character| !crate::js_space(*character))
+        .any(|character| character.is_ascii_alphanumeric() || character == '_')
 }
 
 /// Encode a token for the queue in the context bag, and read it back.
@@ -960,7 +977,9 @@ fn inline_scalar(peek: &str) -> Option<String> {
                 }
                 index += 1;
             }
-            let raw = peek[..index].trim();
+            // `peek.substring(0, ei).trim()`, again JavaScript's
+            // whitespace rather than Rust's.
+            let raw = peek[..index].trim_matches(crate::js_space);
             if raw.is_empty() {
                 None
             } else {
@@ -1141,9 +1160,44 @@ fn doc_marker(src: &str, fwd: &str, cursor: (usize, usize, usize)) -> Act {
 // Quoted scalars
 // ---------------------------------------------------------------------
 
+/// Write out a high surrogate that never found its partner. A Rust
+/// string holds Unicode scalars, and a lone surrogate is not one, so it
+/// folds to the replacement character the way the engine's own string
+/// lexer folds one. The canonical port keeps the code unit, which is the
+/// entry `../DIVERGENCE.md` records.
+fn flush_surrogate(pending: &mut Option<u32>, out: &mut String) {
+    if pending.take().is_some() {
+        out.push('\u{fffd}');
+    }
+}
+
+/// Append one escaped code point. `String.fromCharCode` appends a UTF-16
+/// CODE UNIT, so the canonical port's `\uD83D\uDE00` is one astral
+/// character rather than two escapes; a high surrogate is therefore held
+/// back until the next escape either completes the pair or does not.
+fn push_code_point(code: u32, pending: &mut Option<u32>, out: &mut String) {
+    if (0xd800..=0xdbff).contains(&code) {
+        flush_surrogate(pending, out);
+        *pending = Some(code);
+    } else if (0xdc00..=0xdfff).contains(&code) {
+        match pending.take() {
+            Some(high) => out.push(
+                char::from_u32(0x10000 + ((high - 0xd800) << 10) + (code - 0xdc00))
+                    .unwrap_or('\u{fffd}'),
+            ),
+            None => out.push('\u{fffd}'),
+        }
+    } else {
+        flush_surrogate(pending, out);
+        out.push(char::from_u32(code).unwrap_or('\u{fffd}'));
+    }
+}
+
 fn double_quoted(src: &str, fwd: &str, cursor: (usize, usize, usize)) -> Act {
     let mut index = 1;
     let mut value = String::new();
+    // A high surrogate escape waiting for the low one that completes it.
+    let mut pending = None;
     // Characters up to here came from escapes and are not trimmable.
     let mut escaped_upto = 0usize;
     while index < fwd.len() && !is(fwd, index, b'"') {
@@ -1173,6 +1227,7 @@ fn double_quoted(src: &str, fwd: &str, cursor: (usize, usize, usize)) -> Act {
                 _ => None,
             };
             if let Some(text) = decoded {
+                flush_surrogate(&mut pending, &mut value);
                 value.push_str(&text);
                 index += 1;
                 escaped_upto = value.len();
@@ -1192,7 +1247,13 @@ fn double_quoted(src: &str, fwd: &str, cursor: (usize, usize, usize)) -> Act {
                     to += 1;
                 }
                 let digits = if from <= to { &fwd[from..to] } else { "" };
-                value.push(crate::code_point(digits));
+                match crate::code_point(digits) {
+                    Some(code) => push_code_point(code, &mut pending, &mut value),
+                    None => {
+                        flush_surrogate(&mut pending, &mut value);
+                        value.push('\u{fffd}');
+                    }
+                }
                 index += 1 + width;
                 escaped_upto = value.len();
                 continue;
@@ -1212,12 +1273,14 @@ fn double_quoted(src: &str, fwd: &str, cursor: (usize, usize, usize)) -> Act {
                 break;
             }
             let character = fwd[index..].chars().next().unwrap_or('\\');
+            flush_surrogate(&mut pending, &mut value);
             value.push(character);
             index += character.len_utf8();
             continue;
         }
         if line_end(at(fwd, index)) {
             // Flow folding: trim what was written literally, then fold.
+            flush_surrogate(&mut pending, &mut value);
             let mut trim_to = value.len();
             while trim_to > escaped_upto
                 && matches!(value.as_bytes().get(trim_to - 1), Some(b' ' | b'\t'))
@@ -1248,9 +1311,11 @@ fn double_quoted(src: &str, fwd: &str, cursor: (usize, usize, usize)) -> Act {
             continue;
         }
         let character = fwd[index..].chars().next().unwrap_or('"');
+        flush_surrogate(&mut pending, &mut value);
         value.push(character);
         index += character.len_utf8();
     }
+    flush_surrogate(&mut pending, &mut value);
     if is(fwd, index, b'"') {
         index += 1;
     }
@@ -1865,10 +1930,13 @@ fn explicit_key(src: &str, fwd: &str, cursor: (usize, usize, usize), context: &m
 }
 
 /// `!!name rest` on an explicit key: the tag is stripped and `rest` kept.
+/// The canonical pattern is `^!!(\w+)\s+(.*)$`, and JavaScript's `\w` is
+/// ASCII, so `is_alphanumeric` would strip a tag the canonical port keeps
+/// whole: `? !!\u{e9} value` has no tag name at all there.
 fn strip_key_tag(key: &str) -> Option<String> {
     let rest = key.strip_prefix("!!")?;
     let name_len = rest
-        .find(|character: char| !character.is_alphanumeric() && character != '_')
+        .find(|character: char| !character.is_ascii_alphanumeric() && character != '_')
         .unwrap_or(rest.len());
     if name_len == 0 {
         return None;

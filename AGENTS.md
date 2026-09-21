@@ -339,7 +339,9 @@ What "correct" means here, in order of authority:
    parser is DELETING lines from those files, never adding a skip.
 3. **The version constants agree** — `ts/package.json` `"version"`,
    `const VERSION` in `ts/src/yaml.ts`, `const VERSION` in `go/yaml.go`,
-   and `pub const VERSION` plus `version` in `rs/Cargo.toml`.
+   and `pub const VERSION` in `rs/src/lib.rs` plus `version` in
+   `rs/Cargo.toml`, with `rs/Cargo.lock` recording that same version for
+   this crate.
    `ts/test/version.test.ts`, `go/version_test.go` and
    `rs/tests/version_test.rs` fail (never skip) on drift; the release
    orchestrator rewrites them, so never bump one by hand.
@@ -380,9 +382,19 @@ accepts the publish. Pushing a tag by hand is the orchestrator's path
 
 The steps, in order:
 
-1. Bump all **three** version sites together — `ts/package.json`, `VERSION`
-   in `ts/src/yaml.ts` and `const VERSION` in `go/yaml.go`. Drift is caught
-   by `ts/test/version.test.ts` and `go/version_test.go`.
+1. Bump all **five** version sites together — `ts/package.json`, `VERSION`
+   in `ts/src/yaml.ts`, `const VERSION` in `go/yaml.go`, and, in the Rust
+   port, `pub const VERSION` in `rs/src/lib.rs` and `version` in
+   `rs/Cargo.toml`. Then run any cargo command in `rs/` so `rs/Cargo.lock`
+   records the new version for this crate, and commit the lock with the
+   rest. Drift between the first four is caught by
+   `ts/test/version.test.ts`, `go/version_test.go` and
+   `rs/tests/version_test.rs`; a stale `rs/Cargo.lock` is caught by
+   `ci/rust/run.sh`, which compares the lock's entry for this crate with
+   the manifest before it runs anything else. The Rust workflow is staged
+   under ADR-8 rather than promoted, so on a pull request that check runs
+   only where someone runs `ci/rust/run.sh` by hand: bump the Rust sites
+   with the others rather than relying on it.
 2. Verify against the **published** dependencies rather than your checkout.
    The release runner installs fresh from the registry; a working tree
    usually does not, so reproduce that before believing anything:

@@ -50,8 +50,32 @@ fn the_embedded_grammar_is_the_file_on_disk() {
     );
 }
 
+/// Undo what the embedder does to fit the grammar into a TypeScript
+/// template literal: it doubles every backslash, and puts one in front
+/// of a backtick and of a `${`. A backslash in the embedded text
+/// therefore always escapes the character after it, so one pass left to
+/// right is the exact inverse. Without this the comparison below holds
+/// escaped text against unescaped text, and would fail the moment the
+/// grammar carried a real backslash.
+fn decode_template_literal(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut characters = text.chars();
+    while let Some(character) = characters.next() {
+        if character == '\\' {
+            if let Some(escaped) = characters.next() {
+                out.push(escaped);
+                continue;
+            }
+        }
+        out.push(character);
+    }
+    out
+}
+
 /// And the same text is in the other two runtimes, so a re-embed that
-/// reached only one of them is caught here too.
+/// reached only one of them is caught here too. The Go copy is a raw
+/// string and needs no decoding; the TypeScript one is a template
+/// literal and does.
 #[test]
 fn every_runtime_embeds_the_same_grammar() {
     let root = common::repo_root();
@@ -61,7 +85,7 @@ fn every_runtime_embeds_the_same_grammar() {
         .expect("ts/src/yaml.ts is readable");
     let go = fs::read_to_string(root.join("go").join("yaml.go")).expect("go/yaml.go is readable");
     assert_eq!(
-        embedded(&typescript, "const grammarText = `", "`"),
+        decode_template_literal(&embedded(&typescript, "const grammarText = `", "`")),
         source,
         "ts/src/yaml.ts is out of step with yaml-grammar.jsonic"
     );
