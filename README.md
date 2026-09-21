@@ -9,8 +9,8 @@
 
 A [Tabnas](https://github.com/tabnas/parser) grammar plugin that parses
 a core subset of YAML into plain values, built on the relaxed-JSON
-[`jsonic`](https://github.com/tabnas/jsonic) grammar. Available for both
-**TypeScript/JavaScript** and **Go** from one shared grammar.
+[`jsonic`](https://github.com/tabnas/jsonic) grammar. Available for
+**TypeScript/JavaScript**, **Go** and **Rust** from one shared grammar.
 
 Docs, guides, the error reference and the playground: **[tabnas.dev](https://tabnas.dev)**.
 
@@ -18,6 +18,7 @@ Docs, guides, the error reference and the playground: **[tabnas.dev](https://tab
 |---|---|
 | [`ts/`](ts/) | TypeScript / JavaScript implementation. |
 | [`go/`](go/) | Go port. |
+| [`rs/`](rs/) | Rust port, crate `tabnas-yaml`. See [`rs/README.md`](rs/README.md). |
 
 
 ## Install
@@ -29,6 +30,10 @@ npm install @tabnas/yaml @tabnas/jsonic @tabnas/parser
 # Go
 go get github.com/tabnas/yaml/go
 ```
+
+Rust is not published to a registry. Clone this repository beside
+checkouts of `parser`, `jsonic`, `json` and `support`, and take it as a
+path dependency; see [`rs/README.md`](rs/README.md).
 
 
 ## One tiny example
@@ -52,6 +57,13 @@ import tabnasyaml "github.com/tabnas/yaml/go"
 
 result, _ := tabnasyaml.Parse("name: Alice\nitems:\n  - one\n  - two\n")
 // map[items:[one two] name:Alice]
+```
+
+Rust:
+
+```rust
+let value = tabnas_yaml::parse("name: Alice\nitems:\n  - one\n  - two\n")?;
+// {"name":"Alice","items":["one","two"]}
 ```
 
 
@@ -78,12 +90,13 @@ structure (learning / tasks / reference / explanation):
 ## Grammar
 
 The grammar is defined once in the top-level
-[`yaml-grammar.jsonic`](yaml-grammar.jsonic) and embedded into both the
-TypeScript ([`ts/src/yaml.ts`](ts/src/yaml.ts)) and Go
-([`go/yaml.go`](go/yaml.go)) implementations by
+[`yaml-grammar.jsonic`](yaml-grammar.jsonic) and embedded into the
+TypeScript ([`ts/src/yaml.ts`](ts/src/yaml.ts)), Go
+([`go/yaml.go`](go/yaml.go)) and Rust
+([`rs/src/lib.rs`](rs/src/lib.rs)) implementations by
 [`ts/embed-grammar.js`](ts/embed-grammar.js). After editing the grammar
 file, re-run the embed step (`make embed`, or `npm run build` in `ts/`)
-to re-sync both sources.
+to re-sync every source.
 
 The installed grammar as a railroad/syntax diagram, generated from the
 live grammar with [`@tabnas/railroad`](https://github.com/tabnas/railroad):

@@ -3,7 +3,8 @@
 ## What this project is
 
 `@tabnas/yaml` is a **grammar plugin that parses a core subset of YAML**
-into plain JavaScript objects (TS/JS) or Go values. It covers block
+into plain JavaScript objects (TS/JS), Go values or `tabnas::Value`
+(Rust). It covers block
 mappings and sequences (indentation-based), flow collections
 (`{a: 1}`, `[1, 2, 3]`), single/double quoted scalars (including
 multiline), block scalars (literal `|` / folded `>`, with chomping),
@@ -39,12 +40,12 @@ Those 70 accepted-but-spec-invalid cases are the plugin's **leniency
 boundary**, and it is a checked one rather than a hand-wave: every id is
 listed in
 [`test/yaml-test-suite-lenient.tsv`](test/yaml-test-suite-lenient.tsv),
-both runners read that one file, and the error-case test fails if a
+all three runners read that one file, and the error-case test fails if a
 listed case starts being *rejected* or if an unlisted `error` case is
 *accepted*. The 21 valid-but-rejected parse-only cases are held by the
 same discipline in
 [`test/yaml-test-suite-unparsed.tsv`](test/yaml-test-suite-unparsed.tsv). Tightening the parser therefore means deleting lines from
-that file; nothing can drift silently, and the two runtimes cannot
+that file; nothing can drift silently, and the three runtimes cannot
 disagree about which inputs are errors. The leniency is inherited by
 design — this plugin layers on jsonic's deliberately relaxed grammar,
 which does not reject every construct YAML 1.2 forbids.
@@ -72,9 +73,10 @@ j.parse('name: Alice\nitems:\n  - one\n  - two\n')
 |---|---|
 | [`ts/`](ts/) | **Canonical** TypeScript implementation — the `@tabnas/yaml` package. The entire plugin (lexer matcher + grammar wiring + scalar/anchor/tag handling) lives in the single large [`ts/src/yaml.ts`](ts/src/yaml.ts). Depends on `@tabnas/jsonic` and `@tabnas/parser`. |
 | [`go/`](go/) | Go port — `github.com/tabnas/yaml/go`. The whole plugin is in [`go/yaml.go`](go/yaml.go); the package's `const VERSION` lives there too. Module path is `github.com/tabnas/yaml/go`, but its only tabnas dependency is **jsonic** (see below). |
-| [`yaml-grammar.jsonic`](yaml-grammar.jsonic) | **Single source of truth for the grammar**, written in jsonic syntax. Lives at the **repo root** and is embedded verbatim into `ts/src/yaml.ts` and `go/yaml.go` by [`ts/embed-grammar.js`](ts/embed-grammar.js). Do not edit the embedded copies by hand — edit the `.jsonic` and re-run the embed. |
-| [`test/spec/`](test/spec/) | **Repo-root shared fixtures**, auto-discovered and run by both runtimes: `*.tsv` files with an `input`/`expected`/`opts` header row. See [`test/AGENTS.md`](test/AGENTS.md) for the exact format. |
-| [`test/yaml-test-suite/`](test/yaml-test-suite/) | The upstream YAML Test Suite corpus, vendored verbatim and run by **both** runtimes, plus the two shared ledgers both runners read: [`test/yaml-test-suite-lenient.tsv`](test/yaml-test-suite-lenient.tsv) (`error` cases this parser accepts) and [`test/yaml-test-suite-unparsed.tsv`](test/yaml-test-suite-unparsed.tsv) (parse-only cases it still rejects). |
+| [`rs/`](rs/) | Rust port — crate `tabnas-yaml`, library `tabnas_yaml`. The plugin is [`rs/src/lib.rs`](rs/src/lib.rs) (options, grammar, rule wiring, entry points) with the lexer in `rs/src/lex.rs`, the scalar handlers in `rs/src/text.rs` and the per-parse state in `rs/src/state.rs`; `pub const VERSION` lives in `lib.rs`. Path dependencies on sibling checkouts of **parser**, **jsonic** (and **json** beneath it) and, for tests, **support**. |
+| [`yaml-grammar.jsonic`](yaml-grammar.jsonic) | **Single source of truth for the grammar**, written in jsonic syntax. Lives at the **repo root** and is embedded verbatim into `ts/src/yaml.ts`, `go/yaml.go` and `rs/src/lib.rs` by [`ts/embed-grammar.js`](ts/embed-grammar.js). Do not edit the embedded copies by hand — edit the `.jsonic` and re-run the embed. |
+| [`test/spec/`](test/spec/) | **Repo-root shared fixtures**, auto-discovered and run by all three runtimes: `*.tsv` files with an `input`/`expected`/`opts` header row. See [`test/AGENTS.md`](test/AGENTS.md) for the exact format. |
+| [`test/yaml-test-suite/`](test/yaml-test-suite/) | The upstream YAML Test Suite corpus, vendored verbatim and run by **all three** runtimes, plus the two shared ledgers every runner reads: [`test/yaml-test-suite-lenient.tsv`](test/yaml-test-suite-lenient.tsv) (`error` cases this parser accepts) and [`test/yaml-test-suite-unparsed.tsv`](test/yaml-test-suite-unparsed.tsv) (parse-only cases it still rejects). |
 | [`ts/test/`](ts/test/) | TS `*.test.ts` suites (compiled to `dist-test/`): `yaml.test.ts` (unit), `parity.test.ts` (the shared `test/spec/*.tsv` fixtures), `yaml-test-suite.test.ts` (official corpus), `doc-examples.test.ts`, `debug-model.test.ts` (the `@tabnas/debug` composition test). |
 | [`go/`](go/) `*_test.go` | Go suites: `yaml_test.go` + `yaml_scenarios_test.go` (unit), `parity_test.go` (`TestSpec` runs the shared `test/spec/*.tsv` fixtures), `parity_regression_test.go` (TS/Go parity regressions), `yaml_test_suite_test.go` (official corpus), plus `bench_test.go` / `perf_test.go` / `scaling_test.go` (performance). |
 | [`ts/doc/`](ts/doc/), [`go/doc/`](go/doc/) | Per-runtime Diataxis guides (`yaml-ts.md`, `yaml-go.md`) and the generated railroad diagram (`ts/doc/grammar.{svg,txt}`). |
@@ -85,15 +87,20 @@ j.parse('name: Alice\nitems:\n  - one\n  - two\n')
 The grammar (rule alts, refs, token wiring) is authored once in
 [`yaml-grammar.jsonic`](yaml-grammar.jsonic) at the repo root and injected between
 `// --- BEGIN EMBEDDED yaml-grammar.jsonic ---` /
-`// --- END EMBEDDED yaml-grammar.jsonic ---` markers in both `src/yaml.ts` (as a TS template
-literal) and `go/yaml.go` (as a Go raw string). `embed-grammar.js`
-escapes backslashes/backticks/`${` for the TS literal and rejects any
-backtick in the file (it would break the Go raw string). Workflow:
+`// --- END EMBEDDED yaml-grammar.jsonic ---` markers in `src/yaml.ts` (as a TS template
+literal), `go/yaml.go` (as a Go raw string) and `rs/src/lib.rs` (as a
+Rust `r##"…"##` raw string). `embed-grammar.js`
+escapes backslashes/backticks/`${` for the TS literal, rejects any
+backtick in the file (it would break the Go raw string) and rejects a
+`"##` run (it would break the Rust one); the Rust target is skipped when
+`rs/` is absent. Each runtime parses the embedded text with its own
+jsonic at load time, so the three are not three grammars: they are THE
+grammar. Workflow:
 
 1. Edit `yaml-grammar.jsonic` (repo root).
 2. Run `npm run embed` in `ts/` (or `make embed` from `ts/`, i.e.
-   `make -C ts embed`) to re-sync both copies.
-3. Build/test both sides.
+   `make -C ts embed`) to re-sync every copy.
+3. Build/test every side.
 
 `npm run build` runs the embed first (`node embed-grammar.js && tsc
 --build src test`), so a plain build re-syncs the embedded text. The
@@ -104,7 +111,7 @@ the grammar resolve to closures wired in the source code, not in the
 ## The tabnas dependencies (sibling checkout)
 
 This plugin sits on top of jsonic, which sits on the parser engine. The
-tabnas packages are unpublished, so both runtimes resolve them via
+tabnas packages are unpublished, so every runtime resolves them via
 **sibling checkouts**:
 
 - **TypeScript** (`ts/package.json`): `@tabnas/jsonic` and
@@ -120,6 +127,13 @@ tabnas packages are unpublished, so both runtimes resolve them via
   `replace github.com/tabnas/jsonic/go => ../../jsonic/go` (a sibling
   checkout). The Go plugin imports `jsonic` directly and never imports
   the parser engine — jsonic re-exports the engine surface it needs.
+- **Rust** (`rs/Cargo.toml`): `tabnas = { path = "../../parser/rs" }` and
+  `tabnas-jsonic = { path = "../../jsonic/rs" }`, with
+  `tabnas-support = { path = "../../support/rs" }` as a dev-dependency.
+  jsonic takes `tabnas-json = { path = "../../json/rs" }` in turn, so
+  four sibling checkouts have to be present. None of the crates is
+  published, so there is no registry version to fall back on.
+  `ci/rust/run.sh` checks for all four before it runs anything.
 
 Clone `https://github.com/tabnas/jsonic` and
 `https://github.com/tabnas/parser` (plus `debug`/`railroad` for the
@@ -133,35 +147,37 @@ here. CI checks the whole closure out and builds it first.
    behavior, TS wins; change Go to match, and add or extend a shared
    `.tsv` fixture when the behavior is expressible as `input → output`.
 2. The shared fixtures in [`test/spec/*.tsv`](test/spec/) are the parity
-   contract. Both suites auto-discover every file in that directory and
-   both must stay green. TS reads it from `dist-test/` at
+   contract. Every suite auto-discovers every file in that directory and
+   all of them must stay green. TS reads it from `dist-test/` at
    `../../test/spec` (`ts/test/parity.test.ts`); Go globs
-   `../test/spec/*.tsv` (`go/parity_test.go` `TestSpec`). Line 1 is a
+   `../test/spec/*.tsv` (`go/parity_test.go` `TestSpec`); Rust walks up
+   from the crate directory (`rs/tests/parity_test.rs`). Line 1 is a
    header naming the columns `input`/`expected`/`opts`; `\n`, `\r`,
    `\t`, `\\` are unescaped in `input` only (`expected` and `opts` are
    raw JSON). Full format rules — including the `ERROR`, `UNDEFINED` and
    `@@Infinity`/`@@NaN` spellings — are in
    [`test/AGENTS.md`](test/AGENTS.md).
-3. The grammar text in both runtimes is byte-identical because it is
+3. The grammar text in every runtime is byte-identical because it is
    embedded from the same `yaml-grammar.jsonic`. Keep it that way — make
    grammar changes in the `.jsonic` and re-embed; do not hand-edit one
-   runtime's embedded copy.
+   runtime's embedded copy. `rs/tests/grammar_test.rs` compares all three
+   embedded copies against the file and fails when any has drifted.
 4. The `parity_regression_test.go` cases capture real-world YAML
    (OpenAPI/Swagger) that the Go port once rejected but TS accepted.
    When you fix a Go parity bug, prefer adding the snippet there or to a
    shared `test/spec/*.tsv`.
 5. The official YAML Test Suite (`test/yaml-test-suite/`) is run by
-   **both** runtimes — `ts/test/yaml-test-suite.test.ts` and
-   `go/yaml_test_suite_test.go`, which mirror each other's gathering and
-   comparison rules. There is deliberately **no skip list**: a
+   **all three** runtimes — `ts/test/yaml-test-suite.test.ts`,
+   `go/yaml_test_suite_test.go` and `rs/tests/yaml_test_suite_test.rs`,
+   which mirror each other's gathering and comparison rules. There is deliberately **no skip list**: a
    conformance figure that can be silenced case by case is worth
    nothing. Every expectation that is not the strict one lives in a
-   shared, checked ledger read by both runners —
+   shared, checked ledger read by every runner —
    `test/yaml-test-suite-lenient.tsv` (must-fail cases that are
    accepted) and `test/yaml-test-suite-unparsed.tsv` (valid parse-only
    cases that are rejected). Tightening the parser means DELETING lines
-   from those files; both runners fail if a listed case starts behaving
-   correctly, and fail if an unlisted case regresses.
+   from those files; every runner fails if a listed case starts behaving
+   correctly, and fails if an unlisted case regresses.
 
 ## Public API
 
@@ -176,10 +192,17 @@ exposes convenience entry points):
   instance), `MakeJsonic(opts ...YamlOptions) *jsonic.Jsonic` (build a
   configured instance), the `Yaml` plugin (`j.Use(Yaml, opts)`), and
   `const VERSION`.
-- **`VERSION` must always equal `ts/package.json` "version"**, in both
-  runtimes. `go/version_test.go` and `ts/test/version.test.ts` are the CI
-  checks: they read `ts/package.json` and fail (never skip) on drift. The
-  release orchestrator rewrites both constants — never bump one by hand.
+- **Rust** (`rs/src/lib.rs`) exports `parse(src) -> Result<Value,
+  YamlError>` (shared default instance), `make()` and
+  `make_with(YamlOptions)`, the plugin as both `plugin() -> Plugin` and
+  `yaml(&mut Tabnas, &YamlOptions)`, the `YamlOptions` struct, the
+  `YamlError` re-export, and `pub const VERSION`.
+- **`VERSION` must always equal `ts/package.json` "version"**, in all
+  three runtimes. `go/version_test.go`, `ts/test/version.test.ts` and
+  `rs/tests/version_test.rs` are the CI checks: they read
+  `ts/package.json` and fail (never skip) on drift. The Rust test also
+  holds `rs/Cargo.toml` and `go/yaml.go` to the same value. The release
+  orchestrator rewrites every constant — never bump one by hand.
 - `YamlOptions{ meta }` exists in both: with `meta: true`, parsing
   returns `{ meta, content }` (per-document `{directives, explicit,
   ended}`) instead of bare content.
@@ -198,7 +221,18 @@ exposes convenience entry points):
 - The grammar adds YAML rules (`stream`, `yamlBlockElem`,
   `yamlBlockList`, `yamlElemMap`, `yamlElemPair`) on top of jsonic's
   shared `val`/`map`/`list`/`pair`/`elem`/`indent` rules; the full rule
-  set is asserted in `debug-model.test.ts`.
+  set is asserted in `debug-model.test.ts`, and in
+  `rs/tests/yaml_test.rs::the_grammar_adds_the_yaml_rules`.
+- **The Rust port keeps its per-parse state in the parse context.** The
+  TS and Go plugins close over thirteen variables (anchors, pending
+  anchors, pending tokens, tag handles, the stream accumulators, the
+  flow-depth cache) and reset them on the first lexer call of a parse.
+  `Tabnas::parse` takes `&self` and the instance is `Send + Sync`, so the
+  Rust port cannot: every one of those lives in `Context::u` under a
+  `yaml` prefix (`rs/src/state.rs`). It also carries a VIRTUAL cursor
+  there, because the canonical matcher assigns columns the engine's own
+  advancement would not produce and `@val-set-el-in` reads one. See the
+  module note at the top of `rs/src/lex.rs`.
 - The Go module path says `tabnas/yaml/go`, but the dependency is on
   **jsonic**, not parser, and `go/go.sum` still carries a stale
   `github.com/jsonicjs/jsonic/go` hash from the pre-rename history — the
@@ -240,10 +274,22 @@ go build ./...
 go test -v ./...       # unit + shared .tsv fixtures + parity
 ```
 
+Rust (from `rs/`):
+
+```bash
+cargo build --all-targets
+cargo test --all-targets && cargo test --doc
+cargo clippy --all-targets --all-features -- -D warnings
+```
+
+`--all-targets` does not include doctests, so the README examples need
+the second command. `ci/rust/run.sh` is the full gate and adds
+`fmt --check`, the sibling-checkout check and the lockfile check.
+
 The repo-root [`Makefile`](Makefile) (adapted from voxgig/util) wraps
-both halves: `make` / `make build` / `make test` run the TS and Go
-sides; `make test-ts` / `make test-go` run one; `make reset` does a
-clean install/rebuild/retest. (The `embed` target lives in `ts/Makefile`,
+all three: `make` / `make build` / `make test` run the TS, Go and Rust
+sides; `make test-ts` / `make test-go` / `make test-rs` run one;
+`make reset` does a clean install/rebuild/retest. (The `embed` target lives in `ts/Makefile`,
 not the root one — run `make -C ts embed` or `npm run embed` in `ts/`.)
 `make publish-go V=x.y.z` injects `V` into the `const VERSION` in
 `go/yaml.go`, commits, and tags `go/vX.Y.Z`; `make publish-ts` publishes
@@ -256,7 +302,7 @@ The commands that prove a change is correct. Run from the repo root.
 jobs — the "CI" section above predates that workflow.)
 
 ```bash
-make build && make test      # both runtimes — the check that matters
+make build && make test      # every runtime — the check that matters
 ```
 
 Narrower, when iterating (`make test-ts` / `make test-go` run one side from
@@ -265,6 +311,7 @@ the root):
 ```bash
 (cd ts && npm test)                    # `pretest` builds first
 (cd go && go test ./...)               # unit + shared .tsv fixtures + the YAML Test Suite
+(cd rs && cargo test --all-targets && cargo test --doc)
 ```
 
 Each line is a subshell. `npm test` compiles first — its `pretest`
@@ -282,22 +329,33 @@ around it; the wiring is fixed instead, and
 
 What "correct" means here, in order of authority:
 
-1. **The shared fixtures pass in BOTH runtimes.** `test/spec/*.tsv` is the
-   parity contract — auto-discovered by both runners; a row green in one
-   runtime and red in the other is a failure, not a discrepancy.
+1. **The shared fixtures pass in EVERY runtime.** `test/spec/*.tsv` is the
+   parity contract — auto-discovered by every runner; a row green in one
+   runtime and red in another is a failure, not a discrepancy.
 2. **The YAML Test Suite ledgers stay honest.** Every vendored case is
    asserted, there is no skip list, and the census pins the bucket counts. A
    behaviour change means editing `test/yaml-test-suite-lenient.tsv` /
    `test/yaml-test-suite-unparsed.tsv` in the same commit — tightening the
    parser is DELETING lines from those files, never adding a skip.
-3. **The three version constants agree** — `ts/package.json` `"version"`,
-   `const VERSION` in `ts/src/yaml.ts`, and `const VERSION` in `go/yaml.go`.
-   `ts/test/version.test.ts` and `go/version_test.go` fail (never skip) on
-   drift; the release orchestrator rewrites both, so never bump one by hand.
+3. **The version constants agree** — `ts/package.json` `"version"`,
+   `const VERSION` in `ts/src/yaml.ts`, `const VERSION` in `go/yaml.go`,
+   and `pub const VERSION` plus `version` in `rs/Cargo.toml`.
+   `ts/test/version.test.ts`, `go/version_test.go` and
+   `rs/tests/version_test.rs` fail (never skip) on drift; the release
+   orchestrator rewrites them, so never bump one by hand.
 4. **The embedded grammar matches its source.** If you changed
    `yaml-grammar.jsonic`, run `npm run embed` in `ts/` (or `make -C ts
    embed` — the root Makefile has no `embed` target) — never hand-edit
-   between the `BEGIN/END EMBEDDED` markers in either runtime.
+   between the `BEGIN/END EMBEDDED` markers in any runtime.
+   `ts/embed-grammar.js` writes all three copies, skipping the Rust one
+   when `rs/` is absent; `rs/tests/grammar_test.rs` compares every
+   embedded copy against the file on disk.
+5. **The recorded divergences stay honest.**
+   [`DIVERGENCE.md`](DIVERGENCE.md) lists every input for which a runtime
+   produces a different result, each with a measured table and a test
+   that fails on repair as well as on regression. None of them can be
+   written as a `test/spec/*.tsv` row, which is why this repository has
+   no divergence register.
 
 ## Releasing
 
@@ -529,7 +587,7 @@ They stay in the Makefile because removing them is a separate change.
 
 ## Error codes
 
-This package declares **no** error codes of its own — neither runtime
+This package declares **no** error codes of its own — no runtime
 extends `options.error` — and no fixture pins one: `test/spec/` currently
 has no error rows at all, even though the fixture format supports `ERROR` /
 `ERROR:<code>` (see [`test/AGENTS.md`](test/AGENTS.md)). The only
@@ -543,7 +601,7 @@ coverage tripwire measure exactly this).
 
 The machine-readable list is [`tabnas.plugin.json`](tabnas.plugin.json)
 (`errorCodes` — correctly empty). If a yaml-specific code is ever added,
-declare it in both runtimes, add it to that list, and pin it with an
+declare it in every runtime, add it to that list, and pin it with an
 `ERROR:<code>` fixture row: the code is the contract, not the message.
 
 ## Untrusted input
@@ -590,6 +648,11 @@ that reusable workflow, not in this repo.
 reusable workflow and this repo overrides neither, so `go build ./...` and
 `go test ./...` run on `ubuntu` / `macos` alongside the TS matrix.
 `.github/workflows/release.yml` handles releases.
+
+**The Rust gate is staged, not live.** `ci/workflows/rust.yml` is the
+proposed workflow; a session cannot write `.github/workflows/*` (ADR-8),
+so a maintainer promotes it. Until then, run `ci/rust/run.sh` locally:
+it is the same script the workflow calls, so the two cannot drift.
 
 ## Agent tooling
 
