@@ -78,3 +78,6 @@ bench/**/*.json
 
 # Rust build output (rs/target).
 target/
+
+# Compiled Go test binaries (`go test -c`).
+go/*.test
