@@ -11,6 +11,31 @@ This directory exists because session credentials cannot write
 
 ## Pending
 
+- **`workflows/rust.yml`**, the Rust gate: `rs/` built, tested,
+  `rustfmt`-checked and clippy-clean at `-D warnings`. The commands live
+  in `ci/rust/run.sh`, which the workflow calls and you can run too;
+  `make test-rs` is the fast inner loop.
+
+  It is standalone rather than an arm of `ci.yml`, because `ci.yml`
+  calls the org-shared polyglot workflow, which takes no Rust input, so
+  the Rust port is gated without changing `tabnas/.github`. The job
+  clones `parser`, `jsonic`, `json` and `support` beside the checkout:
+  `rs/Cargo.toml` resolves all four as path dependencies on siblings,
+  and none of them is published.
+
+  Its `paths` lists name the grammar and its embedder as well as `rs/`,
+  because `rs/src/lib.rs` carries a generated copy of
+  `yaml-grammar.jsonic` and `rs/tests/grammar_test.rs` compares the two.
+
+  The lock check is deliberately not blanket `--locked`, which would
+  turn a sibling's release into a red build on every pull request here,
+  including ones touching no Rust. See the comment in `ci/rust/run.sh`.
+
+  One thing to settle at promotion: `dtolnay/rust-toolchain` is
+  version-tagged rather than SHA-pinned, matching the form
+  `tabnas/parser` uses for its own staged `ci/workflows/rust.yml`. Every
+  other action here is SHA-pinned.
+
 - **`workflows/docs.yml`** — the prose gate: Vale over the reader-facing
   pages at the levels set in `.vale.ini`, on the file list
   `ts/scripts/gated-docs.cjs` produces. See `docs/STYLE-GUIDE.md`.

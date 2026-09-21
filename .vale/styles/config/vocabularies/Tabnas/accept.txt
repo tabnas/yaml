@@ -13,12 +13,17 @@
 [Dd]eserializer
 [Jj]sonic
 [Ll]exed
+[Ll]ockfile
 [Ll]ookahead
 [Mm]atchers
+[Mm]ultibyte
+[Mm]ultiline
 [Nn]pm
 [Pp]arser
 [Pp]repending
 [Rr]epo
+[Rr]untimes
 [Tt]abnas
 [Uu]ntrusted
+[Vv]endored
 [Yy]AML
