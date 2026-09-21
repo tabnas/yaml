@@ -58,29 +58,29 @@ fn an_astral_character_is_one_column() {
     assert_eq!(ascii.col, 9);
 }
 
-/// **A tag whose value is a `%TAG` directive line resolves differently.**
+/// **A tag whose value is a `%TAG` directive line: REPAIRED, kept as a
+/// parity assertion.**
 ///
-/// The engines dispatch their matcher chain on the FIRST character of a
-/// lexer call, and the two chains are not the same, so what runs after
-/// this plugin's matcher has moved the cursor differs. Most of that is
-/// compensated for (see `crate::lex::claimable_after_move` and the
-/// number stand-in in `crate::text::check`); this shape is not.
+/// This was the one VALUE difference the matcher-chain entry recorded,
+/// and it was not the matcher chain at all. The typed tag's unquoted
+/// value ends at a colon only before a literal SPACE, a line end or the
+/// end of the source, and this port ended it before a TAB as well, so
+/// the colon reached the grammar as a key separator and the first
+/// document became a mapping. `../DIVERGENCE.md` no longer carries the
+/// row, and `test/spec/directives.tsv` carries the input instead.
 ///
-/// Measured:
-///
-///  input                                    TypeScript
-///  `!!int%TAG !! x:\t\n... ... %YAML 1.20o17 `
-///    TypeScript  `["!! x:", "... %YAML 1.20o17"]`
-///    Rust        `[{"!! x": null}, "... %YAML 1.20o17"]`
+/// Measured 2026-09-21, all three runtimes:
+/// `!!int%TAG !! x:\t\n... ... %YAML 1.20o17` is
+/// `["!! x:", "... %YAML 1.20o17"]` in TypeScript, in Go and here.
 #[test]
-fn a_tag_before_a_directive_line_resolves_differently() {
+fn a_tag_before_a_directive_line_resolves_the_canonical_way() {
     let value = tabnas_yaml::make()
         .parse("!!int%TAG !! x:\t\n... ... %YAML 1.20o17 ")
-        .expect("the document parses in both runtimes");
+        .expect("the document parses in every runtime");
     assert_eq!(
         plain(&value),
-        j!([{"!! x": null}, "... %YAML 1.20o17"]),
-        "TypeScript reads the first document as the string \"!! x:\""
+        j!(["!! x:", "... %YAML 1.20o17"]),
+        "the first document is the string \"!! x:\", not a mapping"
     );
 }
 
@@ -107,6 +107,55 @@ fn a_shared_refusal_can_be_reported_at_a_different_place() {
         assert_eq!(error.code, "unexpected", "{src:?}");
         assert_eq!((error.row, error.col), (row, col), "{src:?}");
     }
+}
+
+/// **A blank line of tabs at the end of the source can cost a token.**
+///
+/// The same end-of-source guard, reached a different way. A line holding
+/// nothing but blanks, one of them a TAB, is skipped by both matchers:
+/// YAML counts it blank and the engine refuses a bare tab. The canonical
+/// then moves its point and returns no token, and the engine's own
+/// matchers take over at the end of the source. This port returns
+/// `Act::refuse`, and the explicit key never gets the null it owes.
+///
+/// Making the guard refuse only when nothing was consumed was measured
+/// and is NOT the repair: it lets `a: !é` reach the engine with an
+/// `internal` error, which `untrusted_test.rs` catches.
+///
+/// Measured 2026-09-21:
+///
+///  input               TypeScript     Go             Rust
+///  `? k\n: <TAB>\n`    `{"k":null}`   `{"k":null}`   `ERROR:unexpected`
+///  `? k\n: <TAB>`      `{"k":null}`   `{"k":null}`   `ERROR:unexpected`
+///  `? k\n:   <TAB>\n`  `{"k":null}`   `{"k":null}`   `ERROR:unexpected`
+///  `? k\n:  \n`        `{"k":null}`   `{"k":null}`   `{"k":null}`
+///  `? k\n: <TAB>v\n`   `{"k":"v"}`    `{"k":"v"}`    `{"k":"v"}`
+#[test]
+fn a_trailing_blank_line_of_tabs_costs_an_explicit_keys_value() {
+    let parser = tabnas_yaml::make();
+    for src in ["? k\n: \t\n", "? k\n: \t", "? k\n:   \t\n"] {
+        let error = parser
+            .parse(src)
+            .expect_err("TypeScript and Go both accept this one");
+        assert_eq!(error.code, "unexpected", "{src:?}");
+    }
+
+    // The controls: the same shapes without the tab, and the same tab
+    // with a value after it, agree in all three runtimes. Without them
+    // the rows above would also pass on a port that refused every
+    // explicit key.
+    assert_eq!(
+        plain(&parser.parse("? k\n:  \n").expect("parses")),
+        j!({"k": null})
+    );
+    assert_eq!(
+        plain(&parser.parse("? k\n: \tv\n").expect("parses")),
+        j!({"k": "v"})
+    );
+    assert_eq!(
+        plain(&parser.parse("? k\n: \t\nz: 1\n").expect("parses")),
+        j!({"k": {"z": 1}})
+    );
 }
 
 /// **A flow collection or a quoted scalar at column 0 after a line

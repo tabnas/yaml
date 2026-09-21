@@ -312,3 +312,63 @@ fn an_escape_past_the_last_code_point_is_refused() {
         assert_eq!(plain(&value), j!({ "a": want }), "{src:?}");
     }
 }
+
+// ===== DIGITS THAT ARE NOT NUMBERS =====
+
+/// Trailing text after digits is one plain scalar inside a flow
+/// collection too, because the canonical takes that branch without
+/// asking about flow depth.
+///
+/// This is the one row group here where RUST AGREES WITH THE CANONICAL
+/// and Go does not, so the comment records Go rather than warning about
+/// it. `go/yaml.go` reaches its trailing-text branch only when the flow
+/// depth is zero, and that guard is older than
+/// [#54](https://github.com/tabnas/yaml/pull/54), which moved the branch
+/// ahead of the comma branch in both runtimes and kept each side's
+/// condition.
+///
+/// Measured 2026-09-21. `a: [12 x]`: TypeScript `{"a":["12 x"]}`, Go
+/// `{"a":[12,"x"]}`, Rust `{"a":["12 x"]}`. `a: {b: 12 x}`: TypeScript
+/// `{"a":{"b":"12 x"}}`, Go `{"a":{"b":12,"x":null}}`, Rust as
+/// TypeScript. Recorded in `../DIVERGENCE.md` under "Trailing text after
+/// digits inside a flow collection".
+#[test]
+fn digits_then_text_inside_a_flow_collection_stay_one_scalar() {
+    expect("a: [12 x]", j!({"a": ["12 x"]}));
+    expect("a: {b: 12 x}", j!({"a": {"b": "12 x"}}));
+
+    // Controls. A comma inside a flow collection still separates, and the
+    // same trailing text in BLOCK context agrees in all three runtimes,
+    // which is why those are shared fixture rows instead.
+    expect("a: [12, 3]", j!({"a": [12, 3]}));
+    expect("a: 12 x", j!({"a": "12 x"}));
+}
+
+/// A comma is not a separator in block context, so a value that starts
+/// with a digit and carries one is a plain scalar rather than a number
+/// followed by structure.
+///
+/// Every row here agrees in all three runtimes and is therefore ALSO a
+/// shared fixture row, in `test/spec/real-world-regressions.tsv` and
+/// `test/spec/flow-collections.tsv`. It is repeated here because the
+/// ORDER of the two branches is what makes `12, hexadecimal.` work: the
+/// token scan below stops at the first space and would truncate it to
+/// `12,`, so the trailing-text branch has to be tried first. A fixture
+/// row records the answer; this test records why.
+#[test]
+fn a_comma_in_block_context_is_part_of_the_scalar() {
+    expect("a: 1,2,3", j!({"a": "1,2,3"}));
+    expect("a: 1, 2", j!({"a": "1, 2"}));
+    expect("a: 12,", j!({"a": "12,"}));
+    expect("a: 12, hexadecimal.", j!({"a": "12, hexadecimal."}));
+    expect(
+        "a: 64 characters, hexadecimal.",
+        j!({"a": "64 characters, hexadecimal."}),
+    );
+
+    // Controls: a plain number is still a number, and in FLOW context the
+    // comma is still a separator.
+    expect("a: 12", j!({"a": 12}));
+    expect("a: [1,2,3]", j!({"a": [1, 2, 3]}));
+    expect("a: {x: 1, y: 2}", j!({"a": {"x": 1, "y": 2}}));
+}

@@ -226,18 +226,66 @@ pub(crate) fn js_substring_less_one_unit(text: &str, from: usize, to: usize) -> 
     out
 }
 
+/// The fixed-width window an escape's digits live in, and where the
+/// scan resumes after it.
+pub(crate) struct Window<'a> {
+    /// `text.substring(from, from + count)`, ending at the character
+    /// boundary at or before the window's last code unit.
+    pub(crate) digits: &'a str,
+    /// The byte offset `count` code units past `from`, clamped to the
+    /// end and floored to a character boundary.
+    pub(crate) end: usize,
+    /// The LOW surrogate of a character the window cut in half, which no
+    /// byte offset can point at. See [`take_units`].
+    pub(crate) split_low: Option<u32>,
+}
+
 /// `text.substring(from, from + count)` where `count` is a number of
-/// CHARACTERS rather than bytes: the fixed-width window an escape's
-/// digits live in. Fewer than `count` characters are left at `from` is
-/// not an error, exactly as a `substring` past the end is not.
-pub(crate) fn take_chars(text: &str, from: usize, count: usize) -> &str {
+/// UTF-16 CODE UNITS, which is what the canonical window is counted in.
+///
+/// Counting CHARACTERS instead reads the same window only while every
+/// character in it is one code unit. An astral character is TWO units
+/// and one Rust scalar, so a window holding one takes too much text and
+/// leaves the cursor too far along; a window whose LAST unit falls
+/// inside one cuts the character in half.
+///
+/// A cut is not an error in the canonical either: it keeps the HIGH
+/// surrogate, which is no hexadecimal digit and so ends `parseInt`'s
+/// prefix exactly where stopping short of the character does, and leaves
+/// the LOW surrogate for the next round of the scan, where it is
+/// appended as a character of its own. `split_low` hands that unit back,
+/// because a byte offset cannot point between two surrogates.
+///
+/// Fewer than `count` units left at `from` is not an error, exactly as a
+/// `substring` past the end is not.
+pub(crate) fn take_units(text: &str, from: usize, count: usize) -> Window<'_> {
     let from = floor_boundary(text, from);
     let tail = &text[from..];
-    let width = tail
-        .char_indices()
-        .nth(count)
-        .map_or(tail.len(), |(offset, _)| offset);
-    &tail[..width]
+    let mut units = 0usize;
+    let mut offset = 0usize;
+    for (index, character) in tail.char_indices() {
+        let width = character.len_utf16();
+        if units + width > count {
+            let mut pair = [0u16; 2];
+            let encoded = character.encode_utf16(&mut pair);
+            let split_low = (width == 2 && units < count).then(|| u32::from(encoded[1]));
+            return Window {
+                digits: &tail[..index],
+                end: from + index,
+                split_low,
+            };
+        }
+        units += width;
+        offset = index + character.len_utf8();
+        if units == count {
+            break;
+        }
+    }
+    Window {
+        digits: &tail[..offset],
+        end: from + offset,
+        split_low: None,
+    }
 }
 
 /// Advance a `(si, ri, ci)` triple over `count` bytes of `src` starting
@@ -712,18 +760,33 @@ fn at_line_start(src: &str, offset: usize) -> bool {
     offset == 0 || line_end(at(src, offset - 1))
 }
 
-/// `---` or `...` followed by whitespace or end of source.
-pub(crate) fn is_doc_marker(src: &str, index: usize) -> bool {
+/// Three of `-` or three of `.` at `index`, with nothing said about what
+/// follows.
+fn doc_marker_run(src: &str, index: usize) -> bool {
     // Compared byte by byte: a slice would panic on a source whose next
     // character is multi-byte, and `---` and `...` are ASCII anyway.
     let head = at(src, index);
     if head != i32::from(b'-') && head != i32::from(b'.') {
         return false;
     }
-    if at(src, index + 1) != head || at(src, index + 2) != head {
-        return false;
-    }
-    blank_line_end_or_eof(at(src, index + 3))
+    at(src, index + 1) == head && at(src, index + 2) == head
+}
+
+/// `---` or `...` followed by a blank, a line end or end of source.
+pub(crate) fn is_doc_marker(src: &str, index: usize) -> bool {
+    doc_marker_run(src, index) && blank_line_end_or_eof(at(src, index + 3))
+}
+
+/// `---` or `...` followed by a SPACE, a line end or end of source, with
+/// a tab excluded.
+///
+/// The canonical spells this test out at four sites and the four are not
+/// the same: three take a tab after the marker and the one that stops a
+/// BLOCK SCALAR does not, so a `---<TAB>` line stays part of the scalar
+/// there and ends the document everywhere else.
+pub(crate) fn is_doc_marker_no_tab(src: &str, index: usize) -> bool {
+    let after = at(src, index + 3);
+    doc_marker_run(src, index) && (after == i32::from(b' ') || line_end(after) || after < 0)
 }
 
 /// Whether the source at `index` starts with the ASCII `word`, compared
@@ -1318,13 +1381,16 @@ fn double_quoted(src: &str, fwd: &str, cursor: (usize, usize, usize)) -> Act {
                 // window, not a run of hexadecimal digits. It routinely
                 // holds the closing quote or the rest of the line, and
                 // the canonical handler reads a number out of it with
-                // `parseInt`, which takes the longest prefix it can. The
-                // window is counted in characters here and UTF-16 units
-                // there; taking whole characters is what keeps the
-                // cursor on a boundary, and a byte count would not.
+                // `parseInt`, which takes the longest prefix it can.
+                //
+                // The width counts UTF-16 CODE UNITS, so an astral
+                // character inside the window fills two of them. The
+                // cursor after it is `i + 1 + width` UNITS along, and
+                // nothing else: it is not the length of the text the
+                // window happened to cover.
                 let from = index + 1;
-                let digits = take_chars(fwd, from, width);
-                let number = crate::parse_int_16(digits);
+                let window = take_units(fwd, from, width);
+                let number = crate::parse_int_16(window.digits);
                 if escape == i32::from(b'U') {
                     // `String.fromCodePoint` THROWS a RangeError on
                     // anything that is not a code point, and nothing in
@@ -1342,8 +1408,18 @@ fn double_quoted(src: &str, fwd: &str, cursor: (usize, usize, usize)) -> Act {
                     // unreadable window is a NUL.
                     push_code_point(crate::to_uint16(number), &mut pending, &mut value);
                 }
-                index = from + digits.len();
+                index = window.end;
                 escaped_upto = value.len();
+                if let Some(low) = window.split_low {
+                    // The canonical cursor lands one unit into the
+                    // character the window cut, on its LOW surrogate,
+                    // and the scan appends that unit as a character of
+                    // its own. Put through the same pairing an escape
+                    // goes through, it completes a high surrogate the
+                    // escape left pending, exactly as it does there.
+                    push_code_point(low, &mut pending, &mut value);
+                    index += fwd[index..].chars().next().map_or(0, char::len_utf8);
+                }
                 continue;
             }
             if line_end(escape) {
@@ -1358,7 +1434,15 @@ fn double_quoted(src: &str, fwd: &str, cursor: (usize, usize, usize)) -> Act {
                 continue;
             }
             if escape < 0 {
-                break;
+                // A backslash as the last character of the source. The
+                // canonical falls into `val += fwd[i]` with `fwd[i]`
+                // undefined, and `+=` stringifies it, so the value ends
+                // with the nine letters of `undefined`. Then `i++` steps
+                // past the end and the scan stops.
+                flush_surrogate(&mut pending, &mut value);
+                value.push_str("undefined");
+                index += 1;
+                continue;
             }
             let character = fwd[index..].chars().next().unwrap_or('\\');
             flush_surrogate(&mut pending, &mut value);
@@ -1527,7 +1611,7 @@ fn quoted_before(src: &str, offset: usize) -> bool {
 // ---------------------------------------------------------------------
 
 /// A value that starts with a digit but carries an embedded colon
-/// (`20:03:20`), a trailing comma (`12,`) or trailing words
+/// (`20:03:20`), a comma in block context (`1,2,3`) or trailing words
 /// (`64 characters, hexadecimal.`) is a plain scalar, and the engine's
 /// number matcher would otherwise take only the digits.
 fn numeric_plain(
@@ -1539,22 +1623,29 @@ fn numeric_plain(
     let in_flow = state::flow_depth_at(context, src, cursor.0) > 0;
     let mut embedded_colon = false;
     let mut trailing_text = false;
-    let mut trailing_comma = false;
+    let mut block_comma = false;
     let mut index = 1;
     while index < fwd.len() && !line_end(at(fwd, index)) {
         if is(fwd, index, b':') && !blank_line_end_or_eof(at(fwd, index + 1)) {
             embedded_colon = true;
             break;
         }
+        // A comma is NOT a separator in block context. Flow indicators
+        // only indicate inside a flow collection, so `example: 1,2,3` is
+        // the plain scalar `1,2,3` rather than a number, a separator and
+        // two more numbers.
+        //
+        // The scan CONTINUES rather than breaking, so a scalar that also
+        // has a space with text after it (`12, hexadecimal`) still reaches
+        // the trailing-text branch, which handles the spaces and the
+        // multiline continuation this scan cannot.
         if is(fwd, index, b',') {
-            let mut after = index + 1;
-            while blank(at(fwd, after)) {
-                after += 1;
+            if in_flow {
+                break;
             }
-            if !in_flow && (after >= fwd.len() || line_end(at(fwd, after))) {
-                trailing_comma = true;
-            }
-            break;
+            block_comma = true;
+            index += 1;
+            continue;
         }
         if blank(at(fwd, index)) {
             let mut after = index;
@@ -1574,7 +1665,19 @@ fn numeric_plain(
         index += 1;
     }
 
-    if embedded_colon || trailing_comma {
+    // TRAILING TEXT FIRST. A scalar can be both (`12, hexadecimal`), and
+    // the token scan below stops at the first space, which would truncate
+    // it to `12,`. The plain-scalar handler takes the whole scalar,
+    // continuation lines included.
+    if trailing_text {
+        // The canonical matcher sets a flag here and lets the text check
+        // pick the value up once the number matcher has been skipped.
+        // Running the plain-scalar handler directly reaches the same
+        // token, and cannot leave a flag set for the next parse.
+        return Some(text::plain_scalar(src, fwd, cursor, context));
+    }
+
+    if embedded_colon || block_comma {
         let mut end = 0;
         while end < fwd.len() && !blank_line_end_or_eof(at(fwd, end)) {
             end += 1;
@@ -1585,14 +1688,6 @@ fn numeric_plain(
             next,
             Some(Tok::new("#TX", Value::String(text.clone()), text, cursor)),
         ));
-    }
-
-    if trailing_text {
-        // The canonical matcher sets a flag here and lets the text check
-        // pick the value up once the number matcher has been skipped.
-        // Running the plain-scalar handler directly reaches the same
-        // token, and cannot leave a flag set for the next parse.
-        return Some(text::plain_scalar(src, fwd, cursor, context));
     }
     None
 }
