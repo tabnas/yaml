@@ -17,8 +17,8 @@
 use tabnas::{Context, Lexer, Rule, Token, Value};
 
 use crate::lex::{
-    advance_cols, apply, at, blank, blank_line_end_or_eof, is, is_doc_marker, js_substring,
-    js_substring_less_one_unit, line_end, trim_end, Act, Tok,
+    advance_cols, apply, at, blank, blank_line_end_or_eof, is, is_doc_marker, is_doc_marker_no_tab,
+    js_substring, js_substring_less_one_unit, line_end, trim_end, Act, Tok,
 };
 use crate::state;
 
@@ -359,7 +359,9 @@ fn block_scalar(src: &str, fwd: &str, cursor: (usize, usize, usize)) -> Option<A
         if line_indent < block_indent {
             break;
         }
-        if line_indent == 0 && is_doc_marker(fwd, pos) {
+        // `fwd[pos+3] === '\n' || '\r' || ' ' || undefined`, spelled
+        // out and WITHOUT a tab, unlike the marker test everywhere else.
+        if line_indent == 0 && is_doc_marker_no_tab(fwd, pos) {
             break;
         }
         let line_start = pos + block_indent;
@@ -734,8 +736,13 @@ pub(crate) fn type_tag(
     // An anchor between the tag and the value.
     let mut anchor_name = String::new();
     if is(fwd, value_start, b'&') {
+        // `fwd[anchorEnd] !== ' ' && !== '\n' && !== '\r'`: a SPACE or
+        // a line end ends the name here, and a TAB does not. It is not
+        // the anchor scan the lexer's own `&name` handler runs, which
+        // stops at a tab and at a flow indicator too.
         let mut anchor_end = value_start + 1;
-        while anchor_end < fwd.len() && !blank_line_end_or_eof(at(fwd, anchor_end)) {
+        while anchor_end < fwd.len() && !is(fwd, anchor_end, b' ') && !line_end(at(fwd, anchor_end))
+        {
             anchor_end += 1;
         }
         anchor_name = fwd[value_start + 1..anchor_end].to_string();
@@ -810,8 +817,11 @@ pub(crate) fn type_tag(
         {
             break;
         }
+        // `fwd[valEnd+1] === ' ' || '\n' || '\r' || undefined`: a
+        // literal SPACE, spelled out, with no tab among them. A tab
+        // after the colon leaves the colon inside the value.
         if byte == i32::from(b':')
-            && (blank(at(fwd, value_end + 1))
+            && (is(fwd, value_end + 1, b' ')
                 || line_end(at(fwd, value_end + 1))
                 || at(fwd, value_end + 1) < 0)
         {

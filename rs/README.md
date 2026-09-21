@@ -132,11 +132,12 @@ grammar, which does not reject every construct YAML 1.2 forbids.
 
 ## Install
 
-Neither the engine nor the jsonic core is published to a registry, so
-both are consumed as **sibling checkouts**, the standard tabnas
-development model. Clone `https://github.com/tabnas/parser` and
-`https://github.com/tabnas/jsonic` next to this repository and point at
-them:
+None of the tabnas crates is published to a registry, so they are
+consumed as **sibling checkouts**, the standard tabnas development
+model. Three of them have to be cloned next to this repository:
+`https://github.com/tabnas/parser`, `https://github.com/tabnas/jsonic`
+and `https://github.com/tabnas/json`. Two of them are pointed at
+directly:
 
 ```toml
 [dependencies]
@@ -148,9 +149,17 @@ tabnas-jsonic = { path = "../jsonic/rs" }
 All three entries are needed. A crate's dependencies are not passed on
 to its dependents, so `tabnas-yaml` alone puts neither `tabnas` nor
 `tabnas-jsonic` in the extern prelude, and the examples above name both.
-Only `YamlError` is re-exported. The test suite additionally needs
-`https://github.com/tabnas/support` beside the repository, for the
-shared fixture runner.
+Only `YamlError` is re-exported.
+
+The `json` checkout takes no entry of its own and still has to be on
+disk: `tabnas-jsonic` depends on it by the path `../../json/rs`, so
+without it the build stops during resolution, before anything is
+compiled. Those four crates, this one included, are the whole closure:
+`tabnas-json` depends only on `tabnas`, and a path dependency's own
+dev-dependencies are never resolved, so nothing further is pulled in.
+Building this crate's test suite is the exception: it needs
+`https://github.com/tabnas/support` beside the repository as well, for
+the shared fixture runner.
 
 ## Differences from the canonical TypeScript
 
@@ -178,15 +187,20 @@ them written up with a measured table in
   value with the call stack to display, convert or drop it, so an
   unbounded document ends the caller's process rather than returning an
   error. TypeScript and Go have no limit.
-- **Two pathological documents differ**, one in its value and two in
-  where a refusal all three runtimes make is reported. Both come from the
-  order the engine's lexer offers a moved cursor to its remaining
-  matchers. The register names the inputs.
+- **Two pathological documents are refused in a different place**, with
+  the same code as TypeScript and Go give them. It comes from the order
+  the engine's lexer offers a moved cursor to its remaining matchers. No
+  document's **value** differs for that reason any more. The register
+  names the inputs.
 - **A `\u` escape naming an unpaired UTF-16 surrogate becomes the
   replacement character.** A Rust string holds Unicode scalars and a lone
   surrogate is not one, where a TypeScript string is UTF-16 and keeps it.
   Two of them side by side are one astral character in both runtimes,
-  which is what `tests/js_semantics_test.rs` measures.
+  which is what `tests/js_semantics_test.rs` measures. A fixed-width
+  escape window is counted in those same units, so it can end INSIDE an
+  astral character in the source and leave one half behind, which folds
+  the same way: `tests/escape_window_test.rs` measures the window, the
+  cursor after it and the fold.
 - **An unterminated typed tag folds a split astral character.** The
   canonical handler ends an unterminated `!!str "` at the source end and
   keeps everything up to the last UTF-16 unit. An astral character is two

@@ -107,15 +107,9 @@ matcher, which the canonical chain reaches after a move and this one does
 not.
 
 What is left, over a differential run of about 12,700 generated documents
-against the canonical TypeScript, is ONE document whose value differs and
-THIRTEEN that all three runtimes refuse with the same code at a different
-place. Two of the thirteen are tabled below as the representatives.
-
-**The value difference:**
-
-| input | TypeScript | Go | Rust |
-|---|---|---|---|
-| `!!int%TAG !! x:\t\n... ... %YAML 1.20o17 ` | `["!! x:", "... %YAML 1.20o17"]` | the same | `[{"!! x": null}, "... %YAML 1.20o17"]` |
+against the canonical TypeScript, is THIRTEEN documents that all three
+runtimes refuse with the same code at a different place. Two of the
+thirteen are tabled below as the representatives.
 
 **Two of the thirteen position differences, where all three runtimes
 refuse the document with the same code and only the reported place
@@ -126,17 +120,55 @@ differs:**
 | `[a, b\n{a: 1\n? k\n- x\n` | `unexpected` at 5:1 | 5:1 | 3:1 |
 | `---\n{a: 1\na: 1\n  t2\n` | `unexpected` at 5:1 | 5:1 | 4:3 |
 
-`rs/tests/divergence_test.rs` pins all three tabled rows. No shared
-fixture pins a diagnostic's position, and none of these documents is
-valid YAML. The same differential run over 8,408 generated documents of
-realistic YAML shape, over the 253 fixture rows, over the 402 conformance
-inputs and over every string literal in the Go test files found no
-difference at all beyond the astral column above.
+**And ONE document the other two runtimes accept and this one refuses,
+found by a later sweep over tab placement:**
+
+| input | TypeScript | Go | Rust |
+|---|---|---|---|
+| `? k\n: <TAB>\n` | `{"k": null}` | the same | `ERROR:unexpected` |
+| `? k\n: <TAB>` | `{"k": null}` | the same | `ERROR:unexpected` |
+| `? k\n:   <TAB>\n` | `{"k": null}` | the same | `ERROR:unexpected` |
+| `? k\n:  \n` | `{"k": null}` | the same | the same |
+| `? k\n: <TAB>v\n` | `{"k": "v"}` | the same | the same |
+
+The last two rows are the controls: spaces alone in the same place agree,
+and so does a tab with a value after it. A line of nothing but blanks
+that contains a TAB is skipped by both matchers, because YAML counts it
+blank and the engine refuses a bare tab; the canonical then moves its
+point and returns no token, and the engine's own matchers take over at
+the end of the source. This port returns `Act::refuse` instead, at the
+end-of-source guard in `decide`, and the parse stops one token short of
+the value the explicit key owes. Making that guard refuse only when
+nothing was consumed is NOT the repair: it was measured, and it makes
+`a: !é` reach the engine with an `internal` error, which
+`rs/tests/untrusted_test.rs` catches.
+
+`rs/tests/divergence_test.rs` pins all five tabled rows. No shared
+fixture pins a diagnostic's position, and none of the first two
+documents is valid YAML. The same differential run over 8,408 generated
+documents of realistic YAML shape, over the 253 fixture rows, over the
+402 conformance inputs and over every string literal in the Go test
+files found no difference at all beyond the astral column above; the
+`? k` row came from a later sweep of 862 documents that put a tab at
+every position of 35 constructs, and it is the only difference that
+sweep found.
+
+This entry once carried a value difference as well,
+`!!int%TAG !! x:\t\n... ... %YAML 1.20o17`, and it was never the matcher
+chain: the typed tag's value scan ended at the colon because a TAB
+followed it, where the canonical ends there only before a literal space,
+a line end or the end of the source. All three runtimes now read the
+first document as the string `!! x:`, the input is a row of
+`test/spec/directives.tsv`, and
+`rs/tests/divergence_test.rs::a_tag_before_a_directive_line_resolves_the_canonical_way`
+keeps the reason beside it. A row tabled here as impossible was a
+one-character predicate; the neighbouring position rows are worth
+re-measuring in the same spirit.
 
 Owner: this port. The repair is to reproduce the canonical chain's number
 matcher exactly rather than standing in for it, which means porting
 `Lexer::match_number` and its options; that is a larger change than the
-two shapes justify today.
+three shapes justify today.
 
 ## UTF-16 escapes in a double quoted scalar (Go and Rust)
 
@@ -204,6 +236,75 @@ Measured the same way as the table above. The Rust rows are pinned by
 and
 `rs/tests/js_semantics_test.rs::an_escape_past_the_last_code_point_is_refused`.
 Owner: the Go port.
+
+The window itself is counted in UTF-16 CODE UNITS, and an astral
+character fills two of them, so a window can end INSIDE one. The
+canonical keeps the high surrogate in the window, where it is no
+hexadecimal digit and ends `parseInt`'s prefix, and the cursor then
+lands on the low surrogate, which the scan appends as a character of its
+own. That is one more unpaired surrogate this port cannot hold, and it
+folds the same way. Only the fold differs: the window and the cursor are
+the canonical ones.
+
+| input | TypeScript | Go | Rust |
+|---|---|---|---|
+| `a: "\xA` + U+1F600 + `Z"` | U+000A U+DE00 `Z` | `"xA"` + U+1F600 + `Z` | U+000A U+FFFD `Z` |
+| `a: "\u004` + U+1F600 + `Z"` | U+0004 U+DE00 `Z` | `"u004"` + U+1F600 + `Z` | U+0004 U+FFFD `Z` |
+| `a: "\U0000004` + U+1F600 + `Z"` | U+0004 U+DE00 `Z` | `"U0000004"` + U+1F600 + `Z` | U+0004 U+FFFD `Z` |
+| `a: "\U000D83D` + U+1F600 + `Z"` | U+1F600 `Z` | `"U000D83D"` + U+1F600 + `Z` | U+1F600 `Z` |
+| `a: "\xA` + U+4E2D + `Z"` | U+000A `Z` | `"xA"` + U+4E2D + `Z` | U+000A `Z` |
+
+The last two rows are the controls, and the first of them is the one
+that is not a trade at all: where the escape itself names a high
+surrogate, the half the cut leaves completes the pair and both runtimes
+reach the whole astral character. The second shows that only an ASTRAL
+character can be cut, since a character inside the Basic Multilingual
+Plane is one unit and one scalar. Measured the same way as the tables
+above, and pinned by
+`rs/tests/escape_window_test.rs::a_window_cut_through_an_astral_character_folds_the_half_it_leaves`,
+whose control rows fail if the window or the cursor drifts and whose
+first three rows fail if the fold changes. Owner: the string model, as
+upstream, for the Rust column; the Go port for the Go column.
+
+## A tab after a document marker inside a block scalar (Go)
+
+The canonical writes its `---` and `...` test out four times, and three
+of the four take a tab after the marker. The fourth, the one that stops
+a BLOCK SCALAR (`ts/src/yaml.ts` line 576), takes only a space, a line
+end or the end of the source, so a `---<TAB>` line stays inside the
+scalar there and ends the document everywhere else. The Go port routes
+all four through one `isDocMarker` helper, and that helper takes a tab.
+
+Each cell of the input column is one line, with a newline after each.
+
+| input | TypeScript | Go | Rust |
+|---|---|---|---|
+| `\|`, `x`, `---<TAB>y` | `"x\n---\ty\n"` | `["x\n", "y"]` | `"x\n---\ty\n"` |
+| `\|`, `---<TAB>y` | `"---\ty\n"` | `["", "y"]` | `"---\ty\n"` |
+| `\|`, `...<TAB>y` | `"...\ty\n"` | `["", "y"]` | `"...\ty\n"` |
+| `\|`, `--- y` | `["", "y"]` | the same | the same |
+| `a: 1`, `---<TAB>b: 2` | `[{"a":1},{"b":2}]` | the same | the same |
+
+The last two rows are the controls: a SPACE after the marker ends the
+scalar in all three, and the marker test OUTSIDE a block scalar takes a
+tab in all three, so the repair moves one site and not four.
+
+Provenance: measured 2026-09-21, the TypeScript column by running
+`ts/src/yaml.ts` under Node 22, the Go column by `tabnasyaml.Parse` in
+`go/`, the Rust column by `tabnas_yaml::parse`. Not a shared fixture
+row, because Go is red on the first three; the controls ARE expressible
+and agree, and they sit beside the divergent rows in
+`rs/tests/blank_predicates_test.rs::a_tab_after_a_document_marker_stays_inside_a_block_scalar`,
+which fails on repair as loudly as on regression.
+
+Owner: the Go port. The repair is a second helper beside `isDocMarker`
+that leaves the tab out, used at the one call site in the block-scalar
+handler (`go/yaml.go` line 1725). Delete this entry and move its rows
+into `test/spec/block-scalars.tsv` when that lands. A neighbouring Go
+site, the end-of-scalar lookahead at `go/yaml.go` line 1775, is a
+DIFFERENT defect of the same family: the canonical tests only the three
+marker characters there and says nothing about what follows, which is
+what `rs/src/text.rs` already does.
 
 ## An unterminated typed tag folds a split astral character (Rust)
 
@@ -296,3 +397,44 @@ Owner: the Go port. These are defects there, not trades, and the entry
 exists so a shared fixture row is not added over them before the repair
 lands. Delete this entry, and move its rows into `test/spec/*.tsv`, when
 Go answers them the canonical way.
+
+## Trailing text after digits inside a flow collection (Go)
+
+A value that starts with a digit and is followed by a space and more
+text is one plain scalar in the canonical, whether or not it sits inside
+a flow collection. The Go port applies that rule only in block context:
+inside a flow collection it falls through to the number matcher, which
+takes the digits and leaves the rest to the grammar.
+
+| input | TypeScript | Go | Rust |
+|---|---|---|---|
+| `a: [12 x]` | `{"a":["12 x"]}` | `{"a":[12,"x"]}` | `{"a":["12 x"]}` |
+| `a: {b: 12 x}` | `{"a":{"b":"12 x"}}` | `{"a":{"b":12,"x":null}}` | `{"a":{"b":"12 x"}}` |
+| `a: [12, 3]` | `{"a":[12,3]}` | the same | the same |
+| `a: 12 x` | `{"a":"12 x"}` | the same | the same |
+
+The last two rows are the controls: a comma inside a flow collection is
+still a separator everywhere, and the same trailing text in BLOCK
+context agrees in all three.
+
+The cause is one guard. The canonical takes the trailing-text branch
+unconditionally, and `go/yaml.go` reaches it only when the flow depth is
+zero. That guard predates
+[#54](https://github.com/tabnas/yaml/pull/54), which moved the branch
+ahead of the comma branch in both runtimes and preserved each side's
+existing condition, so this difference is older than that change rather
+than introduced by it.
+
+Provenance: measured 2026-09-21, the TypeScript column by running
+`ts/src/yaml.ts` under Node 22 against `@tabnas/parser` 0.10.0 and
+`@tabnas/jsonic` 0.6.7, the Go column by `tabnasyaml.Parse` in `go/`,
+and the Rust column by `tabnas_yaml::parse`. Not a shared fixture row,
+because Go is red on the first two; the block-context controls ARE
+shared rows, in `test/spec/real-world-regressions.tsv` and
+`test/spec/flow-collections.tsv`. Pinned on the Rust side by
+`digits_then_text_inside_a_flow_collection_stay_one_scalar` in
+`rs/tests/js_semantics_test.rs`.
+
+Owner: the Go port. Dropping the `flowState.depth == 0` guard in
+`handleNumericColon` is the whole repair. Delete this entry and move its
+first two rows into `test/spec/flow-collections.tsv` when that lands.

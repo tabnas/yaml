@@ -6,3 +6,7 @@ a: !!bool "true"	{"a":true}
 a: !!null ""	{"a":null}
 a: !!seq\n  - 1\n  - 2	{"a":[1,2]}
 a: !!map\n  x: 1	{"a":{"x":1}}
+a: !!str &n\tfoo	{"a":""}
+a: !!str &n foo	{"a":"foo"}
+a: !!str x:\ty	{"a":"x:\ty"}
+a: !!str x: y	{"a":{"x":"y"}}
