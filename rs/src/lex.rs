@@ -1434,13 +1434,12 @@ fn double_quoted(src: &str, fwd: &str, cursor: (usize, usize, usize)) -> Act {
                 continue;
             }
             if escape < 0 {
-                // A backslash as the last character of the source. The
-                // canonical falls into `val += fwd[i]` with `fwd[i]`
-                // undefined, and `+=` stringifies it, so the value ends
-                // with the nine letters of `undefined`. Then `i++` steps
-                // past the end and the scan stops.
+                // A backslash as the last character of the source: there
+                // is nothing to escape, so the scan ends with the value it
+                // has. The canonical port once appended the nine letters
+                // of `undefined` here, text the input never held, and was
+                // repaired under ADR-13 rather than copied.
                 flush_surrogate(&mut pending, &mut value);
-                value.push_str("undefined");
                 index += 1;
                 continue;
             }
