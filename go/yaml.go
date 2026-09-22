@@ -2880,7 +2880,14 @@ func handleNumericColon(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, TX jsoni
 	// TRAILING TEXT FIRST. A scalar can be both ("12, hexadecimal"), and the
 	// token scan below stops at the first space, which would truncate it to
 	// "12,". TextCheck takes the whole scalar, continuation lines included.
-	if hasTrailingText && !inFlow {
+	//
+	// In FLOW context too. The canonical takes this branch without asking
+	// about flow depth, so `[12 x]` is the one scalar "12 x" there, and a
+	// `flowState.depth == 0` guard here left the digits to the number
+	// matcher and the text to the grammar: `[12, "x"]`. The comma branch
+	// below keeps its flow test, because a comma inside a flow collection
+	// IS a separator.
+	if hasTrailingText {
 		*skipNumberMatch = true
 		return nil
 	}

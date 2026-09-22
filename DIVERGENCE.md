@@ -9,9 +9,7 @@ this repository still has no divergence register: one is invisible to the
 value those fixtures compare, two concern a diagnostic's position, which
 no fixture pins, one needs a nesting depth far past anything a fixture
 cell would hold, and two need a lone UTF-16 surrogate in an expected
-cell, which a UTF-8 file cannot carry. The last entry is a Go defect
-rather than a standing difference: it is written down so a shared row is
-not added over it before the repair lands. A divergence a row could
+cell, which a UTF-8 file cannot carry. A divergence a row could
 express belongs in a register, with a `rust` column, per
 [`AGENTS.md`](AGENTS.md).
 
@@ -397,44 +395,3 @@ Owner: the Go port. These are defects there, not trades, and the entry
 exists so a shared fixture row is not added over them before the repair
 lands. Delete this entry, and move its rows into `test/spec/*.tsv`, when
 Go answers them the canonical way.
-
-## Trailing text after digits inside a flow collection (Go)
-
-A value that starts with a digit and is followed by a space and more
-text is one plain scalar in the canonical, whether or not it sits inside
-a flow collection. The Go port applies that rule only in block context:
-inside a flow collection it falls through to the number matcher, which
-takes the digits and leaves the rest to the grammar.
-
-| input | TypeScript | Go | Rust |
-|---|---|---|---|
-| `a: [12 x]` | `{"a":["12 x"]}` | `{"a":[12,"x"]}` | `{"a":["12 x"]}` |
-| `a: {b: 12 x}` | `{"a":{"b":"12 x"}}` | `{"a":{"b":12,"x":null}}` | `{"a":{"b":"12 x"}}` |
-| `a: [12, 3]` | `{"a":[12,3]}` | the same | the same |
-| `a: 12 x` | `{"a":"12 x"}` | the same | the same |
-
-The last two rows are the controls: a comma inside a flow collection is
-still a separator everywhere, and the same trailing text in BLOCK
-context agrees in all three.
-
-The cause is one guard. The canonical takes the trailing-text branch
-unconditionally, and `go/yaml.go` reaches it only when the flow depth is
-zero. That guard predates
-[#54](https://github.com/tabnas/yaml/pull/54), which moved the branch
-ahead of the comma branch in both runtimes and preserved each side's
-existing condition, so this difference is older than that change rather
-than introduced by it.
-
-Provenance: measured 2026-09-21, the TypeScript column by running
-`ts/src/yaml.ts` under Node 22 against `@tabnas/parser` 0.10.0 and
-`@tabnas/jsonic` 0.6.7, the Go column by `tabnasyaml.Parse` in `go/`,
-and the Rust column by `tabnas_yaml::parse`. Not a shared fixture row,
-because Go is red on the first two; the block-context controls ARE
-shared rows, in `test/spec/real-world-regressions.tsv` and
-`test/spec/flow-collections.tsv`. Pinned on the Rust side by
-`digits_then_text_inside_a_flow_collection_stay_one_scalar` in
-`rs/tests/js_semantics_test.rs`.
-
-Owner: the Go port. Dropping the `flowState.depth == 0` guard in
-`handleNumericColon` is the whole repair. Delete this entry and move its
-first two rows into `test/spec/flow-collections.tsv` when that lands.
