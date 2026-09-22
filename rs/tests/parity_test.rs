@@ -97,6 +97,7 @@ fn every_fixture_is_present() {
         "indentation.tsv",
         "line-endings.tsv",
         "merge-key.tsv",
+        "meta.tsv",
         "multi-document.tsv",
         "multiline-plain-scalars.tsv",
         "quoted-strings.tsv",
