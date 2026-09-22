@@ -1,13 +1,21 @@
 // The recorded divergences, pinned.
 //
-// Every entry in ../../DIVERGENCE.md that a shared fixture cannot express
-// has a test here. They fail on REPAIR as loudly as on regression: a
-// divergence that quietly goes away should be deleted from the register
-// in the same change, not left behind as a claim nobody checks.
+// Every entry in ../../DIVERGENCE.md with a RUST column that a shared
+// fixture cannot express has a test here. They fail on REPAIR as loudly
+// as on regression: a divergence that quietly goes away should be
+// deleted from the register in the same change, not left behind as a
+// claim nobody checks.
 //
-// Three divergences are pinned elsewhere: UNDEFINED against null, in
-// `undefined_test.rs`, and the two that turn on JavaScript's own string
-// semantics, in `js_semantics_test.rs` beside the fixes they belong to.
+// Three are pinned elsewhere, beside the code they belong to: UNDEFINED
+// against null, in `undefined_test.rs`; the unpaired surrogate table of
+// "UTF-16 escapes in a double quoted scalar", in `js_semantics_test.rs`;
+// and that entry's second table, the window cut through an astral
+// character, in `escape_window_test.rs`.
+//
+// One entry has no Rust column to pin. "A tab-only tail at the end of
+// the source" is a GO divergence: this port gives the canonical answer,
+// the refusal included, so the row that can fail lives in
+// `go/divergence_test.go`.
 
 mod common;
 

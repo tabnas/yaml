@@ -18,12 +18,15 @@ and this file only covers what is specific to this crate.
 | `tests/parity_regression_test.rs` | the TypeScript/Go parity regressions captured from real OpenAPI and Swagger files |
 | `tests/column_units_test.rs` | the sixteen error-column cases the other two runtimes assert |
 | `tests/untrusted_test.rs` | deep nesting, long input, unterminated constructs, control characters, odd Unicode |
-| `tests/js_semantics_test.rs` | where JavaScript's whitespace, word characters and UTF-16 code units decide a parse; not fixture rows, because Go answers them natively |
-| `tests/divergence_test.rs` | every entry in `../DIVERGENCE.md` a fixture cannot express, bar the two `tests/js_semantics_test.rs` pins |
+| `tests/js_semantics_test.rs` | where JavaScript's whitespace, word characters and UTF-16 code units decide a parse; most rows are shared fixtures too, and the file records which canonical expression each answer comes from |
+| `tests/divergence_test.rs` | every entry in `../DIVERGENCE.md` with a Rust column that a fixture cannot express, bar the pins in `tests/js_semantics_test.rs` and `tests/escape_window_test.rs` |
+| `tests/escape_window_test.rs` | the fixed-width escape window: its width in UTF-16 units, the cursor after it, and the fold when it cuts an astral character |
+| `tests/blank_predicates_test.rs` | the three canonical stops that take a space and not a tab, and which expression each stands for |
 | `tests/undefined_test.rs` | the UNDEFINED against null divergence |
 | `tests/grammar_test.rs` | the embedded grammar is still the file on disk, in all three runtimes |
 | `tests/perf_test.rs` | `parse` reuses its instance; parse time grows about linearly |
 | `tests/version_test.rs` | `Cargo.toml` == `VERSION` == `ts/package.json` == `go/yaml.go` |
+| `tests/install_test.rs` | `README.md`'s install section names every sibling checkout the path-dependency closure reaches, and every crate a consumer lists |
 | `tests/common/mod.rs` | shared helpers: the spec directory, the repository root, value conversion |
 | `README.md` | the crate front page; its `rust` fences are doctests of this crate |
 
