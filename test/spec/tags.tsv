@@ -12,3 +12,31 @@ a: !!str x:\ty	{"a":"x:\ty"}
 a: !!str x: y	{"a":{"x":"y"}}
 a: !!binary 1_000	{"a":1000}
 a: !t 1_000	{"a":1000}
+a: !!float xyz	{"a":"@@NaN"}
+a: !!int xyz	{"a":"@@NaN"}
+a: !!float "xyz"	{"a":"@@NaN"}
+[!!float xyz]	["@@NaN"]
+a: !!float ﻿1	{"a":1}
+a: !!int ﻿1	{"a":1}
+a: !!float 1	{"a":"@@NaN"}
+a: !!int 1	{"a":"@@NaN"}
+a: !!float 1﻿	{"a":1}
+a: !!str 1﻿	{"a":"1"}
+a: !!int 12abc	{"a":12}
+a: !!int -7.9	{"a":-7}
+a: !!float 1e	{"a":1}
+a: !!float .5	{"a":0.5}
+a: !!float +2	{"a":2}
+a: !!float 1.5e3x	{"a":1500}
+a: !!float Infinity	{"a":"@@Infinity"}
+a: !!float -Infinity	{"a":"@@-Infinity"}
+a: !!int 1_000	{"a":1}
+a: !!float 1_000	{"a":1}
+a: !!int 0x10	{"a":0}
+a: !!float 0x10	{"a":0}
+a: !!python/ [1]	ERROR:unexpected
+a: !!python/é [1]	ERROR:unexpected
+a: !!seqx [1]	ERROR:unexpected
+a: !!python/object [1]	{"a":[1]}
+a: !!python/-1 [1]	{"a":[1]}
+a: !!seq [1]	{"a":[1]}

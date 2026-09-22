@@ -175,8 +175,8 @@ lone surrogate has no UTF-8 spelling and a byte-order mark is invisible.
 
 | input | TypeScript | Go | Rust |
 |---|---|---|---|
-| `a: "\uD83D\uDE00"` | U+1F600 | U+FFFD U+FFFD | U+1F600 |
-| `a: "\U0000D83D\uDE00"` | U+1F600 | U+FFFD U+FFFD | U+1F600 |
+| `a: "\uD83D\uDE00"` | U+1F600 | U+1F600 | U+1F600 |
+| `a: "\U0000D83D\uDE00"` | U+1F600 | U+1F600 | U+1F600 |
 | `a: "\uD83D"` | a lone high surrogate | U+FFFD | U+FFFD |
 | `a: "\uDE00"` | a lone low surrogate | U+FFFD | U+FFFD |
 | `a: "\U0000D83D"` | a lone high surrogate | U+FFFD | U+FFFD |
@@ -185,11 +185,11 @@ The canonical handler builds the scalar with `String.fromCharCode` for
 `\x` and `\u`, and `String.fromCodePoint` for `\U`. Both take a UTF-16
 CODE UNIT for a surrogate value, so a high escape and the low escape
 beside it are one astral character rather than two escapes, in either
-spelling. A Rust string holds Unicode scalars, so this port pairs the
-two before converting (`push_code_point` in `rs/src/lex.rs`) and reaches
-the canonical value. The Go port converts each escape on its own with
-`string(rune(n))`, which folds every surrogate to U+FFFD, so the pair is
-lost there.
+spelling. Neither port's string type holds a code unit, so both pair
+the two before converting (`push_code_point` in `rs/src/lex.rs`,
+`pushCodeUnit` in `go/yaml.go`) and reach the canonical value. The
+first two rows are the controls, and they are shared fixture rows in
+`test/spec/quoted-strings.tsv`.
 
 An UNPAIRED surrogate is the part neither port can reach. TypeScript
 keeps the code unit, because a JavaScript string is UTF-16 and permits
@@ -202,15 +202,12 @@ rather than this plugin.
 Provenance: the TypeScript column was produced by running
 `ts/src/yaml.ts` under Node 22; the Go column by `tabnasyaml.Parse` in
 `go/`; the Rust column by `tabnas_yaml::parse`. No row of
-`test/spec/*.tsv` can carry the TypeScript answers, because an expected
-cell is UTF-8 text and a lone surrogate has no UTF-8 encoding. The pair
-rows are pinned by
-`rs/tests/js_semantics_test.rs::a_surrogate_pair_escape_is_one_character`
-and the unpaired rows by
+`test/spec/*.tsv` can carry the TypeScript answers for the unpaired
+rows, because an expected cell is UTF-8 text and a lone surrogate has
+no UTF-8 encoding. They are pinned by
 `rs/tests/js_semantics_test.rs::an_unpaired_surrogate_escape_folds`.
 
-Owner for the unpaired rows: the string model, as upstream. Owner for
-the pair rows: the Go port, where they are a defect and not a trade.
+Owner for the unpaired rows: the string model, as upstream.
 
 A MALFORMED escape is a Go defect in the same handler, recorded here so
 a shared fixture row is not added over it. The canonical window is a
@@ -318,40 +315,3 @@ whose astral rows fail if the fold changes.
 
 Owner: the string model, as upstream, for the Rust rows; the Go port for
 the Go column.
-
-## JavaScript whitespace and word characters (Go)
-
-`NL` below is the newline a source carries, and `U+XXXX` again stands
-for a character the table is about.
-
-| input | TypeScript | Go | Rust |
-|---|---|---|---|
-| `a: !!float U+FEFF 1` | `1` | `"U+FEFF 1"` | `1` |
-| `a: !!float U+0085 1` | `NaN` | `"1"` | `NaN` |
-| `a: !!python/ [1]` | `ERROR:unexpected` | `{"a":[1]}` | `ERROR:unexpected` |
-| `U+FEFF` alone | `null` | `"U+FEFF"` | `null` |
-| `U+0085` alone | `"U+0085"` | `null` | `"U+0085"` |
-| `&n U+FEFF v: 1 NL b: *n` | `{"U+FEFF v":1,"b":"v"}` | `{"U+FEFF v":1,"b":"U+FEFF v"}` | `{"U+FEFF v":1,"b":"v"}` |
-| `%TAG U+FEFF !! t: NL --- !!int 007` | `"007"` | `7` | `"007"` |
-
-The canonical plugin is JavaScript, so its `\s` is the `White_Space`
-property MINUS U+0085 and PLUS U+FEFF, and its `\w` and `\b` are ASCII.
-Go's `unicode.IsSpace` and `strings.TrimSpace` answer the other way on
-both characters, which is what every row above measures: a tagged
-number's `parseFloat`, the `\b` on the `python/` structural tag, the
-whitespace-only source test, the trim on an inline anchor's scalar, and
-the `^%TAG\s+(\S+)\s+(\S+)` split. This port spells the JavaScript rule
-out as `crate::js_space` and reaches the canonical answer in each.
-
-Provenance: the TypeScript column was produced by running
-`ts/src/yaml.ts` under Node 22; the Go column by `tabnasyaml.Parse` in
-`go/`; the Rust column by `tabnas_yaml::parse`. Pinned by
-`rs/tests/js_semantics_test.rs`, one test per row group. The one case of
-this shape the Go port already answers correctly, an explicit key tagged
-`!!` plus a non-ASCII name, is a shared fixture row instead, in
-`test/spec/complex-keys.tsv`.
-
-Owner: the Go port. These are defects there, not trades, and the entry
-exists so a shared fixture row is not added over them before the repair
-lands. Delete this entry, and move its rows into `test/spec/*.tsv`, when
-Go answers them the canonical way.

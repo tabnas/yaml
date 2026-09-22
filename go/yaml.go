@@ -42,11 +42,21 @@ type MetaResult struct {
 
 // Hoisted regex constants — compiling these at package init avoids
 // recompiling them inside per-token hot paths.
+//
+// Each `\s` and `\S` the canonical regexps carry is JAVASCRIPT's class,
+// which is not RE2's: RE2's `\s` is the five ASCII blanks, where the
+// canonical one is the WhiteSpace and LineTerminator productions. The
+// difference decided parses (`%TAG<U+FEFF>!! ...` registers a handle
+// canonically and did not here), so the class is written out once, as
+// jsSpaceClass, and every pattern uses it. `\b` and `\w` are ASCII in
+// both engines and need no help. The canonical `.` stops at a line
+// terminator, which RE2's does not, so the explicit-key pattern spells
+// that out too.
 var (
-	structTagPrefixRe  = regexp.MustCompile(`^!!(seq|map|omap|set|pairs|binary|ordered|python/\S*)`)
-	yamlTagDirectiveRe = regexp.MustCompile(`^%TAG\s+(\S+)\s+(\S+)`)
+	structTagPrefixRe  = regexp.MustCompile(`^!!(seq|map|omap|set|pairs|binary|ordered|python/[^` + jsSpaceClass + `]*)\b`)
+	yamlTagDirectiveRe = regexp.MustCompile(`^%TAG[` + jsSpaceClass + `]+([^` + jsSpaceClass + `]+)[` + jsSpaceClass + `]+([^` + jsSpaceClass + `]+)`)
 	// !!type tag prefix on an explicit (`? `) key (mirrors src/yaml.ts:1457).
-	explicitKeyTagRe = regexp.MustCompile(`^!!(\w+)\s+(.*)$`)
+	explicitKeyTagRe = regexp.MustCompile(`^!!(\w+)[` + jsSpaceClass + `]+([^\n\r\x{2028}\x{2029}]*)$`)
 	// Block scalar indicator used as an explicit key (mirrors src/yaml.ts:1482).
 	explicitKeyBlockScalarRe = regexp.MustCompile(`^([|>])([+-]?)([0-9]?)$`)
 )
@@ -246,43 +256,96 @@ func isYamlValue(text string) (any, bool) {
 	return val, ok
 }
 
-// parseYamlNumber attempts to parse text as a YAML number.
-// Returns the number and true if successful, or 0 and false if not a number.
+// parseYamlNumber is the canonical `+text`, which is `Number(text)`: the
+// whole trimmed text has to be a StrNumericLiteral. That is narrower than
+// strconv in some places (`inf`, `nan` and `1_000` are not numbers to
+// JavaScript) and wider in one (leading and trailing JavaScript
+// whitespace is skipped, U+FEFF included). Returns the number and true,
+// or 0 and false where `Number` gives NaN.
 func parseYamlNumber(text string) (float64, bool) {
-	if text == "" {
+	t := jsTrim(text)
+	if t == "" {
+		return 0, true
+	}
+	if len(t) > 2 && t[0] == '0' {
+		radix := 0
+		switch t[1] {
+		case 'x', 'X':
+			radix = 16
+		case 'o', 'O':
+			radix = 8
+		case 'b', 'B':
+			radix = 2
+		}
+		if radix != 0 {
+			n, err := strconv.ParseUint(t[2:], radix, 64)
+			if err != nil || strings.ContainsAny(t[2:], "_+-") {
+				return 0, false
+			}
+			return float64(n), true
+		}
+	}
+	sign := 1.0
+	body := t
+	if body[0] == '-' {
+		sign = -1
+		body = body[1:]
+	} else if body[0] == '+' {
+		body = body[1:]
+	}
+	if body == "Infinity" {
+		return math.Inf(int(sign)), true
+	}
+	if !isJSDecimalLiteral(body) {
 		return 0, false
 	}
-	// Try standard float parsing
-	num, err := strconv.ParseFloat(text, 64)
-	if err == nil {
-		return num, true
+	n, err := strconv.ParseFloat(strings.TrimSuffix(body, "."), 64)
+	if err != nil {
+		// Only an overflow can fail here, and JavaScript answers Infinity.
+		if strings.Contains(err.Error(), "range") {
+			return sign * math.Inf(1), true
+		}
+		return 0, false
 	}
-	// Try integer formats: hex, octal, binary
-	if strings.HasPrefix(text, "0x") || strings.HasPrefix(text, "0X") {
-		if n, err := strconv.ParseInt(text[2:], 16, 64); err == nil {
-			return float64(n), true
+	return sign * n, true
+}
+
+// isJSDecimalLiteral is ECMAScript's StrUnsignedDecimalLiteral: digits
+// with an optional fraction and exponent, or a fraction alone. No
+// separators, no `inf`, no `nan`, and an exponent needs a digit.
+func isJSDecimalLiteral(body string) bool {
+	i := 0
+	integral := 0
+	for i < len(body) && body[i] >= '0' && body[i] <= '9' {
+		i++
+		integral++
+	}
+	fractional := 0
+	if i < len(body) && body[i] == '.' {
+		i++
+		for i < len(body) && body[i] >= '0' && body[i] <= '9' {
+			i++
+			fractional++
 		}
 	}
-	if strings.HasPrefix(text, "0o") || strings.HasPrefix(text, "0O") {
-		if n, err := strconv.ParseInt(text[2:], 8, 64); err == nil {
-			return float64(n), true
+	if integral == 0 && fractional == 0 {
+		return false
+	}
+	if i < len(body) && (body[i] == 'e' || body[i] == 'E') {
+		i++
+		if i < len(body) && (body[i] == '+' || body[i] == '-') {
+			i++
+		}
+		exponent := 0
+		for i < len(body) && body[i] >= '0' && body[i] <= '9' {
+			i++
+			exponent++
+		}
+		if exponent == 0 {
+			return false
 		}
 	}
-	if strings.HasPrefix(text, "0b") || strings.HasPrefix(text, "0B") {
-		if n, err := strconv.ParseInt(text[2:], 2, 64); err == nil {
-			return float64(n), true
-		}
-	}
-	// Negative hex/oct/bin
-	if len(text) > 1 && text[0] == '-' {
-		if num, ok := parseYamlNumber(text[1:]); ok {
-			return -num, true
-		}
-	}
-	if len(text) > 1 && text[0] == '+' {
-		return parseYamlNumber(text[1:])
-	}
-	return 0, false
+	return i == len(body)
 }
 
 // deepCopy performs a structural deep copy of a value, preserving both the
@@ -527,9 +590,115 @@ func isDocMarkerRun(s string, i int) bool {
 	return marker == "---" || marker == "..."
 }
 
-// trimRight removes trailing whitespace from a string.
+// isJSSpace reports whether r is whitespace to JAVASCRIPT: the WhiteSpace
+// and LineTerminator productions, which is the set `\s`,
+// `String.prototype.trim`, `Number`, `parseInt` and `parseFloat` all skip
+// in the canonical plugin. It is not unicode.IsSpace, and the two differ
+// in both directions: U+0085 is a space to Go and not to JavaScript, and
+// U+FEFF is a space to JavaScript and not to Go. Both decide scalars.
+func isJSSpace(r rune) bool {
+	switch r {
+	case '\t', '\n', '\v', '\f', '\r', ' ',
+		0x00A0, 0x1680, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000, 0xFEFF:
+		return true
+	}
+	return 0x2000 <= r && r <= 0x200A
+}
+
+// jsSpaceClass is the same set as the body of a regexp character class,
+// for the patterns that stand in for a canonical `\s` or `\S`.
+const jsSpaceClass = `\t\n\v\f\r \x{00A0}\x{1680}\x{2000}-\x{200A}\x{2028}\x{2029}\x{202F}\x{205F}\x{3000}\x{FEFF}`
+
+// trimRight is the canonical `.replace(/\s+$/, "")`, the trailing-space
+// strip every scalar handler ends with: it strips JavaScript's whitespace,
+// not Go's and not only the two ASCII blanks.
 func trimRight(s string) string {
-	return strings.TrimRight(s, " \t")
+	return strings.TrimRightFunc(s, isJSSpace)
+}
+
+// jsTrim is `String.prototype.trim`, over the same set.
+func jsTrim(s string) string {
+	return strings.TrimFunc(s, isJSSpace)
+}
+
+// jsParseInt is `parseInt(s, 10)`: skip JavaScript's whitespace, take an
+// optional sign and the longest run of decimal digits, and answer NaN
+// when there is no digit. The tag has still been applied when it
+// answers NaN, which is why `!!int xyz` is a number and not the text.
+func jsParseInt(s string) float64 {
+	t := strings.TrimLeftFunc(s, isJSSpace)
+	i := 0
+	if i < len(t) && (t[i] == '+' || t[i] == '-') {
+		i++
+	}
+	start := i
+	for i < len(t) && t[i] >= '0' && t[i] <= '9' {
+		i++
+	}
+	if i == start {
+		return math.NaN()
+	}
+	n, err := strconv.ParseFloat(t[:i], 64)
+	if err != nil {
+		return math.NaN()
+	}
+	return n
+}
+
+// jsParseFloat is `parseFloat(s)`: the same skip, then the longest
+// prefix that is a StrDecimalLiteral, `Infinity` included, and NaN when
+// nothing at all reads as one.
+func jsParseFloat(s string) float64 {
+	t := strings.TrimLeftFunc(s, isJSSpace)
+	i := 0
+	negative := false
+	if i < len(t) && (t[i] == '+' || t[i] == '-') {
+		negative = t[i] == '-'
+		i++
+	}
+	if strings.HasPrefix(t[i:], "Infinity") {
+		if negative {
+			return math.Inf(-1)
+		}
+		return math.Inf(1)
+	}
+	digits := 0
+	for i < len(t) && t[i] >= '0' && t[i] <= '9' {
+		i++
+		digits++
+	}
+	if i < len(t) && t[i] == '.' {
+		i++
+		for i < len(t) && t[i] >= '0' && t[i] <= '9' {
+			i++
+			digits++
+		}
+	}
+	if digits == 0 {
+		return math.NaN()
+	}
+	mantissaEnd := i
+	if i < len(t) && (t[i] == 'e' || t[i] == 'E') {
+		probe := i + 1
+		if probe < len(t) && (t[probe] == '+' || t[probe] == '-') {
+			probe++
+		}
+		exponentStart := probe
+		for probe < len(t) && t[probe] >= '0' && t[probe] <= '9' {
+			probe++
+		}
+		if probe > exponentStart {
+			i = probe
+		}
+	}
+	if i < mantissaEnd {
+		i = mantissaEnd
+	}
+	n, err := strconv.ParseFloat(strings.TrimSuffix(t[:i], "."), 64)
+	if err != nil {
+		return math.NaN()
+	}
+	return n
 }
 
 // childNode is the node of a rule's child, read from the END of the
@@ -723,7 +892,10 @@ func Yaml(j *jsonic.Jsonic, opts map[string]any) error {
 			// Empty / whitespace-only / comments-only source: emit one #VL
 			// null so the parser yields nil rather than a parse error.
 			stripped := stripCommentLines(src)
-			if strings.TrimSpace(src) == "" || strings.TrimSpace(stripped) == "" {
+			// `src.trim() === '' || stripped === ''`, and `trim` is
+			// JavaScript's: a source of one byte-order mark is empty here,
+			// and one of a next-line character is a scalar.
+			if jsTrim(src) == "" || jsTrim(stripped) == "" {
 				pnt.Len = 0
 				tkn := lex.Token("#VL", VL, nil, "")
 				pnt.SI = 0
@@ -868,7 +1040,10 @@ func Yaml(j *jsonic.Jsonic, opts map[string]any) error {
 							}
 							ei++
 						}
-						raw := strings.TrimRight(peek[:ei], " \t")
+						// `peek.substring(0, ei).trim()`: both ends, and
+						// JavaScript's set, so a byte-order mark before the
+						// scalar is not part of what the alias resolves to.
+						raw := jsTrim(peek[:ei])
 						if len(raw) > 0 {
 							scalarVal = raw
 						}
@@ -1793,7 +1968,6 @@ func handleBlockScalar(lex *jsonic.Lex, pnt *jsonic.Point, src, fwd string, ch b
 		if lineIndent == 0 && isDocMarkerNoTab(fwd, pos) {
 			break
 		}
-
 		lineStartPos := pos + blockIndent
 		lineEnd := lineStartPos
 		for lineEnd < len(fwd) && fwd[lineEnd] != '\n' && fwd[lineEnd] != '\r' {
@@ -2615,6 +2789,39 @@ func handleDoubleQuotedString(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, ST
 	rows := 0
 	lastNewlineEnd := 0
 
+	// A `\u` or `\U` escape naming a HIGH surrogate, held back until the
+	// next escape either completes the pair or does not. The canonical
+	// handler appends UTF-16 code units (`String.fromCharCode`, and
+	// `fromCodePoint` gives the same unit for a surrogate value), so
+	// `\uD83D\uDE00` is one astral character there and not two escapes.
+	// A Go string holds UTF-8, so the pair is combined here before it is
+	// written, and a surrogate that never finds its partner becomes
+	// U+FFFD, which is what `string(rune(n))` made of every one before.
+	pendingHigh := int64(-1)
+	flushSurrogate := func() {
+		if pendingHigh >= 0 {
+			val += "\uFFFD"
+			pendingHigh = -1
+		}
+	}
+	pushCodeUnit := func(n int64) {
+		switch {
+		case 0xD800 <= n && n <= 0xDBFF:
+			flushSurrogate()
+			pendingHigh = n
+		case 0xDC00 <= n && n <= 0xDFFF:
+			if pendingHigh >= 0 {
+				val += string(rune(0x10000 + (pendingHigh-0xD800)<<10 + (n - 0xDC00)))
+				pendingHigh = -1
+			} else {
+				val += "\uFFFD"
+			}
+		default:
+			flushSurrogate()
+			val += string(rune(n))
+		}
+	}
+
 	for i < len(fwd) && fwd[i] != '"' {
 		if fwd[i] == '\\' {
 			i++
@@ -2622,6 +2829,11 @@ func handleDoubleQuotedString(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, ST
 				break
 			}
 			esc := fwd[i]
+			// Anything but a code-unit escape or a line continuation
+			// separates a high surrogate from the low one it needed.
+			if esc != 'x' && esc != 'u' && esc != 'U' && esc != '\n' && esc != '\r' {
+				flushSurrogate()
+			}
 			switch esc {
 			case 'n':
 				val += "\n"
@@ -2701,14 +2913,16 @@ func handleDoubleQuotedString(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, ST
 				if i+3 <= len(fwd) {
 					n, err := strconv.ParseInt(fwd[i+1:i+3], 16, 32)
 					if err == nil {
-						val += string(rune(n))
+						pushCodeUnit(n)
 						i += 3
 						escapedUpTo = len(val)
 					} else {
+						flushSurrogate()
 						val += string(esc)
 						i++
 					}
 				} else {
+					flushSurrogate()
 					val += string(esc)
 					i++
 				}
@@ -2716,14 +2930,16 @@ func handleDoubleQuotedString(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, ST
 				if i+5 <= len(fwd) {
 					n, err := strconv.ParseInt(fwd[i+1:i+5], 16, 32)
 					if err == nil {
-						val += string(rune(n))
+						pushCodeUnit(n)
 						i += 5
 						escapedUpTo = len(val)
 					} else {
+						flushSurrogate()
 						val += string(esc)
 						i++
 					}
 				} else {
+					flushSurrogate()
 					val += string(esc)
 					i++
 				}
@@ -2731,14 +2947,16 @@ func handleDoubleQuotedString(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, ST
 				if i+9 <= len(fwd) {
 					n, err := strconv.ParseInt(fwd[i+1:i+9], 16, 32)
 					if err == nil {
-						val += string(rune(n))
+						pushCodeUnit(n)
 						i += 9
 						escapedUpTo = len(val)
 					} else {
+						flushSurrogate()
 						val += string(esc)
 						i++
 					}
 				} else {
+					flushSurrogate()
 					val += string(esc)
 					i++
 				}
@@ -2758,6 +2976,7 @@ func handleDoubleQuotedString(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, ST
 				i++
 			}
 		} else if fwd[i] == '\n' || fwd[i] == '\r' {
+			flushSurrogate()
 			// Flow scalar line folding.
 			trimTo := len(val)
 			for trimTo > escapedUpTo && (val[trimTo-1] == ' ' || val[trimTo-1] == '\t') {
@@ -2791,10 +3010,12 @@ func handleDoubleQuotedString(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, ST
 			// survive intact. `string(byte)` would treat the byte value as
 			// a Unicode codepoint and re-encode it as UTF-8, mangling any
 			// non-ASCII byte that is part of a multi-byte sequence.
+			flushSurrogate()
 			val += fwd[i : i+1]
 			i++
 		}
 	}
+	flushSurrogate()
 	if i < len(fwd) && fwd[i] == '"' {
 		i++
 	}
@@ -2996,17 +3217,12 @@ func applyTagConversion(tag, rawVal string, tagHandles map[string]string) any {
 	case "str":
 		return rawVal
 	case "int":
-		n, err := strconv.ParseInt(rawVal, 10, 64)
-		if err == nil {
-			return float64(n)
-		}
-		return rawVal
+		// `parseInt(rawVal, 10)`. A tag that cannot read its value still
+		// applies: the result is NaN, a number, not the text.
+		return jsParseInt(rawVal)
 	case "float":
-		n, err := strconv.ParseFloat(rawVal, 64)
-		if err == nil {
-			return n
-		}
-		return rawVal
+		// `parseFloat(rawVal)`, the same way.
+		return jsParseFloat(rawVal)
 	case "bool":
 		return rawVal == "true" || rawVal == "True" || rawVal == "TRUE"
 	case "null":
