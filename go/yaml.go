@@ -3803,13 +3803,26 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 		rs.AddAC(func(r *jsonic.Rule, ctx *jsonic.Context) {
 			if m, ok := r.Node.(map[string]any); ok {
 				if alias, ok := m["__yamlAlias"].(string); ok {
+					// `rule.node = anchors[name]`, with no test that
+					// the anchor is there: an alias to a name the
+					// document never anchored reads as the absent
+					// value, which is null. Keeping the marker instead
+					// publishes this plugin's own bookkeeping as the
+					// parse result, so `b: *nope` handed a caller
+					// `{"__yamlAlias":"nope"}`, a map the document does
+					// not contain and no other runtime produces.
 					val, exists := anchors[alias]
-					if exists {
-						switch v := val.(type) {
-						case *jsonic.OrderedMap, jsonic.OrderedMap, map[string]any, []any:
-							r.Node = deepCopy(v)
-						default:
+					switch v := val.(type) {
+					case *jsonic.OrderedMap, jsonic.OrderedMap, map[string]any, []any:
+						r.Node = deepCopy(v)
+					default:
+						if exists {
 							r.Node = val
+						} else {
+							// `undefined`, which the engine drops from a
+							// list and reads as null in a map, rather
+							// than a Go nil, which a list would keep.
+							r.Node = jsonic.Undefined
 						}
 					}
 				}
