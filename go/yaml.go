@@ -621,6 +621,175 @@ func jsTrim(s string) string {
 	return strings.TrimFunc(s, isJSSpace)
 }
 
+// utf16Window is `text.substring(from, from+count)` where `count` is a
+// number of UTF-16 CODE UNITS, which is what the canonical fixed-width
+// escape window is counted in, and `end` is where the scan resumes: the
+// byte offset `count` units past `from`.
+//
+// Counting bytes or runes reads the same window only while every
+// character in it is one code unit. An astral character is TWO units
+// and one rune, so a window holding one takes too much text and leaves
+// the cursor too far along; a window whose LAST unit falls inside one
+// cuts the character in half. The canonical keeps the HIGH surrogate in
+// the window, where it is no hexadecimal digit and so ends `parseInt`'s
+// prefix exactly where stopping short of the character does, and leaves
+// the LOW surrogate for the next round of the scan, which appends it as
+// a character of its own. `splitLow` hands that unit back, because a
+// byte offset cannot point between two surrogates; it is -1 when the
+// window ends on a character boundary.
+func utf16Window(text string, from, count int) (digits string, end int, splitLow int64) {
+	if from > len(text) {
+		from = len(text)
+	}
+	units := 0
+	offset := 0
+	for from+offset < len(text) {
+		r, size := utf8.DecodeRuneInString(text[from+offset:])
+		width := 1
+		if r >= 0x10000 {
+			width = 2
+		}
+		if units+width > count {
+			if width == 2 && units < count {
+				return text[from : from+offset], from + offset, int64(0xDC00 + ((r - 0x10000) & 0x3FF))
+			}
+			return text[from : from+offset], from + offset, -1
+		}
+		units += width
+		offset += size
+		if units == count {
+			break
+		}
+	}
+	return text[from : from+offset], from + offset, -1
+}
+
+// jsParseInt16 is `parseInt(s, 16)`: skip JavaScript's whitespace, take
+// an optional sign and an optional `0x`, then the longest run of
+// hexadecimal digits, and answer NaN when there is no digit at all.
+func jsParseInt16(s string) float64 {
+	t := strings.TrimLeftFunc(s, isJSSpace)
+	i := 0
+	negative := false
+	if i < len(t) && (t[i] == '+' || t[i] == '-') {
+		negative = t[i] == '-'
+		i++
+	}
+	if i+1 < len(t) && t[i] == '0' && (t[i+1] == 'x' || t[i+1] == 'X') {
+		i += 2
+	}
+	start := i
+	value := 0.0
+	for i < len(t) {
+		d := hexDigitValue(t[i])
+		if d < 0 {
+			break
+		}
+		value = value*16 + float64(d)
+		i++
+	}
+	if i == start {
+		return math.NaN()
+	}
+	if negative {
+		return -value
+	}
+	return value
+}
+
+func hexDigitValue(b byte) int {
+	switch {
+	case '0' <= b && b <= '9':
+		return int(b - '0')
+	case 'a' <= b && b <= 'f':
+		return int(b-'a') + 10
+	case 'A' <= b && b <= 'F':
+		return int(b-'A') + 10
+	}
+	return -1
+}
+
+// jsToUint16 is the `ToUint16` that `String.fromCharCode` applies to its
+// argument: NaN and the infinities become zero, and anything else is
+// truncated and taken modulo 65536. It never fails, so an unreadable
+// window is a NUL and not a refusal.
+func jsToUint16(n float64) int64 {
+	if math.IsNaN(n) || math.IsInf(n, 0) {
+		return 0
+	}
+	t := math.Trunc(n)
+	m := math.Mod(t, 65536)
+	if m < 0 {
+		m += 65536
+	}
+	return int64(m)
+}
+
+// jsFromCodePoint is the range check `String.fromCodePoint` makes: it
+// THROWS a RangeError for anything that is not a code point, and the
+// canonical matcher does not catch it, so the token is never produced
+// and the document is refused. `ok` false stands for the throw.
+func jsFromCodePoint(n float64) (code int64, ok bool) {
+	if math.IsNaN(n) || math.IsInf(n, 0) || math.Trunc(n) != n {
+		return 0, false
+	}
+	if n < 0 || n > 0x10FFFF {
+		return 0, false
+	}
+	return int64(n), true
+}
+
+// jsSubstringLessOneUnit is `text.substring(from, to - 1)` where `to` is
+// a byte offset standing in for a UTF-16 code-unit index, so the step
+// back is ONE CODE UNIT. `substring` clamps after the subtraction and
+// swaps a reversed pair, and both decide values: a typed tag's quoted
+// value scan that overran the end by one leaves `to - 1` at the end,
+// and an empty value leaves the pair the wrong way round, where the
+// canonical yields the opening quote.
+//
+// One unit back from just past an astral character lands BETWEEN its two
+// surrogates, and the canonical keeps the high one. A Go string has no
+// place for an unpaired surrogate, so this folds it to the replacement
+// character, as `pushCodeUnit` folds an escape naming one. A character
+// inside the Basic Multilingual Plane is one unit and one rune, so
+// stepping back drops the whole of it in both runtimes. Slicing at
+// `to-1` directly did neither: it cut a multibyte character and left
+// invalid UTF-8 in the value, and it panicked on the reversed pair.
+func jsSubstringLessOneUnit(text string, from, to int) string {
+	unit := to - 1
+	if unit < 0 {
+		unit = 0
+	}
+	end := runeFloor(text, unit)
+	splitAstral := false
+	if unit < len(text) && end < unit {
+		_, size := utf8.DecodeRuneInString(text[end:])
+		splitAstral = size == 4
+	}
+	from = runeFloor(text, from)
+	lo, hi := from, end
+	if lo > hi {
+		lo, hi = hi, lo
+	}
+	out := text[lo:hi]
+	if splitAstral && from <= end {
+		out += "\uFFFD"
+	}
+	return out
+}
+
+// runeFloor is `i` clamped into `text` and moved back to the start of
+// the character it falls inside.
+func runeFloor(text string, i int) int {
+	if i >= len(text) {
+		return len(text)
+	}
+	for i > 0 && !utf8.RuneStart(text[i]) {
+		i--
+	}
+	return i
+}
+
 // jsParseInt is `parseInt(s, 10)`: skip JavaScript's whitespace, take an
 // optional sign and the longest run of decimal digits, and answer NaN
 // when there is no digit. The tag has still been applied when it
@@ -2118,7 +2287,7 @@ func handleTagInTextCheck(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, tagHan
 		if valEnd < len(fwd) && fwd[valEnd] == q {
 			valEnd++
 		}
-		rawVal = fwd[valStart+1 : valEnd-1]
+		rawVal = jsSubstringLessOneUnit(fwd, valStart+1, valEnd)
 	} else {
 		for valEnd < len(fwd) && fwd[valEnd] != '\n' && fwd[valEnd] != '\r' {
 			if fwd[valEnd] == ':' && (valEnd+1 >= len(fwd) || fwd[valEnd+1] == ' ' ||
@@ -2402,7 +2571,7 @@ func handleTypeTag(lex *jsonic.Lex, pnt *jsonic.Point, fwd string,
 		if valEnd < len(fwd) && fwd[valEnd] == q {
 			valEnd++
 		}
-		rawVal := fwd[valStart+1 : valEnd-1]
+		rawVal := jsSubstringLessOneUnit(fwd, valStart+1, valEnd)
 		result := applyTagConversion(tag, rawVal, tagHandles)
 		if tagAnchorName != "" {
 			anchors[tagAnchorName] = result
@@ -2909,56 +3078,46 @@ func handleDoubleQuotedString(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, ST
 				val += "\u2029"
 				i++
 				escapedUpTo = len(val)
-			case 'x':
-				if i+3 <= len(fwd) {
-					n, err := strconv.ParseInt(fwd[i+1:i+3], 16, 32)
-					if err == nil {
-						pushCodeUnit(n)
-						i += 3
-						escapedUpTo = len(val)
-					} else {
-						flushSurrogate()
-						val += string(esc)
-						i++
-					}
-				} else {
-					flushSurrogate()
-					val += string(esc)
-					i++
+			case 'x', 'u', 'U':
+				// `fwd.substring(i + 1, i + 1 + width)`: a FIXED WIDTH
+				// window, not a run of hexadecimal digits. It routinely
+				// holds the closing quote or the rest of the line, and the
+				// canonical handler reads a number out of it with
+				// `parseInt`, which takes the longest prefix it can. The
+				// width counts UTF-16 code units, and the cursor after it is
+				// `width + 1` units along whatever the window held.
+				width := 2
+				if esc == 'u' {
+					width = 4
+				} else if esc == 'U' {
+					width = 8
 				}
-			case 'u':
-				if i+5 <= len(fwd) {
-					n, err := strconv.ParseInt(fwd[i+1:i+5], 16, 32)
-					if err == nil {
-						pushCodeUnit(n)
-						i += 5
-						escapedUpTo = len(val)
-					} else {
-						flushSurrogate()
-						val += string(esc)
-						i++
+				digits, end, splitLow := utf16Window(fwd, i+1, width)
+				n := jsParseInt16(digits)
+				if esc == 'U' {
+					// `String.fromCodePoint` throws on anything that is not
+					// a code point, and the document is refused.
+					code, ok := jsFromCodePoint(n)
+					if !ok {
+						return lex.Bad("unexpected")
 					}
+					pushCodeUnit(code)
 				} else {
-					flushSurrogate()
-					val += string(esc)
-					i++
+					// `String.fromCharCode` takes `ToUint16` instead, so it
+					// never throws and an unreadable window is a NUL.
+					pushCodeUnit(jsToUint16(n))
 				}
-			case 'U':
-				if i+9 <= len(fwd) {
-					n, err := strconv.ParseInt(fwd[i+1:i+9], 16, 32)
-					if err == nil {
-						pushCodeUnit(n)
-						i += 9
-						escapedUpTo = len(val)
-					} else {
-						flushSurrogate()
-						val += string(esc)
-						i++
-					}
-				} else {
-					flushSurrogate()
-					val += string(esc)
-					i++
+				i = end
+				escapedUpTo = len(val)
+				if splitLow >= 0 {
+					// The canonical cursor lands one unit into the character
+					// the window cut, on its LOW surrogate, and the scan
+					// appends that unit as a character of its own. Put
+					// through the same pairing an escape goes through, it
+					// completes a high surrogate the escape left pending.
+					pushCodeUnit(splitLow)
+					_, size := utf8.DecodeRuneInString(fwd[i:])
+					i += size
 				}
 			case '\n', '\r':
 				// Escaped newline: line continuation.

@@ -40,3 +40,8 @@ a: !!seqx [1]	ERROR:unexpected
 a: !!python/object [1]	{"a":[1]}
 a: !!python/-1 [1]	{"a":[1]}
 a: !!seq [1]	{"a":[1]}
+a: !!str "	{"a":"\""}
+a: !!str '	{"a":"'"}
+a: !!str "ab	{"a":"a"}
+a: !!str "中文	{"a":"中"}
+a: !!str "é	{"a":""}

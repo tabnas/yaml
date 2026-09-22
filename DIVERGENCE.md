@@ -209,45 +209,26 @@ no UTF-8 encoding. They are pinned by
 
 Owner for the unpaired rows: the string model, as upstream.
 
-A MALFORMED escape is a Go defect in the same handler, recorded here so
-a shared fixture row is not added over it. The canonical window is a
-fixed width read with `parseInt`, and what it yields goes to
-`fromCharCode`, which takes `ToUint16` and turns a `NaN` into NUL, or to
-`fromCodePoint`, which THROWS and so refuses the document. This port
-matches both; Go drops the backslash and keeps the rest as text.
+The window itself is a fixed width read with `parseInt`, counted in
+UTF-16 CODE UNITS, and an astral character fills two of them, so a
+window can end INSIDE one. The canonical keeps the high surrogate in the
+window, where it is no hexadecimal digit and ends `parseInt`'s prefix,
+and the cursor then lands on the low surrogate, which the scan appends
+as a character of its own. That is one more unpaired surrogate neither
+port can hold, and both fold it the same way (`take_units` in
+`rs/src/lex.rs`, `utf16Window` in `go/yaml.go`). Only the fold differs:
+the window, the cursor and every window that ends on a character
+boundary are the canonical ones, and those are shared fixture rows in
+`test/spec/quoted-strings.tsv`, the refusals `String.fromCodePoint`
+throws for included.
 
 | input | TypeScript | Go | Rust |
 |---|---|---|---|
-| `a: "\x4"` | U+0004 | `"x4"` | U+0004 |
-| `a: "\xZZ"` | U+0000 | `"xZZ"` | U+0000 |
-| `a: "\u00"` | U+0000 | `"u00"` | U+0000 |
-| `a: "\U 0000041"` | `"A"` | `"U 0000041"` | `"A"` |
-| `a: "\U0010FFFF"` | U+10FFFF | U+10FFFF | U+10FFFF |
-| `a: "\U00110000"` | `ERROR:unexpected` | U+FFFD | `ERROR:unexpected` |
-| `a: "\UFFFFFFFF"` | `ERROR:unexpected` | `"UFFFFFFFF"` | `ERROR:unexpected` |
-
-Measured the same way as the table above. The Rust rows are pinned by
-`rs/tests/js_semantics_test.rs::a_hexadecimal_escape_window_is_parse_int`
-and
-`rs/tests/js_semantics_test.rs::an_escape_past_the_last_code_point_is_refused`.
-Owner: the Go port.
-
-The window itself is counted in UTF-16 CODE UNITS, and an astral
-character fills two of them, so a window can end INSIDE one. The
-canonical keeps the high surrogate in the window, where it is no
-hexadecimal digit and ends `parseInt`'s prefix, and the cursor then
-lands on the low surrogate, which the scan appends as a character of its
-own. That is one more unpaired surrogate this port cannot hold, and it
-folds the same way. Only the fold differs: the window and the cursor are
-the canonical ones.
-
-| input | TypeScript | Go | Rust |
-|---|---|---|---|
-| `a: "\xA` + U+1F600 + `Z"` | U+000A U+DE00 `Z` | `"xA"` + U+1F600 + `Z` | U+000A U+FFFD `Z` |
-| `a: "\u004` + U+1F600 + `Z"` | U+0004 U+DE00 `Z` | `"u004"` + U+1F600 + `Z` | U+0004 U+FFFD `Z` |
-| `a: "\U0000004` + U+1F600 + `Z"` | U+0004 U+DE00 `Z` | `"U0000004"` + U+1F600 + `Z` | U+0004 U+FFFD `Z` |
-| `a: "\U000D83D` + U+1F600 + `Z"` | U+1F600 `Z` | `"U000D83D"` + U+1F600 + `Z` | U+1F600 `Z` |
-| `a: "\xA` + U+4E2D + `Z"` | U+000A `Z` | `"xA"` + U+4E2D + `Z` | U+000A `Z` |
+| `a: "\xA` + U+1F600 + `Z"` | U+000A U+DE00 `Z` | U+000A U+FFFD `Z` | U+000A U+FFFD `Z` |
+| `a: "\u004` + U+1F600 + `Z"` | U+0004 U+DE00 `Z` | U+0004 U+FFFD `Z` | U+0004 U+FFFD `Z` |
+| `a: "\U0000004` + U+1F600 + `Z"` | U+0004 U+DE00 `Z` | U+0004 U+FFFD `Z` | U+0004 U+FFFD `Z` |
+| `a: "\U000D83D` + U+1F600 + `Z"` | U+1F600 `Z` | U+1F600 `Z` | U+1F600 `Z` |
+| `a: "\xA` + U+4E2D + `Z"` | U+000A `Z` | U+000A `Z` | U+000A `Z` |
 
 The last two rows are the controls, and the first of them is the one
 that is not a trade at all: where the escape itself names a high
@@ -259,30 +240,32 @@ above, and pinned by
 `rs/tests/escape_window_test.rs::a_window_cut_through_an_astral_character_folds_the_half_it_leaves`,
 whose control rows fail if the window or the cursor drifts and whose
 first three rows fail if the fold changes. Owner: the string model, as
-upstream, for the Rust column; the Go port for the Go column.
+upstream, for both ports.
 
-## An unterminated typed tag folds a split astral character (Rust)
+## An unterminated typed tag folds a split astral character (Go and Rust)
 
 Written with `U+XXXX` again, for the same reason.
 
 | input | TypeScript | Go | Rust |
 |---|---|---|---|
-| `a: !!str "` + U+1F600 | U+D83D | three U+FFFD | U+FFFD |
-| `a: !!str "a` + U+1F600 | `a` then U+D83D | `a` then three U+FFFD | `a` then U+FFFD |
-| `a: !!str '` + U+1F600 | U+D83D | three U+FFFD | U+FFFD |
-| `a: !!str "` + U+4E2D U+6587 | U+4E2D | U+4E2D then two U+FFFD | U+4E2D |
-| `a: !!str "` | `"` | `ERROR:internal` | `"` |
+| `a: !!str "` + U+1F600 | U+D83D | U+FFFD | U+FFFD |
+| `a: !!str "a` + U+1F600 | `a` then U+D83D | `a` then U+FFFD | `a` then U+FFFD |
+| `a: !!str '` + U+1F600 | U+D83D | U+FFFD | U+FFFD |
+| `a: !!str "` + U+4E2D U+6587 | U+4E2D | U+4E2D | U+4E2D |
+| `a: !!str "` | `"` | `"` | `"` |
 
 An unterminated quoted value after a typed tag ends at the end of the
 source, and the canonical handler then takes
 `fwd.substring(valStart + 1, valEnd - 1)`: everything up to the last
 UTF-16 CODE UNIT. An astral character is two of those units and one Rust
-scalar, so dropping one unit leaves a LONE HIGH SURROGATE, which a Rust
-string has no place for. This port folds it to the replacement
-character, which is what it does with every other unpaired surrogate.
-Only the astral rows differ; the rest of the table is the control, the
-reversed-index row included, where `substring` swaps its arguments and
-yields the quote itself.
+scalar or Go rune, so dropping one unit leaves a LONE HIGH SURROGATE,
+which neither string type has a place for. Both ports fold it to the
+replacement character, which is what they do with every other unpaired
+surrogate (`js_substring_less_one_unit` in `rs/src/lex.rs`,
+`jsSubstringLessOneUnit` in `go/yaml.go`). Only the astral rows differ;
+the rest of the table is the control, the reversed-index row included,
+where `substring` swaps its arguments and yields the quote itself, and
+the control rows are shared fixture rows in `test/spec/tags.tsv`.
 
 This is the same trade as "UTF-16 escapes in a double quoted scalar"
 above, in a different handler, and it has the same owner: the string
@@ -297,13 +280,6 @@ the value would retire this entry outright, and the astral half
 character with it. That is a change to `ts/src/yaml.ts` and to every
 port, so it is named here rather than made here.
 
-The Go column is a DEFECT of the same class and not a trade. Go steps
-back one BYTE rather than one unit, which cuts a multibyte character in
-half and leaves invalid UTF-8 in the value, and where the canonical
-`substring` would swap a reversed pair Go panics on the slice and the
-engine reports `internal`. It is written down here so a shared fixture
-row is not added over it before the repair lands.
-
 Provenance: the TypeScript column was produced by running
 `ts/src/yaml.ts` under Node 22; the Go column by `tabnasyaml.Parse` in
 `go/`; the Rust column by `tabnas_yaml::parse`. No row of
@@ -313,5 +289,4 @@ cell is UTF-8 text and a lone surrogate has no UTF-8 encoding. Pinned by
 whose control rows fail if the Basic Multilingual Plane cases drift and
 whose astral rows fail if the fold changes.
 
-Owner: the string model, as upstream, for the Rust rows; the Go port for
-the Go column.
+Owner: the string model, as upstream, for both ports.
