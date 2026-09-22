@@ -264,46 +264,6 @@ whose control rows fail if the window or the cursor drifts and whose
 first three rows fail if the fold changes. Owner: the string model, as
 upstream, for the Rust column; the Go port for the Go column.
 
-## A tab after a document marker inside a block scalar (Go)
-
-The canonical writes its `---` and `...` test out four times, and three
-of the four take a tab after the marker. The fourth, the one that stops
-a BLOCK SCALAR (`ts/src/yaml.ts` line 576), takes only a space, a line
-end or the end of the source, so a `---<TAB>` line stays inside the
-scalar there and ends the document everywhere else. The Go port routes
-all four through one `isDocMarker` helper, and that helper takes a tab.
-
-Each cell of the input column is one line, with a newline after each.
-
-| input | TypeScript | Go | Rust |
-|---|---|---|---|
-| `\|`, `x`, `---<TAB>y` | `"x\n---\ty\n"` | `["x\n", "y"]` | `"x\n---\ty\n"` |
-| `\|`, `---<TAB>y` | `"---\ty\n"` | `["", "y"]` | `"---\ty\n"` |
-| `\|`, `...<TAB>y` | `"...\ty\n"` | `["", "y"]` | `"...\ty\n"` |
-| `\|`, `--- y` | `["", "y"]` | the same | the same |
-| `a: 1`, `---<TAB>b: 2` | `[{"a":1},{"b":2}]` | the same | the same |
-
-The last two rows are the controls: a SPACE after the marker ends the
-scalar in all three, and the marker test OUTSIDE a block scalar takes a
-tab in all three, so the repair moves one site and not four.
-
-Provenance: measured 2026-09-21, the TypeScript column by running
-`ts/src/yaml.ts` under Node 22, the Go column by `tabnasyaml.Parse` in
-`go/`, the Rust column by `tabnas_yaml::parse`. Not a shared fixture
-row, because Go is red on the first three; the controls ARE expressible
-and agree, and they sit beside the divergent rows in
-`rs/tests/blank_predicates_test.rs::a_tab_after_a_document_marker_stays_inside_a_block_scalar`,
-which fails on repair as loudly as on regression.
-
-Owner: the Go port. The repair is a second helper beside `isDocMarker`
-that leaves the tab out, used at the one call site in the block-scalar
-handler (`go/yaml.go` line 1725). Delete this entry and move its rows
-into `test/spec/block-scalars.tsv` when that lands. A neighbouring Go
-site, the end-of-scalar lookahead at `go/yaml.go` line 1775, is a
-DIFFERENT defect of the same family: the canonical tests only the three
-marker characters there and says nothing about what follows, which is
-what `rs/src/text.rs` already does.
-
 ## An unterminated typed tag folds a split astral character (Rust)
 
 Written with `U+XXXX` again, for the same reason.

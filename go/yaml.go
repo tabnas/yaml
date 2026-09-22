@@ -498,6 +498,35 @@ func isDocMarker(s string, i int) bool {
 	return next == '\n' || next == '\r' || next == ' ' || next == '\t'
 }
 
+// isDocMarkerNoTab is the document-marker test the canonical writes for
+// the line that ENDS A BLOCK SCALAR (src/yaml.ts:576): `---` or `...` at
+// indent 0 followed by a newline, a space or the end of the source. It
+// is the one of the four marker tests that leaves the tab out, so a
+// `---<TAB>` line stays inside the scalar here and ends the document
+// everywhere else, which is what isDocMarker says.
+func isDocMarkerNoTab(s string, i int) bool {
+	if !isDocMarkerRun(s, i) {
+		return false
+	}
+	if i+3 >= len(s) {
+		return true
+	}
+	next := s[i+3]
+	return next == '\n' || next == '\r' || next == ' '
+}
+
+// isDocMarkerRun is three of `-` or three of `.` at i, with nothing said
+// about what follows: the shape the canonical tests when it decides
+// whether a block scalar's final newline is followed by a document
+// marker (src/yaml.ts:674).
+func isDocMarkerRun(s string, i int) bool {
+	if i+3 > len(s) {
+		return false
+	}
+	marker := s[i : i+3]
+	return marker == "---" || marker == "..."
+}
+
 // trimRight removes trailing whitespace from a string.
 func trimRight(s string) string {
 	return strings.TrimRight(s, " \t")
@@ -1759,9 +1788,12 @@ func handleBlockScalar(lex *jsonic.Lex, pnt *jsonic.Point, src, fwd string, ch b
 		if lineIndent < blockIndent {
 			break
 		}
-		if lineIndent == 0 && isDocMarker(fwd, pos) {
+		// The one marker test of the four that takes NO tab after the
+		// marker: `---<TAB>` stays inside the scalar (src/yaml.ts:576).
+		if lineIndent == 0 && isDocMarkerNoTab(fwd, pos) {
 			break
 		}
+
 		lineStartPos := pos + blockIndent
 		lineEnd := lineStartPos
 		for lineEnd < len(fwd) && fwd[lineEnd] != '\n' && fwd[lineEnd] != '\r' {
@@ -1809,7 +1841,9 @@ func handleBlockScalar(lex *jsonic.Lex, pnt *jsonic.Point, src, fwd string, ch b
 			nextLineIndent++
 			ni++
 		}
-		isNextDocMarker := nextLineIndent == 0 && isDocMarker(fwd, ni)
+		// Three marker characters and nothing about what follows them,
+		// as the canonical tests here (src/yaml.ts:674).
+		isNextDocMarker := nextLineIndent == 0 && isDocMarkerRun(fwd, ni)
 		if !isNextDocMarker {
 			endPos = lastNewlinePos
 			endRows = rows - 1
