@@ -14,6 +14,9 @@
 //! here, because the canonical matcher reaches `!!str` and friends before
 //! the text check ever sees them.
 
+use std::sync::OnceLock;
+
+use regex::Regex;
 use tabnas::{Context, Lexer, Rule, Token, Value};
 
 use crate::lex::{
@@ -93,8 +96,36 @@ fn check(src: &str, cursor: (usize, usize, usize), context: &mut Context) -> Opt
     Some(plain_scalar(src, fwd, cursor, context))
 }
 
+/// The shape the engine's number matcher accepts, under the jsonic
+/// options this plugin inherits: hexadecimal, octal and binary forms on,
+/// and `_` as the digit separator. It is the canonical lexer's own
+/// pattern, written out with that separator in place, so a separator is
+/// legal only where the engine allows one: anywhere after a base prefix,
+/// and between two digits of a decimal run.
+fn engine_number() -> &'static Regex {
+    static PATTERN: OnceLock<Regex> = OnceLock::new();
+    PATTERN.get_or_init(|| {
+        Regex::new(concat!(
+            "^[-+]?(?:",
+            "0(?:[xX][0-9a-fA-F_]+|[oO][0-7_]+|[bB][01_]+)",
+            "|",
+            r"\.?[0-9]+(?:[0-9_]*[0-9])?",
+            r"(?:\.(?:[0-9](?:[0-9_]*[0-9])?)?)?",
+            "(?:[eE][-+]?[0-9]+(?:[0-9_]*[0-9])?)?",
+            ")$"
+        ))
+        .expect("the number pattern is a literal and compiles")
+    })
+}
+
 /// The token the engine's number matcher would have produced: the run up
-/// to the next delimiter, when the whole of it reads as a number.
+/// to the next delimiter, when the whole of it has the engine's number
+/// shape.
+///
+/// The value is the engine's too. The canonical matcher strips the
+/// separators and applies the unary plus, and where that is `NaN` on a
+/// signed base-prefixed form, which `Number` does not accept, it
+/// converts the unsigned rest and applies the sign itself.
 fn number_run(src: &str, fwd: &str, cursor: (usize, usize, usize)) -> Option<Act> {
     let head = at(fwd, 0);
     let numeric = head == i32::from(b'-')
@@ -121,10 +152,18 @@ fn number_run(src: &str, fwd: &str, cursor: (usize, usize, usize)) -> Option<Act
         end += 1;
     }
     let run = &fwd[..end];
-    let number = crate::js_to_number(run)?;
-    if !number.is_finite() {
+    if !engine_number().is_match(run) {
         return None;
     }
+    let stripped: String = run.chars().filter(|character| *character != '_').collect();
+    let number = crate::js_to_number(&stripped).or_else(|| {
+        let (sign, rest) = match stripped.as_bytes().first() {
+            Some(b'-') => (-1.0, &stripped[1..]),
+            Some(b'+') => (1.0, &stripped[1..]),
+            _ => return None,
+        };
+        crate::js_to_number(rest).map(|value| sign * value)
+    })?;
     let next = advance_cols(src, cursor, end);
     Some(Act::moved(
         next,

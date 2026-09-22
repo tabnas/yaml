@@ -1830,6 +1830,13 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
                       // Skip leading whitespace on next line.
                       while (i < fwd.length && (fwd[i] === ' ' || fwd[i] === '\t')) i++
                     }
+                    else if (undefined === esc) {
+                      // A backslash as the last character of the source: there
+                      // is nothing to escape, and `val += fwd[i]` would append
+                      // the nine letters of `undefined`, text the input never
+                      // held. The scan ends with the value it has.
+                      i++
+                    }
                     else { val += esc; i++ }
                   } else if (fwd[i] === '\n' || fwd[i] === '\r') {
                     // Flow scalar line folding for double-quoted strings.

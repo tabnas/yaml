@@ -14,3 +14,16 @@ schema:\n  example: |\n    "clickId","date","placementId","market","merchantId",
 a: > x	{"a":"> x"}
 a: > x\n  y	{"a":"> x y"}
 a: | x\n  y	{"a":"| x y"}
+|\nx\n---\ty\n	"x\n---\ty\n"
+|\n---\ty\n	"---\ty\n"
+|\n...\ty\n	"...\ty\n"
+|\n--- y\n	["","y"]
+|\n---\n	["",null]
+|\n... y\n	["","y"]
+a: 1\n---\tb: 2\n	[{"a":1},{"b":2}]
+---\tb: 2\n	{"b":2}
+|\n x\n...z\n	["x\n","...z"]
+|\n x\n---z\n	["x\n","---z"]
+- |\n  x\n...z\n	[["x\n","...z"]]
+|\n x\n... z\n	["x\n","z"]
+|\n x\n...\n	"x\n"

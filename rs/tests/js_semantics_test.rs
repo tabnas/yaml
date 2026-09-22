@@ -10,12 +10,14 @@
 // has to spell the JavaScript rule out. `crate::js_space` is that
 // spelling for whitespace.
 //
-// None of these is a shared fixture row: the Go port answers each of
-// them with Go's native semantics, so a row in `test/spec/*.tsv` would
-// be red there. The comment on each case records what Go printed, and
-// `../DIVERGENCE.md` carries the two tables. The one case of this shape
-// that Go DOES get right is a fixture row, in
-// `test/spec/complex-keys.tsv`.
+// Most of these are ALSO shared fixture rows, in `test/spec/tags.tsv`,
+// `test/spec/quoted-strings.tsv`, `test/spec/special-chars-in-values.tsv`,
+// `test/spec/anchors-aliases.tsv` and `test/spec/directives.tsv`. They
+// were not, once: the Go port answered each of them with Go's native
+// semantics, and the Go answer each comment quotes is the one it gave
+// then, kept as the record of what the JavaScript rule changes. The rows
+// a fixture cannot carry, the ones whose TypeScript answer is a lone
+// UTF-16 surrogate, are the ones `../DIVERGENCE.md` still tables.
 
 mod common;
 
@@ -314,35 +316,6 @@ fn an_escape_past_the_last_code_point_is_refused() {
 }
 
 // ===== DIGITS THAT ARE NOT NUMBERS =====
-
-/// Trailing text after digits is one plain scalar inside a flow
-/// collection too, because the canonical takes that branch without
-/// asking about flow depth.
-///
-/// This is the one row group here where RUST AGREES WITH THE CANONICAL
-/// and Go does not, so the comment records Go rather than warning about
-/// it. `go/yaml.go` reaches its trailing-text branch only when the flow
-/// depth is zero, and that guard is older than
-/// [#54](https://github.com/tabnas/yaml/pull/54), which moved the branch
-/// ahead of the comma branch in both runtimes and kept each side's
-/// condition.
-///
-/// Measured 2026-09-21. `a: [12 x]`: TypeScript `{"a":["12 x"]}`, Go
-/// `{"a":[12,"x"]}`, Rust `{"a":["12 x"]}`. `a: {b: 12 x}`: TypeScript
-/// `{"a":{"b":"12 x"}}`, Go `{"a":{"b":12,"x":null}}`, Rust as
-/// TypeScript. Recorded in `../DIVERGENCE.md` under "Trailing text after
-/// digits inside a flow collection".
-#[test]
-fn digits_then_text_inside_a_flow_collection_stay_one_scalar() {
-    expect("a: [12 x]", j!({"a": ["12 x"]}));
-    expect("a: {b: 12 x}", j!({"a": {"b": "12 x"}}));
-
-    // Controls. A comma inside a flow collection still separates, and the
-    // same trailing text in BLOCK context agrees in all three runtimes,
-    // which is why those are shared fixture rows instead.
-    expect("a: [12, 3]", j!({"a": [12, 3]}));
-    expect("a: 12 x", j!({"a": "12 x"}));
-}
 
 /// A comma is not a separator in block context, so a value that starts
 /// with a digit and carries one is a plain scalar rather than a number

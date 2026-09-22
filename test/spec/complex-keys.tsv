@@ -3,3 +3,4 @@ input	expected	opts
 ? a b\n: 1	{"a b":1}
 1: one\n2: two	{"1":"one","2":"two"}
 ? !!é value\n: 1	{"!!é value":1}
+? !!int﻿3\n: v	{"3":"v"}

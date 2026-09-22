@@ -12,3 +12,9 @@ a: some {text} here	{"a":"some {text} here"}
 {'s':'it''s #1','t':2}	{"s":"it's #1","t":2}
 a: "v #1"\nb: 2	{"a":"v #1","b":2}
 a: "x" # note\nb: 2	{"a":"x","b":2}
+﻿	null
+ ﻿\n﻿ 	null
+	""
+a: x﻿	{"a":"x"}
+a: x 	{"a":"x"}
+a: x	{"a":"x"}

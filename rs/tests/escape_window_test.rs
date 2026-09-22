@@ -18,10 +18,12 @@
 // TypeScript column by running `ts/src/yaml.ts` under Node 22 against
 // `@tabnas/parser` and `@tabnas/jsonic` from `/home/user/csv/ts`, the Go
 // column by `tabnasyaml.Parse` in `go/`, the Rust column by
-// `tabnas_yaml::parse`. None of these is a shared fixture row: Go does
-// not decode `\x`, `\u` or `\U` at all when the window holds anything
-// but hexadecimal digits, so every row here is red there. The Go answers
-// are recorded in the comments and in `../DIVERGENCE.md`.
+// `tabnas_yaml::parse`. The rows whose answer every runtime can hold are
+// ALSO shared fixture rows, in `test/spec/quoted-strings.tsv`; they were
+// not, once, because Go did not decode `\x`, `\u` or `\U` at all when
+// the window held anything but hexadecimal digits, and the Go answer each
+// comment quotes is the one it gave then. The rows whose TypeScript
+// answer is a lone surrogate stay here and in `../DIVERGENCE.md`.
 
 mod common;
 
@@ -116,17 +118,19 @@ fn a_window_cut_through_an_astral_character_folds_the_half_it_leaves() {
     expect("a: \"\\xA\u{4e2d}Z\"", j!({"a": "\nZ"}));
 }
 
-/// A backslash as the very last character of the source. The canonical
-/// reads `fwd[i]` past the end, gets `undefined`, and `val += undefined`
-/// puts the nine letters of that word into the value. It is a wart, and
-/// it is the canonical answer.
+/// A backslash as the very last character of the source escapes
+/// nothing, and the value ends where the source does. The canonical
+/// port once read `fwd[i]` past the end and appended the nine letters of
+/// `undefined`, text the input never held; that was a TypeScript defect,
+/// and under ADR-13 it was repaired there rather than copied here. The
+/// rows are shared fixtures in `test/spec/quoted-strings.tsv` as well.
 ///
-/// Measured. `a: "\`: TypeScript `{"a":"undefined"}`, Go `{"a":""}`,
-/// Rust `{"a":"undefined"}`.
+/// Measured before the repair. `a: "\`: TypeScript `{"a":"undefined"}`,
+/// Go `{"a":""}`, Rust `{"a":"undefined"}`. Go was right.
 #[test]
-fn a_backslash_at_the_end_of_the_source_appends_the_word_undefined() {
-    expect("a: \"\\", j!({"a": "undefined"}));
-    expect("a: \"x\\", j!({"a": "xundefined"}));
+fn a_backslash_at_the_end_of_the_source_appends_nothing() {
+    expect("a: \"\\", j!({"a": ""}));
+    expect("a: \"x\\", j!({"a": "x"}));
 
     // The controls: a backslash with anything at all after it takes the
     // ordinary escape path instead.

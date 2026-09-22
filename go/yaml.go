@@ -42,11 +42,21 @@ type MetaResult struct {
 
 // Hoisted regex constants — compiling these at package init avoids
 // recompiling them inside per-token hot paths.
+//
+// Each `\s` and `\S` the canonical regexps carry is JAVASCRIPT's class,
+// which is not RE2's: RE2's `\s` is the five ASCII blanks, where the
+// canonical one is the WhiteSpace and LineTerminator productions. The
+// difference decided parses (`%TAG<U+FEFF>!! ...` registers a handle
+// canonically and did not here), so the class is written out once, as
+// jsSpaceClass, and every pattern uses it. `\b` and `\w` are ASCII in
+// both engines and need no help. The canonical `.` stops at a line
+// terminator, which RE2's does not, so the explicit-key pattern spells
+// that out too.
 var (
-	structTagPrefixRe  = regexp.MustCompile(`^!!(seq|map|omap|set|pairs|binary|ordered|python/\S*)`)
-	yamlTagDirectiveRe = regexp.MustCompile(`^%TAG\s+(\S+)\s+(\S+)`)
+	structTagPrefixRe  = regexp.MustCompile(`^!!(seq|map|omap|set|pairs|binary|ordered|python/[^` + jsSpaceClass + `]*)\b`)
+	yamlTagDirectiveRe = regexp.MustCompile(`^%TAG[` + jsSpaceClass + `]+([^` + jsSpaceClass + `]+)[` + jsSpaceClass + `]+([^` + jsSpaceClass + `]+)`)
 	// !!type tag prefix on an explicit (`? `) key (mirrors src/yaml.ts:1457).
-	explicitKeyTagRe = regexp.MustCompile(`^!!(\w+)\s+(.*)$`)
+	explicitKeyTagRe = regexp.MustCompile(`^!!(\w+)[` + jsSpaceClass + `]+([^\n\r\x{2028}\x{2029}]*)$`)
 	// Block scalar indicator used as an explicit key (mirrors src/yaml.ts:1482).
 	explicitKeyBlockScalarRe = regexp.MustCompile(`^([|>])([+-]?)([0-9]?)$`)
 )
@@ -246,43 +256,96 @@ func isYamlValue(text string) (any, bool) {
 	return val, ok
 }
 
-// parseYamlNumber attempts to parse text as a YAML number.
-// Returns the number and true if successful, or 0 and false if not a number.
+// parseYamlNumber is the canonical `+text`, which is `Number(text)`: the
+// whole trimmed text has to be a StrNumericLiteral. That is narrower than
+// strconv in some places (`inf`, `nan` and `1_000` are not numbers to
+// JavaScript) and wider in one (leading and trailing JavaScript
+// whitespace is skipped, U+FEFF included). Returns the number and true,
+// or 0 and false where `Number` gives NaN.
 func parseYamlNumber(text string) (float64, bool) {
-	if text == "" {
+	t := jsTrim(text)
+	if t == "" {
+		return 0, true
+	}
+	if len(t) > 2 && t[0] == '0' {
+		radix := 0
+		switch t[1] {
+		case 'x', 'X':
+			radix = 16
+		case 'o', 'O':
+			radix = 8
+		case 'b', 'B':
+			radix = 2
+		}
+		if radix != 0 {
+			n, err := strconv.ParseUint(t[2:], radix, 64)
+			if err != nil || strings.ContainsAny(t[2:], "_+-") {
+				return 0, false
+			}
+			return float64(n), true
+		}
+	}
+	sign := 1.0
+	body := t
+	if body[0] == '-' {
+		sign = -1
+		body = body[1:]
+	} else if body[0] == '+' {
+		body = body[1:]
+	}
+	if body == "Infinity" {
+		return math.Inf(int(sign)), true
+	}
+	if !isJSDecimalLiteral(body) {
 		return 0, false
 	}
-	// Try standard float parsing
-	num, err := strconv.ParseFloat(text, 64)
-	if err == nil {
-		return num, true
+	n, err := strconv.ParseFloat(strings.TrimSuffix(body, "."), 64)
+	if err != nil {
+		// Only an overflow can fail here, and JavaScript answers Infinity.
+		if strings.Contains(err.Error(), "range") {
+			return sign * math.Inf(1), true
+		}
+		return 0, false
 	}
-	// Try integer formats: hex, octal, binary
-	if strings.HasPrefix(text, "0x") || strings.HasPrefix(text, "0X") {
-		if n, err := strconv.ParseInt(text[2:], 16, 64); err == nil {
-			return float64(n), true
+	return sign * n, true
+}
+
+// isJSDecimalLiteral is ECMAScript's StrUnsignedDecimalLiteral: digits
+// with an optional fraction and exponent, or a fraction alone. No
+// separators, no `inf`, no `nan`, and an exponent needs a digit.
+func isJSDecimalLiteral(body string) bool {
+	i := 0
+	integral := 0
+	for i < len(body) && body[i] >= '0' && body[i] <= '9' {
+		i++
+		integral++
+	}
+	fractional := 0
+	if i < len(body) && body[i] == '.' {
+		i++
+		for i < len(body) && body[i] >= '0' && body[i] <= '9' {
+			i++
+			fractional++
 		}
 	}
-	if strings.HasPrefix(text, "0o") || strings.HasPrefix(text, "0O") {
-		if n, err := strconv.ParseInt(text[2:], 8, 64); err == nil {
-			return float64(n), true
+	if integral == 0 && fractional == 0 {
+		return false
+	}
+	if i < len(body) && (body[i] == 'e' || body[i] == 'E') {
+		i++
+		if i < len(body) && (body[i] == '+' || body[i] == '-') {
+			i++
+		}
+		exponent := 0
+		for i < len(body) && body[i] >= '0' && body[i] <= '9' {
+			i++
+			exponent++
+		}
+		if exponent == 0 {
+			return false
 		}
 	}
-	if strings.HasPrefix(text, "0b") || strings.HasPrefix(text, "0B") {
-		if n, err := strconv.ParseInt(text[2:], 2, 64); err == nil {
-			return float64(n), true
-		}
-	}
-	// Negative hex/oct/bin
-	if len(text) > 1 && text[0] == '-' {
-		if num, ok := parseYamlNumber(text[1:]); ok {
-			return -num, true
-		}
-	}
-	if len(text) > 1 && text[0] == '+' {
-		return parseYamlNumber(text[1:])
-	}
-	return 0, false
+	return i == len(body)
 }
 
 // deepCopy performs a structural deep copy of a value, preserving both the
@@ -498,9 +561,347 @@ func isDocMarker(s string, i int) bool {
 	return next == '\n' || next == '\r' || next == ' ' || next == '\t'
 }
 
-// trimRight removes trailing whitespace from a string.
+// isDocMarkerNoTab is the document-marker test the canonical writes for
+// the line that ENDS A BLOCK SCALAR (src/yaml.ts:576): `---` or `...` at
+// indent 0 followed by a newline, a space or the end of the source. It
+// is the one of the four marker tests that leaves the tab out, so a
+// `---<TAB>` line stays inside the scalar here and ends the document
+// everywhere else, which is what isDocMarker says.
+func isDocMarkerNoTab(s string, i int) bool {
+	if !isDocMarkerRun(s, i) {
+		return false
+	}
+	if i+3 >= len(s) {
+		return true
+	}
+	next := s[i+3]
+	return next == '\n' || next == '\r' || next == ' '
+}
+
+// isDocMarkerRun is three of `-` or three of `.` at i, with nothing said
+// about what follows: the shape the canonical tests when it decides
+// whether a block scalar's final newline is followed by a document
+// marker (src/yaml.ts:674).
+func isDocMarkerRun(s string, i int) bool {
+	if i+3 > len(s) {
+		return false
+	}
+	marker := s[i : i+3]
+	return marker == "---" || marker == "..."
+}
+
+// isJSSpace reports whether r is whitespace to JAVASCRIPT: the WhiteSpace
+// and LineTerminator productions, which is the set `\s`,
+// `String.prototype.trim`, `Number`, `parseInt` and `parseFloat` all skip
+// in the canonical plugin. It is not unicode.IsSpace, and the two differ
+// in both directions: U+0085 is a space to Go and not to JavaScript, and
+// U+FEFF is a space to JavaScript and not to Go. Both decide scalars.
+func isJSSpace(r rune) bool {
+	switch r {
+	case '\t', '\n', '\v', '\f', '\r', ' ',
+		0x00A0, 0x1680, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000, 0xFEFF:
+		return true
+	}
+	return 0x2000 <= r && r <= 0x200A
+}
+
+// jsSpaceClass is the same set as the body of a regexp character class,
+// for the patterns that stand in for a canonical `\s` or `\S`.
+const jsSpaceClass = `\t\n\v\f\r \x{00A0}\x{1680}\x{2000}-\x{200A}\x{2028}\x{2029}\x{202F}\x{205F}\x{3000}\x{FEFF}`
+
+// trimRight is the canonical `.replace(/\s+$/, "")`, the trailing-space
+// strip every scalar handler ends with: it strips JavaScript's whitespace,
+// not Go's and not only the two ASCII blanks.
 func trimRight(s string) string {
-	return strings.TrimRight(s, " \t")
+	return strings.TrimRightFunc(s, isJSSpace)
+}
+
+// jsTrim is `String.prototype.trim`, over the same set.
+func jsTrim(s string) string {
+	return strings.TrimFunc(s, isJSSpace)
+}
+
+// utf16Window is `text.substring(from, from+count)` where `count` is a
+// number of UTF-16 CODE UNITS, which is what the canonical fixed-width
+// escape window is counted in, and `end` is where the scan resumes: the
+// byte offset `count` units past `from`.
+//
+// Counting bytes or runes reads the same window only while every
+// character in it is one code unit. An astral character is TWO units
+// and one rune, so a window holding one takes too much text and leaves
+// the cursor too far along; a window whose LAST unit falls inside one
+// cuts the character in half. The canonical keeps the HIGH surrogate in
+// the window, where it is no hexadecimal digit and so ends `parseInt`'s
+// prefix exactly where stopping short of the character does, and leaves
+// the LOW surrogate for the next round of the scan, which appends it as
+// a character of its own. `splitLow` hands that unit back, because a
+// byte offset cannot point between two surrogates; it is -1 when the
+// window ends on a character boundary.
+func utf16Window(text string, from, count int) (digits string, end int, splitLow int64) {
+	if from > len(text) {
+		from = len(text)
+	}
+	units := 0
+	offset := 0
+	for from+offset < len(text) {
+		r, size := utf8.DecodeRuneInString(text[from+offset:])
+		width := 1
+		if r >= 0x10000 {
+			width = 2
+		}
+		if units+width > count {
+			if width == 2 && units < count {
+				return text[from : from+offset], from + offset, int64(0xDC00 + ((r - 0x10000) & 0x3FF))
+			}
+			return text[from : from+offset], from + offset, -1
+		}
+		units += width
+		offset += size
+		if units == count {
+			break
+		}
+	}
+	return text[from : from+offset], from + offset, -1
+}
+
+// jsParseInt16 is `parseInt(s, 16)`: skip JavaScript's whitespace, take
+// an optional sign and an optional `0x`, then the longest run of
+// hexadecimal digits, and answer NaN when there is no digit at all.
+func jsParseInt16(s string) float64 {
+	t := strings.TrimLeftFunc(s, isJSSpace)
+	i := 0
+	negative := false
+	if i < len(t) && (t[i] == '+' || t[i] == '-') {
+		negative = t[i] == '-'
+		i++
+	}
+	if i+1 < len(t) && t[i] == '0' && (t[i+1] == 'x' || t[i+1] == 'X') {
+		i += 2
+	}
+	start := i
+	value := 0.0
+	for i < len(t) {
+		d := hexDigitValue(t[i])
+		if d < 0 {
+			break
+		}
+		value = value*16 + float64(d)
+		i++
+	}
+	if i == start {
+		return math.NaN()
+	}
+	if negative {
+		return -value
+	}
+	return value
+}
+
+func hexDigitValue(b byte) int {
+	switch {
+	case '0' <= b && b <= '9':
+		return int(b - '0')
+	case 'a' <= b && b <= 'f':
+		return int(b-'a') + 10
+	case 'A' <= b && b <= 'F':
+		return int(b-'A') + 10
+	}
+	return -1
+}
+
+// jsToUint16 is the `ToUint16` that `String.fromCharCode` applies to its
+// argument: NaN and the infinities become zero, and anything else is
+// truncated and taken modulo 65536. It never fails, so an unreadable
+// window is a NUL and not a refusal.
+func jsToUint16(n float64) int64 {
+	if math.IsNaN(n) || math.IsInf(n, 0) {
+		return 0
+	}
+	t := math.Trunc(n)
+	m := math.Mod(t, 65536)
+	if m < 0 {
+		m += 65536
+	}
+	return int64(m)
+}
+
+// jsFromCodePoint is the range check `String.fromCodePoint` makes: it
+// THROWS a RangeError for anything that is not a code point, and the
+// canonical matcher does not catch it, so the token is never produced
+// and the document is refused. `ok` false stands for the throw.
+func jsFromCodePoint(n float64) (code int64, ok bool) {
+	if math.IsNaN(n) || math.IsInf(n, 0) || math.Trunc(n) != n {
+		return 0, false
+	}
+	if n < 0 || n > 0x10FFFF {
+		return 0, false
+	}
+	return int64(n), true
+}
+
+// jsSubstringLessOneUnit is `text.substring(from, to - 1)` where `to` is
+// a byte offset standing in for a UTF-16 code-unit index, so the step
+// back is ONE CODE UNIT. `substring` clamps after the subtraction and
+// swaps a reversed pair, and both decide values: a typed tag's quoted
+// value scan that overran the end by one leaves `to - 1` at the end,
+// and an empty value leaves the pair the wrong way round, where the
+// canonical yields the opening quote.
+//
+// One unit back from just past an astral character lands BETWEEN its two
+// surrogates, and the canonical keeps the high one. A Go string has no
+// place for an unpaired surrogate, so this folds it to the replacement
+// character, as `pushCodeUnit` folds an escape naming one. A character
+// inside the Basic Multilingual Plane is one unit and one rune, so
+// stepping back drops the whole of it in both runtimes. Slicing at
+// `to-1` directly did neither: it cut a multibyte character and left
+// invalid UTF-8 in the value, and it panicked on the reversed pair.
+func jsSubstringLessOneUnit(text string, from, to int) string {
+	unit := to - 1
+	if unit < 0 {
+		unit = 0
+	}
+	end := runeFloor(text, unit)
+	splitAstral := false
+	if unit < len(text) && end < unit {
+		_, size := utf8.DecodeRuneInString(text[end:])
+		splitAstral = size == 4
+	}
+	from = runeFloor(text, from)
+	lo, hi := from, end
+	if lo > hi {
+		lo, hi = hi, lo
+	}
+	out := text[lo:hi]
+	if splitAstral && from <= end {
+		out += "\uFFFD"
+	}
+	return out
+}
+
+// runeFloor is `i` clamped into `text` and moved back to the start of
+// the character it falls inside.
+func runeFloor(text string, i int) int {
+	if i >= len(text) {
+		return len(text)
+	}
+	for i > 0 && !utf8.RuneStart(text[i]) {
+		i--
+	}
+	return i
+}
+
+// jsParseInt is `parseInt(s, 10)`: skip JavaScript's whitespace, take an
+// optional sign and the longest run of decimal digits, and answer NaN
+// when there is no digit. The tag has still been applied when it
+// answers NaN, which is why `!!int xyz` is a number and not the text.
+func jsParseInt(s string) float64 {
+	t := strings.TrimLeftFunc(s, isJSSpace)
+	i := 0
+	if i < len(t) && (t[i] == '+' || t[i] == '-') {
+		i++
+	}
+	start := i
+	for i < len(t) && t[i] >= '0' && t[i] <= '9' {
+		i++
+	}
+	if i == start {
+		return math.NaN()
+	}
+	n, err := strconv.ParseFloat(t[:i], 64)
+	if err != nil {
+		return math.NaN()
+	}
+	return n
+}
+
+// jsParseFloat is `parseFloat(s)`: the same skip, then the longest
+// prefix that is a StrDecimalLiteral, `Infinity` included, and NaN when
+// nothing at all reads as one.
+func jsParseFloat(s string) float64 {
+	t := strings.TrimLeftFunc(s, isJSSpace)
+	i := 0
+	negative := false
+	if i < len(t) && (t[i] == '+' || t[i] == '-') {
+		negative = t[i] == '-'
+		i++
+	}
+	if strings.HasPrefix(t[i:], "Infinity") {
+		if negative {
+			return math.Inf(-1)
+		}
+		return math.Inf(1)
+	}
+	digits := 0
+	for i < len(t) && t[i] >= '0' && t[i] <= '9' {
+		i++
+		digits++
+	}
+	if i < len(t) && t[i] == '.' {
+		i++
+		for i < len(t) && t[i] >= '0' && t[i] <= '9' {
+			i++
+			digits++
+		}
+	}
+	if digits == 0 {
+		return math.NaN()
+	}
+	mantissaEnd := i
+	if i < len(t) && (t[i] == 'e' || t[i] == 'E') {
+		probe := i + 1
+		if probe < len(t) && (t[probe] == '+' || t[probe] == '-') {
+			probe++
+		}
+		exponentStart := probe
+		for probe < len(t) && t[probe] >= '0' && t[probe] <= '9' {
+			probe++
+		}
+		if probe > exponentStart {
+			i = probe
+		}
+	}
+	if i < mantissaEnd {
+		i = mantissaEnd
+	}
+	n, err := strconv.ParseFloat(strings.TrimSuffix(t[:i], "."), 64)
+	if err != nil {
+		return math.NaN()
+	}
+	return n
+}
+
+// childNode is the node of a rule's child, read from the END of the
+// child's rotation chain.
+//
+// A rule that replaces itself (`r: list`, `r: elem`) leaves the original
+// rule in `r.Child` with the new one hanging off its `Next`. A JavaScript
+// array aliases by reference, so the canonical port reads `rule.child.node`
+// and sees every element the rotated rules appended. A Go slice is a
+// header, and the engine's append writes the grown slice back through
+// `r.Parent.Node`, which is the ROTATED rule's parent, never the original
+// child: the original keeps the one-element header the implicit-list
+// promotion gave it, and a reader of `r.Child.Node` sees `["a"]` for
+// `"a" "b"`. Every closure in this plugin that reads a child's node goes
+// through here so it sees the whole value.
+func childNode(r *jsonic.Rule) any {
+	child := r.Child
+	if child == nil || child == jsonic.NoRule {
+		return jsonic.Undefined
+	}
+	if final := chainEnd(child); final != child && !jsonic.IsUndefined(final.Node) {
+		return final.Node
+	}
+	return child.Node
+}
+
+// chainEnd is the last rule a rotation chain replaced `rule` with, or
+// `rule` itself when it never rotated.
+func chainEnd(rule *jsonic.Rule) *jsonic.Rule {
+	final := rule
+	for final.Next != nil && final.Next != jsonic.NoRule && final.Next.Prev == final {
+		final = final.Next
+	}
+	return final
 }
 
 // formatKey converts a value to a string suitable for use as a map key.
@@ -660,7 +1061,10 @@ func Yaml(j *jsonic.Jsonic, opts map[string]any) error {
 			// Empty / whitespace-only / comments-only source: emit one #VL
 			// null so the parser yields nil rather than a parse error.
 			stripped := stripCommentLines(src)
-			if strings.TrimSpace(src) == "" || strings.TrimSpace(stripped) == "" {
+			// `src.trim() === '' || stripped === ''`, and `trim` is
+			// JavaScript's: a source of one byte-order mark is empty here,
+			// and one of a next-line character is a scalar.
+			if jsTrim(src) == "" || jsTrim(stripped) == "" {
 				pnt.Len = 0
 				tkn := lex.Token("#VL", VL, nil, "")
 				pnt.SI = 0
@@ -805,7 +1209,10 @@ func Yaml(j *jsonic.Jsonic, opts map[string]any) error {
 							}
 							ei++
 						}
-						raw := strings.TrimRight(peek[:ei], " \t")
+						// `peek.substring(0, ei).trim()`: both ends, and
+						// JavaScript's set, so a byte-order mark before the
+						// scalar is not part of what the alias resolves to.
+						raw := jsTrim(peek[:ei])
 						if len(raw) > 0 {
 							scalarVal = raw
 						}
@@ -1380,9 +1787,12 @@ func Yaml(j *jsonic.Jsonic, opts map[string]any) error {
 		streamMeta = append(streamMeta, streamCurMeta)
 		streamCurMeta = nil
 	}
+	// The document is read through childNode: a top-level implicit list
+	// (`"a" "b"`) rotates the pushed `val` into a `list`, and only the end
+	// of that chain holds every element.
 	pushChildDoc := func(r *jsonic.Rule) {
-		if r.Child != nil && r.Child != jsonic.NoRule && !jsonic.IsUndefined(r.Child.Node) {
-			streamDocs = append(streamDocs, r.Child.Node)
+		if node := childNode(r); !jsonic.IsUndefined(node) {
+			streamDocs = append(streamDocs, node)
 		} else {
 			streamDocs = append(streamDocs, nil)
 		}
@@ -1394,8 +1804,8 @@ func Yaml(j *jsonic.Jsonic, opts map[string]any) error {
 		flushCurMeta(ended)
 	}
 	finalizeStream := func(r *jsonic.Rule, ctx *jsonic.Context) {
-		if r.Child != nil && r.Child != jsonic.NoRule && !jsonic.IsUndefined(r.Child.Node) {
-			streamDocs = append(streamDocs, r.Child.Node)
+		if node := childNode(r); !jsonic.IsUndefined(node) {
+			streamDocs = append(streamDocs, node)
 			flushCurMeta(false)
 		} else if streamCurMeta != nil {
 			// The final document was explicitly opened (a `---` / `%TAG`
@@ -1722,7 +2132,9 @@ func handleBlockScalar(lex *jsonic.Lex, pnt *jsonic.Point, src, fwd string, ch b
 		if lineIndent < blockIndent {
 			break
 		}
-		if lineIndent == 0 && isDocMarker(fwd, pos) {
+		// The one marker test of the four that takes NO tab after the
+		// marker: `---<TAB>` stays inside the scalar (src/yaml.ts:576).
+		if lineIndent == 0 && isDocMarkerNoTab(fwd, pos) {
 			break
 		}
 		lineStartPos := pos + blockIndent
@@ -1772,7 +2184,9 @@ func handleBlockScalar(lex *jsonic.Lex, pnt *jsonic.Point, src, fwd string, ch b
 			nextLineIndent++
 			ni++
 		}
-		isNextDocMarker := nextLineIndent == 0 && isDocMarker(fwd, ni)
+		// Three marker characters and nothing about what follows them,
+		// as the canonical tests here (src/yaml.ts:674).
+		isNextDocMarker := nextLineIndent == 0 && isDocMarkerRun(fwd, ni)
 		if !isNextDocMarker {
 			endPos = lastNewlinePos
 			endRows = rows - 1
@@ -1873,7 +2287,7 @@ func handleTagInTextCheck(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, tagHan
 		if valEnd < len(fwd) && fwd[valEnd] == q {
 			valEnd++
 		}
-		rawVal = fwd[valStart+1 : valEnd-1]
+		rawVal = jsSubstringLessOneUnit(fwd, valStart+1, valEnd)
 	} else {
 		for valEnd < len(fwd) && fwd[valEnd] != '\n' && fwd[valEnd] != '\r' {
 			if fwd[valEnd] == ':' && (valEnd+1 >= len(fwd) || fwd[valEnd+1] == ' ' ||
@@ -2157,7 +2571,7 @@ func handleTypeTag(lex *jsonic.Lex, pnt *jsonic.Point, fwd string,
 		if valEnd < len(fwd) && fwd[valEnd] == q {
 			valEnd++
 		}
-		rawVal := fwd[valStart+1 : valEnd-1]
+		rawVal := jsSubstringLessOneUnit(fwd, valStart+1, valEnd)
 		result := applyTagConversion(tag, rawVal, tagHandles)
 		if tagAnchorName != "" {
 			anchors[tagAnchorName] = result
@@ -2544,6 +2958,39 @@ func handleDoubleQuotedString(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, ST
 	rows := 0
 	lastNewlineEnd := 0
 
+	// A `\u` or `\U` escape naming a HIGH surrogate, held back until the
+	// next escape either completes the pair or does not. The canonical
+	// handler appends UTF-16 code units (`String.fromCharCode`, and
+	// `fromCodePoint` gives the same unit for a surrogate value), so
+	// `\uD83D\uDE00` is one astral character there and not two escapes.
+	// A Go string holds UTF-8, so the pair is combined here before it is
+	// written, and a surrogate that never finds its partner becomes
+	// U+FFFD, which is what `string(rune(n))` made of every one before.
+	pendingHigh := int64(-1)
+	flushSurrogate := func() {
+		if pendingHigh >= 0 {
+			val += "\uFFFD"
+			pendingHigh = -1
+		}
+	}
+	pushCodeUnit := func(n int64) {
+		switch {
+		case 0xD800 <= n && n <= 0xDBFF:
+			flushSurrogate()
+			pendingHigh = n
+		case 0xDC00 <= n && n <= 0xDFFF:
+			if pendingHigh >= 0 {
+				val += string(rune(0x10000 + (pendingHigh-0xD800)<<10 + (n - 0xDC00)))
+				pendingHigh = -1
+			} else {
+				val += "\uFFFD"
+			}
+		default:
+			flushSurrogate()
+			val += string(rune(n))
+		}
+	}
+
 	for i < len(fwd) && fwd[i] != '"' {
 		if fwd[i] == '\\' {
 			i++
@@ -2551,6 +2998,11 @@ func handleDoubleQuotedString(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, ST
 				break
 			}
 			esc := fwd[i]
+			// Anything but a code-unit escape or a line continuation
+			// separates a high surrogate from the low one it needed.
+			if esc != 'x' && esc != 'u' && esc != 'U' && esc != '\n' && esc != '\r' {
+				flushSurrogate()
+			}
 			switch esc {
 			case 'n':
 				val += "\n"
@@ -2626,50 +3078,46 @@ func handleDoubleQuotedString(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, ST
 				val += "\u2029"
 				i++
 				escapedUpTo = len(val)
-			case 'x':
-				if i+3 <= len(fwd) {
-					n, err := strconv.ParseInt(fwd[i+1:i+3], 16, 32)
-					if err == nil {
-						val += string(rune(n))
-						i += 3
-						escapedUpTo = len(val)
-					} else {
-						val += string(esc)
-						i++
-					}
-				} else {
-					val += string(esc)
-					i++
+			case 'x', 'u', 'U':
+				// `fwd.substring(i + 1, i + 1 + width)`: a FIXED WIDTH
+				// window, not a run of hexadecimal digits. It routinely
+				// holds the closing quote or the rest of the line, and the
+				// canonical handler reads a number out of it with
+				// `parseInt`, which takes the longest prefix it can. The
+				// width counts UTF-16 code units, and the cursor after it is
+				// `width + 1` units along whatever the window held.
+				width := 2
+				if esc == 'u' {
+					width = 4
+				} else if esc == 'U' {
+					width = 8
 				}
-			case 'u':
-				if i+5 <= len(fwd) {
-					n, err := strconv.ParseInt(fwd[i+1:i+5], 16, 32)
-					if err == nil {
-						val += string(rune(n))
-						i += 5
-						escapedUpTo = len(val)
-					} else {
-						val += string(esc)
-						i++
+				digits, end, splitLow := utf16Window(fwd, i+1, width)
+				n := jsParseInt16(digits)
+				if esc == 'U' {
+					// `String.fromCodePoint` throws on anything that is not
+					// a code point, and the document is refused.
+					code, ok := jsFromCodePoint(n)
+					if !ok {
+						return lex.Bad("unexpected")
 					}
+					pushCodeUnit(code)
 				} else {
-					val += string(esc)
-					i++
+					// `String.fromCharCode` takes `ToUint16` instead, so it
+					// never throws and an unreadable window is a NUL.
+					pushCodeUnit(jsToUint16(n))
 				}
-			case 'U':
-				if i+9 <= len(fwd) {
-					n, err := strconv.ParseInt(fwd[i+1:i+9], 16, 32)
-					if err == nil {
-						val += string(rune(n))
-						i += 9
-						escapedUpTo = len(val)
-					} else {
-						val += string(esc)
-						i++
-					}
-				} else {
-					val += string(esc)
-					i++
+				i = end
+				escapedUpTo = len(val)
+				if splitLow >= 0 {
+					// The canonical cursor lands one unit into the character
+					// the window cut, on its LOW surrogate, and the scan
+					// appends that unit as a character of its own. Put
+					// through the same pairing an escape goes through, it
+					// completes a high surrogate the escape left pending.
+					pushCodeUnit(splitLow)
+					_, size := utf8.DecodeRuneInString(fwd[i:])
+					i += size
 				}
 			case '\n', '\r':
 				// Escaped newline: line continuation.
@@ -2687,6 +3135,7 @@ func handleDoubleQuotedString(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, ST
 				i++
 			}
 		} else if fwd[i] == '\n' || fwd[i] == '\r' {
+			flushSurrogate()
 			// Flow scalar line folding.
 			trimTo := len(val)
 			for trimTo > escapedUpTo && (val[trimTo-1] == ' ' || val[trimTo-1] == '\t') {
@@ -2720,10 +3169,12 @@ func handleDoubleQuotedString(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, ST
 			// survive intact. `string(byte)` would treat the byte value as
 			// a Unicode codepoint and re-encode it as UTF-8, mangling any
 			// non-ASCII byte that is part of a multi-byte sequence.
+			flushSurrogate()
 			val += fwd[i : i+1]
 			i++
 		}
 	}
+	flushSurrogate()
 	if i < len(fwd) && fwd[i] == '"' {
 		i++
 	}
@@ -2880,7 +3331,14 @@ func handleNumericColon(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, TX jsoni
 	// TRAILING TEXT FIRST. A scalar can be both ("12, hexadecimal"), and the
 	// token scan below stops at the first space, which would truncate it to
 	// "12,". TextCheck takes the whole scalar, continuation lines included.
-	if hasTrailingText && !inFlow {
+	//
+	// In FLOW context too. The canonical takes this branch without asking
+	// about flow depth, so `[12 x]` is the one scalar "12 x" there, and a
+	// `flowState.depth == 0` guard here left the digits to the number
+	// matcher and the text to the grammar: `[12, "x"]`. The comma branch
+	// below keeps its flow test, because a comma inside a flow collection
+	// IS a separator.
+	if hasTrailingText {
 		*skipNumberMatch = true
 		return nil
 	}
@@ -2918,17 +3376,12 @@ func applyTagConversion(tag, rawVal string, tagHandles map[string]string) any {
 	case "str":
 		return rawVal
 	case "int":
-		n, err := strconv.ParseInt(rawVal, 10, 64)
-		if err == nil {
-			return float64(n)
-		}
-		return rawVal
+		// `parseInt(rawVal, 10)`. A tag that cannot read its value still
+		// applies: the result is NaN, a number, not the text.
+		return jsParseInt(rawVal)
 	case "float":
-		n, err := strconv.ParseFloat(rawVal, 64)
-		if err == nil {
-			return n
-		}
-		return rawVal
+		// `parseFloat(rawVal)`, the same way.
+		return jsParseFloat(rawVal)
 	case "bool":
 		return rawVal == "true" || rawVal == "True" || rawVal == "TRUE"
 	case "null":
@@ -3334,14 +3787,10 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 			}
 		})
 		rs.AddBC(func(r *jsonic.Rule, ctx *jsonic.Context) {
-			child := r.Child
-			if child != nil && child != jsonic.NoRule {
-				final := child
-				for final.Next != nil && final.Next != jsonic.NoRule &&
-					final.Next.Prev == final {
-					final = final.Next
-				}
-				if final != child && !jsonic.IsUndefined(final.Node) {
+			// A child that rotated (an implicit list) left its value at
+			// the end of the chain; see childNode.
+			if child := r.Child; child != nil && child != jsonic.NoRule {
+				if final := chainEnd(child); final != child && !jsonic.IsUndefined(final.Node) {
 					r.Node = final.Node
 				}
 			}
@@ -3354,13 +3803,26 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 		rs.AddAC(func(r *jsonic.Rule, ctx *jsonic.Context) {
 			if m, ok := r.Node.(map[string]any); ok {
 				if alias, ok := m["__yamlAlias"].(string); ok {
+					// `rule.node = anchors[name]`, with no test that
+					// the anchor is there: an alias to a name the
+					// document never anchored reads as the absent
+					// value, which is null. Keeping the marker instead
+					// publishes this plugin's own bookkeeping as the
+					// parse result, so `b: *nope` handed a caller
+					// `{"__yamlAlias":"nope"}`, a map the document does
+					// not contain and no other runtime produces.
 					val, exists := anchors[alias]
-					if exists {
-						switch v := val.(type) {
-						case *jsonic.OrderedMap, jsonic.OrderedMap, map[string]any, []any:
-							r.Node = deepCopy(v)
-						default:
+					switch v := val.(type) {
+					case *jsonic.OrderedMap, jsonic.OrderedMap, map[string]any, []any:
+						r.Node = deepCopy(v)
+					default:
+						if exists {
 							r.Node = val
+						} else {
+							// `undefined`, which the engine drops from a
+							// list and reads as null in a map, rather
+							// than a Go nil, which a list would keep.
+							r.Node = jsonic.Undefined
 						}
 					}
 				}
@@ -3392,8 +3854,8 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 
 	j.Rule("indent", func(rs *jsonic.RuleSpec, _ *jsonic.Parser) {
 		rs.AddBC(func(r *jsonic.Rule, ctx *jsonic.Context) {
-			if !jsonic.IsUndefined(r.Child.Node) {
-				r.Node = r.Child.Node
+			if node := childNode(r); !jsonic.IsUndefined(node) {
+				r.Node = node
 			}
 		})
 	})
@@ -3420,7 +3882,7 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 			r.EnsureK()["yamlListIn"] = r.N["in"]
 		})
 		rs.AddBC(func(r *jsonic.Rule, ctx *jsonic.Context) {
-			val := r.Child.Node
+			val := childNode(r)
 			if jsonic.IsUndefined(val) {
 				val = nil
 			}
@@ -3438,7 +3900,7 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 			r.Node = r.K["yamlBlockArr"]
 		})
 		rs.AddBC(func(r *jsonic.Rule, ctx *jsonic.Context) {
-			val := r.Child.Node
+			val := childNode(r)
 			if jsonic.IsUndefined(val) {
 				val = nil
 			}
@@ -3497,7 +3959,7 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 		rs.AddBC(func(r *jsonic.Rule, ctx *jsonic.Context) {
 			if key := r.U["key"]; key != nil {
 				if m, ok := r.Node.(*jsonic.OrderedMap); ok {
-					val := r.Child.Node
+					val := childNode(r)
 					if jsonic.IsUndefined(val) {
 						val = nil
 					}
@@ -3511,7 +3973,7 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 		rs.AddBC(func(r *jsonic.Rule, ctx *jsonic.Context) {
 			if key := r.U["key"]; key != nil {
 				if m, ok := r.Node.(*jsonic.OrderedMap); ok {
-					val := r.Child.Node
+					val := childNode(r)
 					if jsonic.IsUndefined(val) {
 						val = nil
 					}

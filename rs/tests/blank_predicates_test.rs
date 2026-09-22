@@ -25,11 +25,12 @@
 // Every row was measured in all three runtimes on 2026-09-21: the
 // TypeScript column by running `ts/src/yaml.ts` under Node 22, the Go
 // column by `tabnasyaml.Parse` in `go/`, the Rust column by
-// `tabnas_yaml::parse`. The first two groups agree in all three and are
-// ALSO shared fixture rows, in `test/spec/tags.tsv`; they are repeated
-// here because a fixture row records the answer and this file records
-// which canonical expression the answer comes from. The third group is
-// Rust and TypeScript against Go, and `../DIVERGENCE.md` carries it.
+// `tabnas_yaml::parse`. All three groups agree in all three runtimes and
+// are ALSO shared fixture rows, in `test/spec/tags.tsv` and
+// `test/spec/block-scalars.tsv`; they are repeated here because a
+// fixture row records the answer and this file records which canonical
+// expression the answer comes from. The third group was Rust and
+// TypeScript against Go until the Go port grew `isDocMarkerNoTab`.
 
 mod common;
 
@@ -81,12 +82,9 @@ fn a_tab_after_a_colon_does_not_end_a_typed_tags_value() {
 /// tab, alone among the four places the canonical writes that test. A
 /// `---<TAB>` line therefore stays inside the scalar.
 ///
-/// This is a REGISTER test rather than a parity one, because Go stops
-/// the scalar there: see `../DIVERGENCE.md`, "A tab after a document
-/// marker inside a block scalar".
-///
 /// Measured. `|<NL>x<NL>---<TAB>y<NL>`: TypeScript `"x\n---\ty\n"`, Go
-/// `["x\n","y"]`, Rust `"x\n---\ty\n"`.
+/// the same since `isDocMarkerNoTab`, Rust `"x\n---\ty\n"`. Before that
+/// Go said `["x\n","y"]`, which `../DIVERGENCE.md` carried.
 #[test]
 fn a_tab_after_a_document_marker_stays_inside_a_block_scalar() {
     expect("|\nx\n---\ty\n", j!("x\n---\ty\n"));
