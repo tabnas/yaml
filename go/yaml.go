@@ -503,6 +503,40 @@ func trimRight(s string) string {
 	return strings.TrimRight(s, " \t")
 }
 
+// childNode is the node of a rule's child, read from the END of the
+// child's rotation chain.
+//
+// A rule that replaces itself (`r: list`, `r: elem`) leaves the original
+// rule in `r.Child` with the new one hanging off its `Next`. A JavaScript
+// array aliases by reference, so the canonical port reads `rule.child.node`
+// and sees every element the rotated rules appended. A Go slice is a
+// header, and the engine's append writes the grown slice back through
+// `r.Parent.Node`, which is the ROTATED rule's parent, never the original
+// child: the original keeps the one-element header the implicit-list
+// promotion gave it, and a reader of `r.Child.Node` sees `["a"]` for
+// `"a" "b"`. Every closure in this plugin that reads a child's node goes
+// through here so it sees the whole value.
+func childNode(r *jsonic.Rule) any {
+	child := r.Child
+	if child == nil || child == jsonic.NoRule {
+		return jsonic.Undefined
+	}
+	if final := chainEnd(child); final != child && !jsonic.IsUndefined(final.Node) {
+		return final.Node
+	}
+	return child.Node
+}
+
+// chainEnd is the last rule a rotation chain replaced `rule` with, or
+// `rule` itself when it never rotated.
+func chainEnd(rule *jsonic.Rule) *jsonic.Rule {
+	final := rule
+	for final.Next != nil && final.Next != jsonic.NoRule && final.Next.Prev == final {
+		final = final.Next
+	}
+	return final
+}
+
 // formatKey converts a value to a string suitable for use as a map key.
 func formatKey(v any) string {
 	switch k := v.(type) {
@@ -1380,9 +1414,12 @@ func Yaml(j *jsonic.Jsonic, opts map[string]any) error {
 		streamMeta = append(streamMeta, streamCurMeta)
 		streamCurMeta = nil
 	}
+	// The document is read through childNode: a top-level implicit list
+	// (`"a" "b"`) rotates the pushed `val` into a `list`, and only the end
+	// of that chain holds every element.
 	pushChildDoc := func(r *jsonic.Rule) {
-		if r.Child != nil && r.Child != jsonic.NoRule && !jsonic.IsUndefined(r.Child.Node) {
-			streamDocs = append(streamDocs, r.Child.Node)
+		if node := childNode(r); !jsonic.IsUndefined(node) {
+			streamDocs = append(streamDocs, node)
 		} else {
 			streamDocs = append(streamDocs, nil)
 		}
@@ -1394,8 +1431,8 @@ func Yaml(j *jsonic.Jsonic, opts map[string]any) error {
 		flushCurMeta(ended)
 	}
 	finalizeStream := func(r *jsonic.Rule, ctx *jsonic.Context) {
-		if r.Child != nil && r.Child != jsonic.NoRule && !jsonic.IsUndefined(r.Child.Node) {
-			streamDocs = append(streamDocs, r.Child.Node)
+		if node := childNode(r); !jsonic.IsUndefined(node) {
+			streamDocs = append(streamDocs, node)
 			flushCurMeta(false)
 		} else if streamCurMeta != nil {
 			// The final document was explicitly opened (a `---` / `%TAG`
@@ -3341,14 +3378,10 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 			}
 		})
 		rs.AddBC(func(r *jsonic.Rule, ctx *jsonic.Context) {
-			child := r.Child
-			if child != nil && child != jsonic.NoRule {
-				final := child
-				for final.Next != nil && final.Next != jsonic.NoRule &&
-					final.Next.Prev == final {
-					final = final.Next
-				}
-				if final != child && !jsonic.IsUndefined(final.Node) {
+			// A child that rotated (an implicit list) left its value at
+			// the end of the chain; see childNode.
+			if child := r.Child; child != nil && child != jsonic.NoRule {
+				if final := chainEnd(child); final != child && !jsonic.IsUndefined(final.Node) {
 					r.Node = final.Node
 				}
 			}
@@ -3399,8 +3432,8 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 
 	j.Rule("indent", func(rs *jsonic.RuleSpec, _ *jsonic.Parser) {
 		rs.AddBC(func(r *jsonic.Rule, ctx *jsonic.Context) {
-			if !jsonic.IsUndefined(r.Child.Node) {
-				r.Node = r.Child.Node
+			if node := childNode(r); !jsonic.IsUndefined(node) {
+				r.Node = node
 			}
 		})
 	})
@@ -3427,7 +3460,7 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 			r.EnsureK()["yamlListIn"] = r.N["in"]
 		})
 		rs.AddBC(func(r *jsonic.Rule, ctx *jsonic.Context) {
-			val := r.Child.Node
+			val := childNode(r)
 			if jsonic.IsUndefined(val) {
 				val = nil
 			}
@@ -3445,7 +3478,7 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 			r.Node = r.K["yamlBlockArr"]
 		})
 		rs.AddBC(func(r *jsonic.Rule, ctx *jsonic.Context) {
-			val := r.Child.Node
+			val := childNode(r)
 			if jsonic.IsUndefined(val) {
 				val = nil
 			}
@@ -3504,7 +3537,7 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 		rs.AddBC(func(r *jsonic.Rule, ctx *jsonic.Context) {
 			if key := r.U["key"]; key != nil {
 				if m, ok := r.Node.(*jsonic.OrderedMap); ok {
-					val := r.Child.Node
+					val := childNode(r)
 					if jsonic.IsUndefined(val) {
 						val = nil
 					}
@@ -3518,7 +3551,7 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 		rs.AddBC(func(r *jsonic.Rule, ctx *jsonic.Context) {
 			if key := r.U["key"]; key != nil {
 				if m, ok := r.Node.(*jsonic.OrderedMap); ok {
-					val := r.Child.Node
+					val := childNode(r)
 					if jsonic.IsUndefined(val) {
 						val = nil
 					}
