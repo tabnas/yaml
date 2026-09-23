@@ -290,7 +290,7 @@ TypeScript (from `ts/`):
 
 ```bash
 npm install            # auto-installs the jsonic/parser peers; resolves file: siblings
-npm run build          # node embed-grammar.js && tsc --build src test
+npm run build          # node embed-grammar.js && tsc --build src && tsc --build test
 npm test               # node --enable-source-maps --test "dist-test/*.test.js"
 ```
 
