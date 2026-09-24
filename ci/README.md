@@ -11,7 +11,13 @@ This directory exists because session credentials cannot write
 
 ## Pending
 
-- **`workflows/rust.yml`**, the Rust gate: `rs/` built, tested,
+Nothing.
+
+## Promoted
+
+Both of these were staged here and now run from `.github/workflows/`:
+
+- **`rust.yml`**, the Rust gate: `rs/` built, tested,
   `rustfmt`-checked and clippy-clean at `-D warnings`. The commands live
   in `ci/rust/run.sh`, which the workflow calls and you can run too;
   `make test-rs` is the fast inner loop.
@@ -31,18 +37,11 @@ This directory exists because session credentials cannot write
   turn a sibling's release into a red build on every pull request here,
   including ones touching no Rust. See the comment in `ci/rust/run.sh`.
 
-  One thing to settle at promotion: `dtolnay/rust-toolchain` is
-  version-tagged rather than SHA-pinned, matching the form
-  `tabnas/parser` uses for its own staged `ci/workflows/rust.yml`. Every
-  other action here is SHA-pinned.
-
-- **`workflows/docs.yml`** — the prose gate: Vale over the reader-facing
-  pages at the levels set in `.vale.ini`, on the file list
+- **`docs.yml`** — the prose gate: Vale over the reader-facing pages at
+  the levels set in `.vale.ini`, on the file list
   `ts/scripts/gated-docs.cjs` produces. See `docs/STYLE-GUIDE.md`.
 
   It needs no sibling checkouts and no secrets, and pins its own Vale
   version. Errors fail the job; warnings go to the run summary as a
   report. `make prose` runs the identical check locally, and the test
-  suite already runs the other half of the gate
-  (`ts/test/docs.test.js`), so promoting this adds the spelling and
-  Google-convention arm rather than the whole gate.
+  suite runs the other half of the gate (`ts/test/docs.test.js`).
