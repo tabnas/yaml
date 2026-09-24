@@ -42,7 +42,7 @@ sweep, an install or a fetch, a release, a wait on CI, a benchmark, a
 script or loop you write, and anything sent to the background.
 
 - **Minimal is enough.** One line with the step and a count, such as
-  `conformance: 412/1500 (27%)`, meets it. When no total is known, print
+  `conformance: 412 of 1500 (27%)`, meets it. When no total is known, print
   what is known (the step, the current item, the elapsed time) and say the
   percentage is unknown rather than inventing one.
 - **Build it into what you write.** A script or loop prints a line per
@@ -446,10 +446,10 @@ The steps, in order:
    `ts/test/version.test.ts`, `go/version_test.go` and
    `rs/tests/version_test.rs`; a stale `rs/Cargo.lock` is caught by
    `ci/rust/run.sh`, which compares the lock's entry for this crate with
-   the manifest before it runs anything else. The Rust workflow is staged
-   under ADR-8 rather than promoted, so on a pull request that check runs
-   only where someone runs `ci/rust/run.sh` by hand: bump the Rust sites
-   with the others rather than relying on it.
+   the manifest before it runs anything else. The Rust workflow,
+   `.github/workflows/rust.yml`, runs that script on a pull request that
+   touches `rs/` or `ts/package.json`: bump the Rust sites with the others
+   rather than waiting for it to fail.
 2. Verify against the **published** dependencies rather than your checkout.
    The release runner installs fresh from the registry; a working tree
    usually does not, so reproduce that before believing anything:
@@ -722,10 +722,10 @@ reusable workflow and this repo overrides neither, so `go build ./...` and
 `go test ./...` run on `ubuntu` / `macos` alongside the TS matrix.
 `.github/workflows/release.yml` handles releases.
 
-**The Rust gate is staged, not live.** `ci/workflows/rust.yml` is the
-proposed workflow; a session cannot write `.github/workflows/*` (ADR-8),
-so a maintainer promotes it. Until then, run `ci/rust/run.sh` locally:
-it is the same script the workflow calls, so the two cannot drift.
+**The Rust gate runs from `.github/workflows/rust.yml`.** It was staged
+under `ci/`, because a session cannot write `.github/workflows/*`
+(ADR-8), and a maintainer has promoted it. Run `ci/rust/run.sh` locally
+too: it is the same script the workflow calls, so the two cannot drift.
 
 ## Agent tooling
 

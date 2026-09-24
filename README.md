@@ -10,7 +10,7 @@
 A [Tabnas](https://github.com/tabnas/parser) grammar plugin that parses
 a core subset of YAML into plain values, built on the relaxed-JSON
 [`jsonic`](https://github.com/tabnas/jsonic) grammar. Available for
-**TypeScript/JavaScript**, **Go** and **Rust** from one shared grammar.
+**TypeScript/JavaScript**, **Go**, and **Rust** from one shared grammar.
 
 Docs, guides, the error reference and the playground: **[tabnas.dev](https://tabnas.dev)**.
 
