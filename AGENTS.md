@@ -722,10 +722,12 @@ reusable workflow and this repo overrides neither, so `go build ./...` and
 `go test ./...` run on `ubuntu` / `macos` alongside the TS matrix.
 `.github/workflows/release.yml` handles releases.
 
-**The Rust gate runs from `.github/workflows/rust.yml`.** It was staged
-under `ci/`, because a session cannot write `.github/workflows/*`
-(ADR-8), and a maintainer has promoted it. Run `ci/rust/run.sh` locally
-too: it is the same script the workflow calls, so the two cannot drift.
+**The Rust gate runs from `.github/workflows/rust.yml`.** Change it
+there, in a reviewed pull request: session credentials can push workflow
+changes (admin `DECISIONS.md` ADR-8, as amended 2026-09-24). They still
+cannot push tags, so a release is dispatched (see "Releasing"). Run
+`ci/rust/run.sh` locally too: it is the same script the workflow calls,
+so the two cannot drift.
 
 ## Agent tooling
 
