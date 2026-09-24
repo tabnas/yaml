@@ -10,7 +10,7 @@ including the multiline forms, block scalars (literal `|` and folded `>`,
 with chomping), anchors (`&name`), aliases (`*name`) and merge keys
 (`<<`), multi-document streams (`---` and `...`), the YAML value keywords
 (`true`/`false`/`yes`/`no`/`on`/`off`, `null`/`~`, `.inf`, `.nan`),
-comments, tags, `%TAG` directives, and hexadecimal, octal and binary
+comments, tags, `%TAG` directives, and hexadecimal, octal, and binary
 integer literals.
 
 Unlike most tabnas grammars this one layers on
