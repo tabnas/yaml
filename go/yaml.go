@@ -3468,6 +3468,15 @@ const grammarText = `
     { s: ['#KEY' '#CL'] p: map b: 2 g: yaml }
     # Element marker => list.
     { s: '#EL' p: list g: yaml }
+    # Flow collection as a block-mapping value on the FOLLOWING line:
+    #     required:
+    #       [a, b, c]
+    # Valid YAML 1.2, and the inline spelling has always worked. The
+    # indent rule opens at the deeper indent and meets a
+    # flow opener, which only the val rule knows how to read, so hand it back
+    # one token so val sees the bracket or brace itself.
+    { s: '#OS' p: val b: 1 g: yaml }
+    { s: '#OB' p: val b: 1 g: yaml }
     # Plain value after indent (for nested scalars).
     { s: '#KEY' a: '@indent-plain-value' g: yaml }
   ]
