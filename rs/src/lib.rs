@@ -1446,11 +1446,18 @@ const DEPTH_LIMIT: usize = 127;
 const DEPTH_GUARD: &str = "depth";
 
 /// Whether a rule of this name holds a container: jsonic's `map` and
-/// `list`, and YAML's own `yamlBlockList` (a block sequence) and
-/// `yamlElemMap` (a mapping that starts in a sequence entry). The element
-/// and pair rules, and `indent`, hold none.
+/// `list`, and YAML's own block collections. A block sequence opens as
+/// `yamlBlockList` and, after its first entry, is replaced by
+/// `yamlBlockElem`; a mapping that starts in a sequence entry opens as
+/// `yamlElemMap` and is replaced by `yamlElemPair` after its first pair.
+/// Each replacement shares the container's cell and takes its place on
+/// the stack, so a container is counted once under whichever name it has
+/// reached. jsonic's `pair` and `elem`, and `indent`, hold none.
 fn is_container_rule(name: &str) -> bool {
-    matches!(name, "map" | "list" | "yamlBlockList" | "yamlElemMap")
+    matches!(
+        name,
+        "map" | "list" | "yamlBlockList" | "yamlBlockElem" | "yamlElemMap" | "yamlElemPair"
+    )
 }
 
 /// How many containers are open: those on the rule stack, and the rule

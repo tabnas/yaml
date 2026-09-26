@@ -22,6 +22,37 @@ fn indented(depth: usize, line: impl Fn(usize) -> String) -> String {
     src
 }
 
+/// `depth` sequences, each nested in the second entry of the one above:
+/// `["x", ["x", ... "y"]]`. After its first entry a block sequence's rule
+/// is replaced by its rotation, `yamlBlockElem`, which the depth guard has
+/// to count as the container it still is.
+fn second_entries(depth: usize) -> String {
+    let mut src = String::from("- x\n");
+    for level in 0..depth - 1 {
+        src.push_str(&"  ".repeat(level));
+        src.push_str("- - x\n");
+    }
+    src.push_str(&"  ".repeat(depth - 1));
+    src.push_str("- y\n");
+    src
+}
+
+/// `depth` levels of a sequence holding a mapping, each nested in the
+/// mapping's SECOND pair: two containers a level. After its first pair the
+/// mapping's rule is replaced by its rotation, `yamlElemPair`.
+fn second_pairs(depth: usize) -> String {
+    let mut src = String::new();
+    for level in 0..depth {
+        src.push_str(&" ".repeat(4 * level));
+        src.push_str("- a: 1\n");
+        src.push_str(&" ".repeat(4 * level + 2));
+        src.push_str("b:\n");
+    }
+    src.push_str(&" ".repeat(4 * depth));
+    src.push_str("x\n");
+    src
+}
+
 /// Nesting past the depth limit is refused with the engine's `cancel`
 /// code rather than growing the call stack.
 ///
@@ -59,6 +90,10 @@ fn deep_nesting_is_refused_not_crashed() {
                 "compact sequence of maps",
                 format!("{}x\n", "- a: ".repeat(depth)),
             ),
+            // Through a later entry or pair, where the rule holding the
+            // container has been replaced by its rotation.
+            ("sequence nested in a second entry", second_entries(depth)),
+            ("mapping nested in a second pair", second_pairs(depth)),
         ] {
             let error = parser
                 .parse(&src)
@@ -135,6 +170,23 @@ fn nesting_within_the_limit_still_parses() {
     parser
         .parse(&format!("{}x\n", "- a: ".repeat(63)))
         .expect("126 containers is within the limit");
+    // And through rotated rules: 127 sequences, and 63 levels of two.
+    parser
+        .parse(&second_entries(127))
+        .expect("127 sequences, each in a second entry, is at the limit");
+    parser
+        .parse(&second_pairs(63))
+        .expect("126 containers, each level in a second pair, is within the limit");
+    for (shape, src) in [
+        ("second entries", second_entries(128)),
+        ("second pairs", second_pairs(64)),
+    ] {
+        let error = parser
+            .parse(&src)
+            .err()
+            .unwrap_or_else(|| panic!("{shape} one past the limit were accepted"));
+        assert_eq!(error.code, "cancel", "{shape}");
+    }
 }
 
 /// A long document is parsed in about linear time. Two megabytes of one

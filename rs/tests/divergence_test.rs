@@ -49,6 +49,40 @@ fn nesting_past_the_depth_limit_is_refused() {
         .parse(&format!("{}x\n", "- ".repeat(128)))
         .expect_err("128 compact sequences is past it");
     assert_eq!(error.code, "cancel");
+    // And through a later entry or pair, where the rule holding the
+    // container has been replaced by its rotation. `depth` sequences, each
+    // in the second entry of the one above, `["x", ["x", ... "y"]]`:
+    let second_entries = |depth: usize| {
+        let mut src = String::from("- x\n");
+        for level in 0..depth - 1 {
+            src.push_str(&format!("{}- - x\n", "  ".repeat(level)));
+        }
+        src + &format!("{}- y\n", "  ".repeat(depth - 1))
+    };
+    parser
+        .parse(&second_entries(127))
+        .expect("127 sequences, each in a second entry, is inside the limit");
+    let error = parser
+        .parse(&second_entries(128))
+        .expect_err("128 sequences, each in a second entry, is past it");
+    assert_eq!(error.code, "cancel");
+    // `depth` levels of a mapping in a sequence, each in the second pair
+    // of the one above: two containers a level.
+    let second_pairs = |depth: usize| {
+        let mut src = String::new();
+        for level in 0..depth {
+            src.push_str(&format!("{}- a: 1\n", " ".repeat(4 * level)));
+            src.push_str(&format!("{}b:\n", " ".repeat(4 * level + 2)));
+        }
+        src + &format!("{}x\n", " ".repeat(4 * depth))
+    };
+    parser
+        .parse(&second_pairs(63))
+        .expect("126 containers, through second pairs, is inside the limit");
+    let error = parser
+        .parse(&second_pairs(64))
+        .expect_err("128 containers, through second pairs, is past it");
+    assert_eq!(error.code, "cancel");
 }
 
 /// **A column counts Unicode scalars, not UTF-16 code units.** An astral

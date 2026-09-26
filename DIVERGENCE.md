@@ -75,17 +75,23 @@ Owner: the engine. Nothing in this repository can repair it.
 | 128 nested `[` | a 128-deep list | the same | `ERROR:cancel` |
 | 1,000 nested block mappings | a 1,000-deep mapping | the same | `ERROR:cancel` |
 | 128 compact sequences, `- - - x` | a 128-deep list | the same | `ERROR:cancel` |
+| 128 sequences, each in the second entry of the one above | a 128-deep list | the same | `ERROR:cancel` |
+| 64 levels of a mapping in a sequence, each in the second pair of the one above | 128 containers deep | the same | `ERROR:cancel` |
 
 This plugin installs a parse guard that refuses nesting past 127
 containers, jsonic's number, in place of the one `tabnas-jsonic`
 installs under the same name. jsonic's counts only its own `map` and
 `list` rules, so a compact block sequence, which nests through YAML's
-own `yamlBlockList`, went unbounded under it; this one counts those
-too. A guard holds whatever parse budget the caller sets. The engine parses
-iteratively, but displaying, converting or dropping a `tabnas::Value`
-walks the tree with the call stack, so an unbounded document ends the
-caller's process rather than returning an error. TypeScript and Go have
-no limit, because neither runtime's value type has that problem.
+own `yamlBlockList`, went unbounded under it. This one counts YAML's
+block collections too, under whichever rule holds each one: a block
+sequence opens as `yamlBlockList` and continues as `yamlBlockElem`, and
+a mapping that starts in a sequence entry opens as `yamlElemMap` and
+continues as `yamlElemPair`. A guard holds whatever parse budget the
+caller sets. The engine parses iteratively, but displaying, converting
+or dropping a `tabnas::Value` walks the tree with the call stack, so an
+unbounded document ends the caller's process rather than returning an
+error. TypeScript and Go have no limit, because neither runtime's value
+type has that problem.
 
 `rs/tests/untrusted_test.rs` and
 `rs/tests/divergence_test.rs::nesting_past_the_depth_limit_is_refused`
