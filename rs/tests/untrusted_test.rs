@@ -25,8 +25,8 @@ fn indented(depth: usize, line: impl Fn(usize) -> String) -> String {
 /// Nesting past the depth limit is refused with the engine's `cancel`
 /// code rather than growing the call stack.
 ///
-/// The limit comes from `tabnas-jsonic`, which installs a parse budget of
-/// 127 containers. This plugin does not raise or lower it. The engine
+/// This plugin installs a parse guard of 127 containers, jsonic's number,
+/// counting jsonic's containers and its own block collections. The engine
 /// parses iteratively, but displaying, converting or dropping a value
 /// walks the tree with the call stack, so an unbounded document ends the
 /// process rather than returning an error. TypeScript and Go have no
@@ -49,6 +49,16 @@ fn deep_nesting_is_refused_not_crashed() {
             ),
             ("block map", indented(depth, |level| format!("k{level}:\n"))),
             ("block sequence", indented(depth, |_| "- \n".to_string())),
+            // Nested on one line, these nest through YAML's own rules,
+            // which jsonic's guard does not count.
+            (
+                "compact block sequence",
+                format!("{}x\n", "- ".repeat(depth)),
+            ),
+            (
+                "compact sequence of maps",
+                format!("{}x\n", "- a: ".repeat(depth)),
+            ),
         ] {
             let error = parser
                 .parse(&src)
@@ -58,14 +68,54 @@ fn deep_nesting_is_refused_not_crashed() {
         }
     }
 
-    // And very deep indeed, where the source stays small.
+    // And very deep indeed, where the source stays small. A compact block
+    // sequence this deep parsed before, and then overflowed a 2 MiB stack
+    // when its value was dropped.
     for depth in [50_000usize, 200_000] {
-        let src = format!("{}{}", "[".repeat(depth), "]".repeat(depth));
-        let error = parser
-            .parse(&src)
-            .err()
-            .unwrap_or_else(|| panic!("a flow list nested {depth} deep was accepted"));
-        assert_eq!(error.code, "cancel", "a flow list nested {depth} deep");
+        for (shape, src) in [
+            (
+                "flow list",
+                format!("{}{}", "[".repeat(depth), "]".repeat(depth)),
+            ),
+            (
+                "compact block sequence",
+                format!("{}x\n", "- ".repeat(depth)),
+            ),
+        ] {
+            let error = parser
+                .parse(&src)
+                .err()
+                .unwrap_or_else(|| panic!("a {shape} nested {depth} deep was accepted"));
+            assert_eq!(error.code, "cancel", "a {shape} nested {depth} deep");
+        }
+    }
+}
+
+/// The limit holds whatever budget the caller sets. Inherited from jsonic,
+/// it was the parse budget, which is one slot: a caller's `parse_budget`
+/// replaced it in place and took the limit with it.
+#[test]
+fn the_limit_holds_whatever_budget_the_caller_sets() {
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = calls.clone();
+    let mut parser = tabnas_yaml::make();
+    parser.parse_budget(1, move |_| {
+        seen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        true
+    });
+    assert_eq!(parser.parse_guards.keys().collect::<Vec<_>>(), ["depth"]);
+    parser
+        .parse(&format!("{}x\n", "- ".repeat(127)))
+        .expect("127 containers is within the limit");
+    assert!(
+        calls.load(std::sync::atomic::Ordering::Relaxed) > 0,
+        "the caller's budget runs too"
+    );
+    for src in [
+        format!("{}x\n", "- ".repeat(128)),
+        format!("{}{}", "[".repeat(128), "]".repeat(128)),
+    ] {
+        assert_eq!(parser.parse(&src).unwrap_err().code, "cancel");
     }
 }
 
@@ -76,6 +126,15 @@ fn nesting_within_the_limit_still_parses() {
     let parser = tabnas_yaml::make();
     let src = format!("{}{}", "[".repeat(100), "]".repeat(100));
     parser.parse(&src).expect("100 levels is within the limit");
+    // At the limit, in the compact shapes: 127 sequences, and 63 entries
+    // that each open a sequence and a map, 126 containers.
+    let value = parser
+        .parse(&format!("{}x\n", "- ".repeat(127)))
+        .expect("127 compact sequences is at the limit");
+    assert!(!value.to_string().is_empty());
+    parser
+        .parse(&format!("{}x\n", "- a: ".repeat(63)))
+        .expect("126 containers is within the limit");
 }
 
 /// A long document is parsed in about linear time. Two megabytes of one

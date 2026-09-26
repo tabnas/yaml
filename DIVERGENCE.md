@@ -74,9 +74,14 @@ Owner: the engine. Nothing in this repository can repair it.
 | 127 nested `[` | a 127-deep list | the same | the same |
 | 128 nested `[` | a 128-deep list | the same | `ERROR:cancel` |
 | 1,000 nested block mappings | a 1,000-deep mapping | the same | `ERROR:cancel` |
+| 128 compact sequences, `- - - x` | a 128-deep list | the same | `ERROR:cancel` |
 
-`tabnas-jsonic` installs a parse budget that refuses nesting past 127
-containers, and this plugin inherits it unchanged. The engine parses
+This plugin installs a parse guard that refuses nesting past 127
+containers, jsonic's number, in place of the one `tabnas-jsonic`
+installs under the same name. jsonic's counts only its own `map` and
+`list` rules, so a compact block sequence, which nests through YAML's
+own `yamlBlockList`, went unbounded under it; this one counts those
+too. A guard holds whatever parse budget the caller sets. The engine parses
 iteratively, but displaying, converting or dropping a `tabnas::Value`
 walks the tree with the call stack, so an unbounded document ends the
 caller's process rather than returning an error. TypeScript and Go have
@@ -86,8 +91,8 @@ no limit, because neither runtime's value type has that problem.
 `rs/tests/divergence_test.rs::nesting_past_the_depth_limit_is_refused`
 pin both sides of the boundary.
 
-Owner: `tabnas-jsonic`. Read its own register for the measurements; this
-plugin neither raises nor lowers the limit.
+Owner: this plugin, for the count; `tabnas-jsonic`, for the number. Read
+jsonic's register for the measurements.
 
 ## The matcher chain after a cursor move (Rust)
 

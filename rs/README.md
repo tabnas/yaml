@@ -233,7 +233,7 @@ One shape sits outside that boundary, in all three runtimes rather than
 in this one. An alias expands: the canonical handler deep copies the
 anchored value into each use, so a chain of anchors that each alias the
 one before twice doubles the tree on every line, and a few dozen short
-lines exhaust memory while the nesting never approaches the parse budget.
+lines exhaust memory while the nesting never approaches the depth limit.
 Measured on `k0: &k0 [x,x]` followed by one line per level, each
 aliasing the level before it twice, with the leaf count identical
 everywhere:
