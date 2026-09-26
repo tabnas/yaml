@@ -1415,7 +1415,75 @@ pub fn yaml(parser: &mut Tabnas, options: &YamlOptions) -> Result<(), PluginErro
         .map_err(|error| PluginError(format!("yaml: cannot apply the grammar: {error}")))?;
 
     wire_rules(parser);
+
+    // Replaces jsonic's guard, which counts only jsonic's own containers
+    // (see `DEPTH_GUARD`). A guard rather than the parse budget, which is
+    // one slot a caller's `parse_budget` replaces: the limit holds
+    // whatever budget the caller sets.
+    parser.parse_guard(DEPTH_GUARD, within_depth_limit);
     Ok(())
+}
+
+/// How many containers a parse may hold before it is refused, with the
+/// engine's `cancel` code: jsonic's number, so a flow collection, which
+/// is jsonic's, is bounded where it always was.
+///
+/// The engine parses iteratively, but displaying, converting or dropping
+/// a `Value` walks the tree with the call stack, so an unbounded document
+/// ends the caller's process rather than returning an error: a compact
+/// block sequence 64,000 levels deep parsed, and then overflowed a 2 MiB
+/// stack when it was dropped. TypeScript and Go have no limit, which
+/// `../DIVERGENCE.md` records.
+const DEPTH_LIMIT: usize = 127;
+
+/// The name the depth check is installed under, as a parse guard.
+///
+/// It is the name jsonic installs its own check under, so this one
+/// replaces it. jsonic's counts its `map` and `list` rules, which is all a
+/// flow collection or an indented block collection uses, but a compact
+/// block sequence (`- - - x`) nests through YAML's own rules, and under
+/// jsonic's check it went unbounded.
+const DEPTH_GUARD: &str = "depth";
+
+/// Whether a rule of this name holds a container: jsonic's `map` and
+/// `list`, and YAML's own block collections. A block sequence opens as
+/// `yamlBlockList` and, after its first entry, is replaced by
+/// `yamlBlockElem`; a mapping that starts in a sequence entry opens as
+/// `yamlElemMap` and is replaced by `yamlElemPair` after its first pair.
+/// Each replacement shares the container's cell and takes its place on
+/// the stack, so a container is counted once under whichever name it has
+/// reached. jsonic's `pair` and `elem`, and `indent`, hold none.
+fn is_container_rule(name: &str) -> bool {
+    matches!(
+        name,
+        "map" | "list" | "yamlBlockList" | "yamlBlockElem" | "yamlElemMap" | "yamlElemPair"
+    )
+}
+
+/// How many containers are open: those on the rule stack, and the rule
+/// the loop is working on, which the engine hands over apart from them.
+///
+/// Counted afresh at each step. Every level holds a container and a few
+/// other rules, so the stack a step walks is bounded by the limit itself.
+fn depth(context: &Context) -> usize {
+    let ancestors = context
+        .rule_stack
+        .iter()
+        .filter(|rule| is_container_rule(&rule.name))
+        .count();
+    let current = usize::from(
+        context
+            .rule
+            .as_ref()
+            .is_some_and(|rule| is_container_rule(&rule.name)),
+    );
+    ancestors + current
+}
+
+/// The depth guard: [`DEPTH_LIMIT`] containers parse, the next one is
+/// refused.
+fn within_depth_limit(context: &Context) -> bool {
+    depth(context) <= DEPTH_LIMIT
 }
 
 /// The plugin form of [`yaml`], for [`Tabnas::use_plugin`]. Installed

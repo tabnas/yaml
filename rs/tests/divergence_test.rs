@@ -25,11 +25,12 @@ use serde_json::json as j;
 /// **Nesting past 127 containers is refused**, with the engine's
 /// `cancel` code, where TypeScript and Go have no limit.
 ///
-/// Inherited from `tabnas-jsonic`, which installs the budget, and from
-/// the engine beneath it: the parse loop is iterative, but displaying,
-/// converting or dropping a value walks the tree with the call stack, so
-/// an unbounded document ends the process rather than returning an
-/// error. See jsonic's own register for the measurements.
+/// A parse guard this plugin installs over jsonic's, at jsonic's number,
+/// counting jsonic's containers and YAML's own block collections. The
+/// parse loop is iterative, but displaying, converting or dropping a
+/// value walks the tree with the call stack, so an unbounded document
+/// ends the process rather than returning an error. See jsonic's own
+/// register for the measurements.
 #[test]
 fn nesting_past_the_depth_limit_is_refused() {
     let parser = tabnas_yaml::make();
@@ -39,6 +40,48 @@ fn nesting_past_the_depth_limit_is_refused() {
         .expect("127 containers is inside the limit");
     let past = format!("{}{}", "[".repeat(128), "]".repeat(128));
     let error = parser.parse(&past).expect_err("128 containers is past it");
+    assert_eq!(error.code, "cancel");
+    // A compact block sequence nests through YAML's own rules.
+    parser
+        .parse(&format!("{}x\n", "- ".repeat(127)))
+        .expect("127 compact sequences is inside the limit");
+    let error = parser
+        .parse(&format!("{}x\n", "- ".repeat(128)))
+        .expect_err("128 compact sequences is past it");
+    assert_eq!(error.code, "cancel");
+    // And through a later entry or pair, where the rule holding the
+    // container has been replaced by its rotation. `depth` sequences, each
+    // in the second entry of the one above, `["x", ["x", ... "y"]]`:
+    let second_entries = |depth: usize| {
+        let mut src = String::from("- x\n");
+        for level in 0..depth - 1 {
+            src.push_str(&format!("{}- - x\n", "  ".repeat(level)));
+        }
+        src + &format!("{}- y\n", "  ".repeat(depth - 1))
+    };
+    parser
+        .parse(&second_entries(127))
+        .expect("127 sequences, each in a second entry, is inside the limit");
+    let error = parser
+        .parse(&second_entries(128))
+        .expect_err("128 sequences, each in a second entry, is past it");
+    assert_eq!(error.code, "cancel");
+    // `depth` levels of a mapping in a sequence, each in the second pair
+    // of the one above: two containers a level.
+    let second_pairs = |depth: usize| {
+        let mut src = String::new();
+        for level in 0..depth {
+            src.push_str(&format!("{}- a: 1\n", " ".repeat(4 * level)));
+            src.push_str(&format!("{}b:\n", " ".repeat(4 * level + 2)));
+        }
+        src + &format!("{}x\n", " ".repeat(4 * depth))
+    };
+    parser
+        .parse(&second_pairs(63))
+        .expect("126 containers, through second pairs, is inside the limit");
+    let error = parser
+        .parse(&second_pairs(64))
+        .expect_err("128 containers, through second pairs, is past it");
     assert_eq!(error.code, "cancel");
 }
 
