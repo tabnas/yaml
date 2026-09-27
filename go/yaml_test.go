@@ -815,3 +815,30 @@ func TestHappy(t *testing.T) {
 			},
 		})
 }
+
+// TestAnUnrelatedSetOptionsKeepsTheLexChecks (#81): the number and text
+// checks were written onto the live config, which SetOptions rebuilds from
+// options, so any later call dropped them and ordinary block YAML stopped
+// parsing. They go in through options now, as the canonical runtime
+// installs them.
+func TestAnUnrelatedSetOptionsKeepsTheLexChecks(t *testing.T) {
+	for _, c := range []struct{ src, want string }{
+		{"a: 1\nb: [1, 2]\nc: hello world", `{"a":1,"b":[1,2],"c":"hello world"}`},
+		// The number check: a digit-led plain scalar with trailing text
+		// is one string, not a number followed by stray text.
+		{"a: 64 characters, hexadecimal.", `{"a":"64 characters, hexadecimal."}`},
+		{"- 1_000\n- x: y", `[1000,{"x":"y"}]`},
+	} {
+		j := MakeJsonic()
+		j.SetOptions(jsonic.Options{})
+		v, err := j.Parse(c.src)
+		if err != nil {
+			t.Errorf("%q after an empty SetOptions: %v", c.src, err)
+			continue
+		}
+		got, _ := json.Marshal(jsonFlatten(specCanon(v)))
+		if string(got) != c.want {
+			t.Errorf("%q after an empty SetOptions = %s, want %s", c.src, got, c.want)
+		}
+	}
+}

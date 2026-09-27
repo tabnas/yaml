@@ -21,7 +21,12 @@ use tabnas_support::{parse_expect, Failure, Runner, Value};
 /// column is per-case, and plugin options must not leak from one row
 /// into the next.
 fn runner() -> Runner {
-    Runner::new_with_row(|input, row| {
+    runner_with(|_| {})
+}
+
+/// The runner, with `prepare` run on each row's parser before the parse.
+fn runner_with(prepare: fn(&mut tabnas::Tabnas)) -> Runner {
+    Runner::new_with_row(move |input, row| {
         let raw = row.named("opts");
         let options = if raw.trim().is_empty() {
             tabnas_yaml::YamlOptions::default()
@@ -46,7 +51,9 @@ fn runner() -> Runner {
             }
             tabnas_yaml::YamlOptions { meta }
         };
-        tabnas_yaml::make_with(options)
+        let mut parser = tabnas_yaml::make_with(options);
+        prepare(&mut parser);
+        parser
             .parse(input)
             .map(|value| common::canon(&value))
             .map_err(|error| Failure::new(error.code.clone()).with_message(error.to_string()))
@@ -76,6 +83,21 @@ fn runner() -> Runner {
 #[test]
 fn spec() {
     runner().dir(common::spec_dir());
+}
+
+/// The same fixtures again, each through a parser that has had a
+/// `set_options` call changing nothing. Twin of the "after an unrelated
+/// SetOptions" pass in `go/parity_test.go` and `ts/test/parity.test.ts`:
+/// the Go port lost its number and text checks to exactly such a call
+/// (#81).
+#[test]
+fn spec_after_an_unrelated_set_options() {
+    runner_with(|parser| {
+        parser
+            .set_options(|_| {})
+            .expect("an empty set_options applies");
+    })
+    .dir(common::spec_dir());
 }
 
 /// The census this suite is expected to cover. A fixture renamed or
