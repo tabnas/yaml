@@ -250,7 +250,9 @@ const grammarText = `
 
 
 const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
-  // Guard against re-entry during options() re-application.
+  // Install once per instance: a second use(Yaml) on the same instance
+  // returns here. options() does not re-run plugins, and make() builds a
+  // fresh child that installs its own.
   if ((tabnas as any).__yamlInstalled) return
   ;(tabnas as any).__yamlInstalled = true
 

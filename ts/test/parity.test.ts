@@ -11,6 +11,8 @@
 // What is left here is only what is specific to yaml: how to build the
 // parser for a row's options, and the non-finite-number encoding.
 
+import { describe } from 'node:test'
+
 import { Tabnas } from '@tabnas/parser'
 import { jsonic } from '@tabnas/jsonic'
 import { findSpecDir, makeRunner, parseExpect } from '@tabnas/support'
@@ -58,3 +60,24 @@ makeRunner({
   // `..` hops. `dir` then auto-discovers every fixture in it, so adding a
   // .tsv runs it in both runtimes without touching either runner.
   .dir(findSpecDir(__dirname))
+
+
+// The same fixtures again, each through a parser that has had an options()
+// call naming nothing. Twin of the "after an unrelated SetOptions" pass in
+// go/parity_test.go: the Go port lost its number and text checks to
+// exactly such a call (#81).
+describe('after an unrelated options() call', () => {
+  makeRunner({
+    parse: (input, row) => {
+      const opts = row.named('opts')
+      const tn = new Tabnas()
+        .use(jsonic)
+        .use(Yaml, '' === opts.trim() ? {} : JSON.parse(opts))
+      tn.options({})
+      return tn.parse(input)
+    },
+    parseExpected: (expected) =>
+      'UNDEFINED' === expected ? undefined : parseExpect(expected),
+    normalize: canon,
+  }).dir(findSpecDir(__dirname))
+})

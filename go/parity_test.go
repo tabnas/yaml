@@ -32,7 +32,23 @@ func TestSpec(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	support.Runner{
+	specRunner(nil).Dir(t, dir)
+
+	// The same fixtures again, each through a parser that has had a
+	// SetOptions call naming nothing. SetOptions rebuilds the lexer config
+	// from options, so a hook the plugin set anywhere else is gone after
+	// it, and this pass is what shows it: the number and text checks were
+	// once written onto the live config, and 360 of these rows failed
+	// after such a call (#81).
+	t.Run("after an unrelated SetOptions", func(t *testing.T) {
+		specRunner(func(j *jsonic.Jsonic) { j.SetOptions(jsonic.Options{}) }).Dir(t, dir)
+	})
+}
+
+// specRunner is the shared runner. prepare, when given, runs on each
+// row's parser after the plugin is installed and before the parse.
+func specRunner(prepare func(*jsonic.Jsonic)) support.Runner {
+	return support.Runner{
 		// A fresh parser per row: the `opts` column is per-case, and
 		// plugin options must not leak from one row into the next.
 		ParseRow: func(input string, row *support.Row) (any, error) {
@@ -46,6 +62,9 @@ func TestSpec(t *testing.T) {
 			j := jsonic.Make()
 			if err := j.Use(Yaml, opts); err != nil {
 				return nil, err
+			}
+			if prepare != nil {
+				prepare(j)
 			}
 			return j.Parse(input)
 		},
@@ -70,7 +89,7 @@ func TestSpec(t *testing.T) {
 		// non-finite float, so a document holding one would come back
 		// unflattened — as an *OrderedMap the comparison cannot see into.
 		Normalize: func(v any) any { return jsonFlatten(specCanon(v)) },
-	}.Dir(t, dir)
+	}
 }
 
 // specCanon encodes YAML's non-finite numbers (.inf / .nan), which JSON

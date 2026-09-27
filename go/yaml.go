@@ -928,8 +928,13 @@ func formatKey(v any) string {
 
 // Yaml is a jsonic plugin that adds YAML parsing support.
 func Yaml(j *jsonic.Jsonic, opts map[string]any) error {
-	// Guard against re-entry during SetOptions's plugin re-application.
-	// Without this, Grammar()/Rule() calls would be duplicated.
+	// Install once per instance: a second Use(Yaml) on the same instance,
+	// or the plugin listed twice (which Derive then re-runs twice), returns
+	// here. Without it the grammar alternates and the val/map/stream state
+	// handlers would be registered again over a second set of per-parse
+	// state. SetOptions does not re-run plugins, and Derive re-runs them on
+	// the child before it copies decorations, so a derived instance
+	// installs its own.
 	if j.Decoration("yaml-installed") == true {
 		return nil
 	}
@@ -1727,32 +1732,9 @@ func Yaml(j *jsonic.Jsonic, opts map[string]any) error {
 		return nil
 	}
 
-	// Register the YAML matcher via SetOptions (must come before cfg mutations
-	// below, as SetOptions rebuilds parts of the config). Also configure
-	// `stream` as the start rule (replaces `val`) so the stream rule below
-	// consumes #DS / #DE / #DR doc-frame tokens.
-	j.SetOptions(jsonic.Options{
-		Lex: &jsonic.LexOptions{Match: map[string]*jsonic.MatchSpec{
-			"yaml": {Order: 500000, Make: func(_ *jsonic.LexConfig, _ *jsonic.Options) jsonic.LexMatcher {
-				return yamlMatcher
-			}},
-		}},
-		Rule: &jsonic.RuleOptions{Start: "stream"},
-	})
-
-	// Remove colon as a fixed token — YAML uses ": " (colon-space).
-	delete(cfg.FixedTokens, ":")
-	cfg.SortFixedTokens()
-
-	// Add colon as an ender char so text tokens stop at ":".
-	if cfg.EnderChars == nil {
-		cfg.EnderChars = make(map[rune]bool)
-	}
-	cfg.EnderChars[':'] = true
-
 	// Skip number matching when the yamlMatcher detected trailing text
 	// after a digit-starting value (e.g. "64 characters, hexadecimal.").
-	cfg.NumberCheck = func(lex *jsonic.Lex) *jsonic.LexCheckResult {
+	numberCheck := func(lex *jsonic.Lex) *jsonic.LexCheckResult {
 		if skipNumberMatch {
 			skipNumberMatch = false
 			return &jsonic.LexCheckResult{Done: true}
@@ -1760,7 +1742,39 @@ func Yaml(j *jsonic.Jsonic, opts map[string]any) error {
 		return nil
 	}
 
-	cfg.TextCheck = textCheck
+	// The lexer hooks go in THROUGH OPTIONS, as the TS plugin passes them
+	// to tn.options(). SetOptions rebuilds the lexer config from options
+	// and copies it over the live one, so a hook written onto the live
+	// config was lost to the caller's next SetOptions, and without the
+	// number and text checks ordinary block YAML stopped parsing (#81).
+	//
+	// - The YAML matcher, and `stream` as the start rule (replacing
+	//   `val`) so the stream rule below consumes #DS / #DE / #DR
+	//   doc-frame tokens.
+	// - The text check, as Text.Check (TS text.check).
+	// - The number check, as a config modifier rather than Number.Check:
+	//   in this engine Number options without a Sep switch the `_` digit
+	//   separator off, and `1_000` needs it. A modifier re-runs on every
+	//   rebuild, so it survives a later SetOptions as an option does.
+	j.SetOptions(jsonic.Options{
+		Lex: &jsonic.LexOptions{Match: map[string]*jsonic.MatchSpec{
+			"yaml": {Order: 500000, Make: func(_ *jsonic.LexConfig, _ *jsonic.Options) jsonic.LexMatcher {
+				return yamlMatcher
+			}},
+		}},
+		Rule: &jsonic.RuleOptions{Start: "stream"},
+		Text: &jsonic.TextOptions{Check: textCheck},
+		Property: &jsonic.PropertyOptions{ConfigModify: map[string]jsonic.ConfigModifier{
+			"yaml-number-check": func(built *jsonic.LexConfig, _ *jsonic.Options) {
+				built.NumberCheck = numberCheck
+			},
+		}},
+	})
+
+	// Remove colon as a fixed token — YAML uses ": " (colon-space). Fixed
+	// tokens are per-instance state that SetOptions carries forward.
+	delete(cfg.FixedTokens, ":")
+	cfg.SortFixedTokens()
 
 	// ===== Grammar rules =====
 	configureGrammarRules(j, IN, EL, KEY, CL, ZZ, CA, CS, CB, TX, ST, VL, NR,
