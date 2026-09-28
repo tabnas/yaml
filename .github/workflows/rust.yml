@@ -17,7 +17,10 @@ name: Rust
 # generated markers, and rs/tests/grammar_test.rs fails when the copy and
 # the file disagree. A change to either that did not run this gate would
 # be found by the TypeScript suite instead, one repository-wide test run
-# later.
+# later. The crate also embeds the manifest and YAML's render
+# (`manifest_text()`, `render_text()`), and rs/tests/translate_test.rs
+# holds the file the manifest names to the embedded text, which no other
+# suite checks.
 on:
   # `branches` is set explicitly. A `push` trigger that names neither
   # branches nor tags also matches TAG pushes, and Actions does not
@@ -37,6 +40,8 @@ on:
       - 'ts/src/yaml.ts'
       - 'ts/package.json'
       - 'go/yaml.go'
+      - 'tabnas.plugin.json'
+      - 'alchemy/**'
       - 'ci/rust/**'
       - '.github/workflows/rust.yml'
   pull_request:
@@ -51,6 +56,8 @@ on:
       - 'ts/src/yaml.ts'
       - 'ts/package.json'
       - 'go/yaml.go'
+      - 'tabnas.plugin.json'
+      - 'alchemy/**'
       - 'ci/rust/**'
       - '.github/workflows/rust.yml'
   workflow_dispatch:

@@ -1,0 +1,168 @@
+; YAML's render: a tree's events written as one YAML 1.2 document in
+; block style. This is a library of definitions, each named `yaml-...`,
+; which a host links with its own program (alchemy's `compile_sources`);
+; its entry point is `yaml-render`, and nothing else here is the host's to
+; call.
+;
+; The profile is always-quoted, as the CSV renderer's is: every string and
+; every key is double-quoted (`quoted`: JSON's escapes, which YAML's
+; double-quoted style reads, and the C1 controls its printable set
+; excludes), so that no string reads back as a boolean, a null, a number
+; or a nested mapping. A number is its lexeme, or as the JSON renderer
+; writes it when it has none, and a non-finite one is `.inf`, `-.inf` or
+; `.nan`. A mapping under a key, and a sequence under a key or inside a
+; sequence, start on the next line, two spaces in; a sequence item is
+; `- `, and a mapping in a sequence has its first key on the item's line.
+; A container's opening is held until its first child or its end, so an
+; empty one is `{}` or `[]` on its key's line. A key whose quoted form is
+; longer than 1024 characters, past which YAML stops reading an implicit
+; key, is written explicitly, `? key` on its own line. A mapping holds a
+; key once, so a repeated key is refused as unrepresentable, naming it.
+;
+; The state is the stack of open containers, one frame each: a marker and
+; the set of keys the container has written (`put` and `get` over a
+; record). That set is the one part of the state that grows with a
+; document's width rather than its nesting, and the state is capped at
+; max_metadata_bytes.
+;
+; The markers: `:object-open` and `:array-open` for a container with
+; nothing written yet, `:object` for a mapping waiting for a key,
+; `:member` for one whose key is written and waits for the value, and
+; `:array` for a sequence waiting for an item.
+
+def yaml-indent [s]
+  repeat (count s) "  "
+
+def yaml-marker [frame]
+  match frame
+    case [marker written] marker
+
+def yaml-written [frame]
+  match frame
+    case [marker written] written
+
+def yaml-top [s]
+  yaml-marker (top s)
+
+; The top frame under another marker, its keys kept.
+def yaml-mark [marker s]
+  push [marker (yaml-written (top s))] (pop s)
+
+; A value completed: a mapping waiting for its member's value waits for
+; its next key.
+def yaml-done [s]
+  match (count s)
+    case 0 s
+    case _
+      match (yaml-top s)
+        case :member (yaml-mark :object s)
+        case _ s
+
+; What comes before a value whose parent is the top of s: a space on the
+; key's line, or a dash, for a scalar or an empty container; a line break
+; and the indentation for a mapping under a key; a line break for a
+; sequence under a key; a dash and the first key for a mapping in a
+; sequence; a dash alone for a sequence in a sequence.
+def yaml-lead [shape s]
+  match (count s)
+    case 0 ""
+    case _
+      match (yaml-top s)
+        case :member
+          match shape
+            case :mapping (concat "\n" (yaml-indent s))
+            case :sequence "\n"
+            case _ " "
+        case :array
+          match shape
+            case :sequence (concat (yaml-indent (pop s)) "-\n")
+            case _ (concat (yaml-indent (pop s)) "- ")
+
+; A held sequence is opened by its first item.
+def yaml-opened [s]
+  match (count s)
+    case 0 s
+    case _
+      match (yaml-top s)
+        case :array-open (yaml-mark :array s)
+        case _ s
+
+def yaml-opening [s]
+  match (count s)
+    case 0 ""
+    case _
+      match (yaml-top s)
+        case :array-open (yaml-lead :sequence (pop s))
+        case _ ""
+
+def yaml-number [n]
+  match (number-class n)
+    case :finite (scalar-text csv-options n)
+    case :infinity ".inf"
+    case :negative-infinity "-.inf"
+    case :nan ".nan"
+
+def yaml-scalar [value]
+  match (kind value)
+    case :null "null"
+    case :boolean
+      match value
+        case true "true"
+        case false "false"
+    case :number (yaml-number value)
+    case _ (quoted value)
+
+; A key at the column `at`: implicit while its quoted form is at most
+; 1024 characters, past which YAML stops reading an implicit key, and
+; explicit beyond, `? key` on its own line and the value after a `:` at
+; the key's column.
+def yaml-key [name at]
+  match (compare (length (quoted name)) 1024)
+    case :greater (concat "? " (quoted name) "\n" at ":")
+    case _ (concat (quoted name) ":")
+
+; A key the mapping has not written: written, where the mapping's keys go,
+; and remembered.
+def yaml-member [name s]
+  let [s2 (push [:member (put name true (yaml-written (top s)))] (pop s))]
+    match (yaml-top s)
+      case :object-open
+        transition s2 [(yaml-lead :mapping (pop s)) (yaml-key name (yaml-indent (pop s)))]
+      case :object
+        transition s2 [(yaml-indent (pop s)) (yaml-key name (yaml-indent (pop s)))]
+
+def yaml-step [s event]
+  match event
+    case object-start
+      transition (push [:object-open (record)] (yaml-opened s)) [(yaml-opening s)]
+    case array-start
+      transition (push [:array-open (record)] (yaml-opened s)) [(yaml-opening s)]
+    case (key name)
+      match (kind (get name (yaml-written (top s))))
+        case :missing (yaml-member name s)
+        case _ (unrepresentable "a YAML mapping cannot hold a key twice" name)
+    case (scalar value)
+      let [s2 (yaml-opened s)]
+        transition (yaml-done s2) [(yaml-opening s) (yaml-lead :scalar s2) (yaml-scalar value) "\n"]
+    case object-end
+      match (yaml-top s)
+        case :object-open
+          transition (yaml-done (pop s)) [(yaml-lead :scalar (pop s)) "{}\n"]
+        case _
+          transition (yaml-done (pop s)) []
+    case array-end
+      match (yaml-top s)
+        case :array-open
+          transition (yaml-done (pop s)) [(yaml-lead :scalar (pop s)) "[]\n"]
+        case _
+          transition (yaml-done (pop s)) []
+
+def yaml-finish [s]
+  match (count s)
+    case 0 []
+    case _ (fail "the events ended inside a container")
+
+; The render: the tree's events in, the document's text out.
+def yaml-render [input]
+  join ""
+    scan-emit [] yaml-step yaml-finish (events input)
