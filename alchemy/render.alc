@@ -28,22 +28,27 @@
 ; `:array-open` for a container with nothing written yet, `:object` for a
 ; mapping waiting for a key, `:member` for one whose key is written and
 ; waits for the value, and `:array` for a sequence waiting for an item.
+; Once the root value is written the state is `[:root-done]`, and nothing
+; may follow it. Events no tree has fail with INPUT_INVALID, saying so.
 
 def yaml-indent [s]
   repeat (count s) "  "
 
+; The top marker, or `:none` before the root value.
 def yaml-top [s]
-  top s
+  match (count s)
+    case 0 :none
+    case _ (top s)
 
 ; The top container under another marker.
 def yaml-mark [marker s]
   push marker (pop s)
 
 ; A value completed: a mapping waiting for its member's value waits for
-; its next key.
+; its next key, and the root value, once written, is the document.
 def yaml-done [s]
   match (count s)
-    case 0 s
+    case 0 [:root-done]
     case _
       match (yaml-top s)
         case :member (yaml-mark :object s)
@@ -115,42 +120,58 @@ def yaml-key [name at]
 
 ; A key, written where the mapping's keys go.
 def yaml-member [name s]
-  let [s2 (yaml-mark :member s)]
-    match (yaml-top s)
-      case :object-open
-        transition s2 [(yaml-lead :mapping (pop s)) (yaml-key name (yaml-indent (pop s)))]
-      case :object
-        transition s2 [(yaml-indent (pop s)) (yaml-key name (yaml-indent (pop s)))]
-      case _ (fail "the events hold a key where a value is due, which a tree's never do")
+  match (yaml-top s)
+    case :object-open
+      transition (yaml-mark :member s) [(yaml-lead :mapping (pop s)) (yaml-key name (yaml-indent (pop s)))]
+    case :object
+      transition (yaml-mark :member s) [(yaml-indent (pop s)) (yaml-key name (yaml-indent (pop s)))]
+    case _ (fail "the events hold a key where a value is due, which a tree's never do")
+
+; The state a value may begin in: anywhere but a mapping waiting for a key.
+def yaml-value [s]
+  match (yaml-top s)
+    case :object-open (fail "the events hold a value where a key is due, which a tree's never do")
+    case :object (fail "the events hold a value where a key is due, which a tree's never do")
+    case _ s
 
 def yaml-step [s event]
+  match (yaml-top s)
+    case :root-done (fail "the events hold more after the root value, which a tree's never do")
+    case _ (yaml-event s event)
+
+def yaml-event [s event]
   match event
     case object-start
-      transition (push :object-open (yaml-opened s)) [(yaml-opening s)]
+      transition (push :object-open (yaml-opened (yaml-value s))) [(yaml-opening s)]
     case array-start
-      transition (push :array-open (yaml-opened s)) [(yaml-opening s)]
+      transition (push :array-open (yaml-opened (yaml-value s))) [(yaml-opening s)]
     case (key name) (yaml-member name s)
     case (scalar value)
-      let [s2 (yaml-opened s)]
+      let [s2 (yaml-opened (yaml-value s))]
         transition (yaml-done s2) [(yaml-opening s) (yaml-lead :scalar s2) (yaml-scalar value) "\n"]
     case object-end
       match (yaml-top s)
         case :object-open
           transition (yaml-done (pop s)) [(yaml-lead :scalar (pop s)) "{}\n"]
+        case :object
+          transition (yaml-done (pop s)) []
         case :member
           fail "the events end a mapping after a key and before its value, which a tree's never do"
         case _
-          transition (yaml-done (pop s)) []
+          fail "the events end a mapping that is not open, which a tree's never do"
     case array-end
       match (yaml-top s)
         case :array-open
           transition (yaml-done (pop s)) [(yaml-lead :scalar (pop s)) "[]\n"]
-        case _
+        case :array
           transition (yaml-done (pop s)) []
+        case _
+          fail "the events end a sequence that is not open, which a tree's never do"
 
 def yaml-finish [s]
-  match (count s)
-    case 0 []
+  match (yaml-top s)
+    case :root-done []
+    case :none (fail "the events hold no value, where a tree's hold one")
     case _ (fail "the events ended inside a container")
 
 ; The render: the tree's events in, the document's text out.
