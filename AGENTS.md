@@ -282,20 +282,24 @@ reads two things from this repository, both through the Rust crate:
   construction, and a host that streams a parse refuses a member the
   parse repeats, since YAML forbids a repeated key and the render writes
   what it is given. Its state is the stack of open containers, so it
-  grows with a document's nesting, never with its width. `render_text()`
-  embeds it with `include_str!`.
+  grows with a document's nesting, never with its width.
 - **The manifest's `translate` object**, in
   [`tabnas.plugin.json`](tabnas.plugin.json): YAML reads as a tree and
   writes from one (`reads`, `writes`), the render is that file
   (`render`), and `loss` is the sentences the host prints about what a
   written document does not keep (comments, anchors and aliases, tags,
   styles, a stream of several documents). There is no `lift`: YAML's
-  events carry the tree already. `manifest_text()` embeds the manifest,
-  and admin's descriptor task keeps the object and checks its shape.
+  events carry the tree already. Admin's descriptor task keeps the
+  object and checks its shape.
 
-`rs/tests/translate_test.rs` holds the two together: the file the
-embedded manifest names is `render_text()`, the shapes and the loss are
-well formed, and every definition is named for YAML. What it cannot
+The Rust crate hands both over as `manifest_text()` and `render_text()`.
+A crate packaged for crates.io holds nothing outside `rs/`, so it embeds
+its own copies, `rs/translate/manifest.json` and
+`rs/translate/render.alc`: **change the file at the root, then copy it
+there.** `rs/tests/translate_test.rs` holds the two together: the
+embedded manifest is `tabnas.plugin.json`, the file it names is the
+embedded render, the shapes and the loss are well formed, and every
+definition is named for YAML. What it cannot
 check is the render itself, since this repository does not depend on
 alchemy (that is the maintainer's call, like any dependency). The round
 trip that does, every YAML fixture read, written through the render and

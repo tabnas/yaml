@@ -1,0 +1,54 @@
+{
+  "$schema": "https://tabnas.dev/schema/plugin.schema.json",
+  "name": "@tabnas/yaml",
+  "go": "github.com/tabnas/yaml/go",
+  "description": "YAML parsing for the tabnas engine.",
+  "base": "@tabnas/jsonic",
+  "engine": "@tabnas/parser",
+  "grammar": "yaml-grammar.jsonic",
+  "extensions": [
+    ".yaml",
+    ".yml"
+  ],
+  "mediaTypes": [
+    "application/yaml"
+  ],
+  "languageId": "yaml",
+  "pluginKind": "grammar",
+  "grammarKind": "closure",
+  "lexStream": "clean",
+  "syncGroups": [
+    "end",
+    "comma",
+    "close",
+    "sync"
+  ],
+  "specDir": "test/spec",
+  "clib": {
+    "dir": "go/clib",
+    "library": "libtabnasyaml",
+    "abi": "v1",
+    "errorCodes": [
+      "usage",
+      "grammar",
+      "handle",
+      "internal"
+    ]
+  },
+  "errorCodes": [],
+  "docs": "https://tabnas.dev/docs/packages",
+  "repository": "https://github.com/tabnas/yaml",
+  "versionSource": "ts/package.json",
+  "translate": {
+    "reads": "tree",
+    "writes": "tree",
+    "render": "alchemy/render.alc",
+    "loss": [
+      "Comments are not kept.",
+      "Anchors and aliases are not kept: an alias is written as a copy of the value it names.",
+      "Tags are not kept.",
+      "Styles are not kept: every string and key is written double-quoted, and every collection in block style.",
+      "A stream of several documents is written as one document, a sequence of them."
+    ]
+  }
+}

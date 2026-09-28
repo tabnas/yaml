@@ -1,14 +1,14 @@
 // The translation parts: what the manifest says and what the crate
 // embeds are the same files.
 //
-// `manifest_text()` embeds `tabnas.plugin.json` and `render_text()`
-// embeds `alchemy/render.alc`, so a renamed file fails the build. What
-// the build cannot see is the manifest's `translate.render` naming a
-// different file, or the manifest edited alone. A host reads the shapes
-// and the loss from the embedded manifest and the render from the
-// accessor, so the two must name one text: this reads the path the
-// embedded manifest names, from the repository, and compares it with the
-// accessor's.
+// A packaged crate holds nothing outside `rs/`, so the crate embeds its
+// own copies, `rs/translate/manifest.json` of `tabnas.plugin.json` and
+// `rs/translate/render.alc` of the render the manifest names, as
+// `manifest_text()` and `render_text()`. The copies are the only texts a
+// host sees, so they must be the files: this holds the embedded manifest
+// to the repository's, and the render the manifest names, read from the
+// repository, to the embedded one. Change the file at the root and copy
+// it into `rs/translate/`; this fails until both are the same.
 
 mod common;
 
@@ -26,6 +26,17 @@ fn translate() -> Value {
 }
 
 #[test]
+fn the_manifest_the_crate_embeds_is_the_repositorys() {
+    let on_disk = fs::read_to_string(common::repo_root().join("tabnas.plugin.json"))
+        .expect("the repository has its manifest");
+    assert_eq!(
+        on_disk,
+        tabnas_yaml::manifest_text(),
+        "rs/translate/manifest.json is not tabnas.plugin.json: copy the manifest into rs/translate"
+    );
+}
+
+#[test]
 fn the_render_the_manifest_names_is_the_one_the_crate_embeds() {
     let translate = translate();
     let path = translate["render"]
@@ -36,7 +47,8 @@ fn the_render_the_manifest_names_is_the_one_the_crate_embeds() {
     assert_eq!(
         on_disk,
         tabnas_yaml::render_text(),
-        "translate.render names {path}, and render_text() embeds another text"
+        "translate.render names {path}, and rs/translate/render.alc, which render_text() \
+         embeds, is another text: copy the render into rs/translate"
     );
 }
 

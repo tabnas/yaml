@@ -8,7 +8,8 @@ and this file only covers what is specific to this crate.
 
 | Path | |
 |---|---|
-| `src/lib.rs` | the option struct, the embedded grammar, every closure the grammar names, the `stream` rule, the rule lifecycle wiring, `yaml`, `plugin`, `make`, `make_with`, `parse`, `VERSION`, and the translation parts `manifest_text` and `render_text`, `include_str!` of `../tabnas.plugin.json` and `../alchemy/render.alc` |
+| `src/lib.rs` | the option struct, the embedded grammar, every closure the grammar names, the `stream` rule, the rule lifecycle wiring, `yaml`, `plugin`, `make`, `make_with`, `parse`, `VERSION`, and the translation parts `manifest_text` and `render_text`, `include_str!` of the copies in `translate/` |
+| `translate/` | the crate's copies of `../tabnas.plugin.json` (as `manifest.json`) and `../alchemy/render.alc`, which a packaged crate needs; `tests/translate_test.rs` holds them to the files |
 | `src/lex.rs` | the YAML lexer matcher: indentation, block sequence markers, document frames, anchors, aliases, tags, explicit keys, both quoted forms, flow punctuation |
 | `src/text.rs` | what the canonical port puts in `options.text.check`: block scalars and plain scalars, plus the typed-tag handler `lex.rs` calls |
 | `src/state.rs` | the per-parse state, in the context's `u` bag |
