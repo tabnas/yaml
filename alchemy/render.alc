@@ -68,6 +68,7 @@ def yaml-lead [shape s]
           match shape
             case :sequence (concat (yaml-indent (pop s)) "-\n")
             case _ (concat (yaml-indent (pop s)) "- ")
+        case _ (fail "the events hold a value where a key is due, which a tree's never do")
 
 ; A held sequence is opened by its first item.
 def yaml-opened [s]
@@ -120,6 +121,7 @@ def yaml-member [name s]
         transition s2 [(yaml-lead :mapping (pop s)) (yaml-key name (yaml-indent (pop s)))]
       case :object
         transition s2 [(yaml-indent (pop s)) (yaml-key name (yaml-indent (pop s)))]
+      case _ (fail "the events hold a key where a value is due, which a tree's never do")
 
 def yaml-step [s event]
   match event
@@ -135,6 +137,8 @@ def yaml-step [s event]
       match (yaml-top s)
         case :object-open
           transition (yaml-done (pop s)) [(yaml-lead :scalar (pop s)) "{}\n"]
+        case :member
+          fail "the events end a mapping after a key and before its value, which a tree's never do"
         case _
           transition (yaml-done (pop s)) []
     case array-end
