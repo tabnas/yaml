@@ -103,6 +103,22 @@ Parse errors are the engine's `TabnasError`, re-exported as `YamlError`,
 with `code`, `row`, `col` and a report that shows the offending source
 with a caret under it.
 
+The crate also carries what a host needs to write YAML from another
+format. `render_text()` is YAML's render, a library in the
+[alchemy](https://github.com/tabnas/alchemy) language whose entry point,
+`yaml-render`, writes a tree's events as one YAML document with every
+string and key double-quoted. `manifest_text()` is the repository's
+`tabnas.plugin.json`. Its `translate` object names that file and lists
+what a written document loses, from comments to anchors. The crate never
+runs the render: a host that runs alchemy links it with its own program.
+
+```rust
+fn main() {
+    assert!(tabnas_yaml::render_text().contains("def yaml-render [input]"));
+    assert!(tabnas_yaml::manifest_text().contains("\"translate\""));
+}
+```
+
 ## The conformance bar, measured
 
 This is not a full YAML 1.2 parser. The bar is the feature set above,
@@ -174,6 +190,10 @@ them written up with a measured table in
   `YamlOptions { meta }` is the whole surface, and `make_with` takes it
   by value. The callable facade TypeScript exposes has no Rust
   counterpart.
+- **The translation parts are this port's alone for now.**
+  `render_text()` and `manifest_text()` have no TypeScript or Go
+  counterpart. The manifest names the render's file, so the other two
+  ports can read the same text once they run alchemy.
 - **A document stream that carries no documents reads as null.** The
   engine replaces every `Undefined` in a finished value with null before
   a caller sees it, so `...` parses to null where TypeScript gives

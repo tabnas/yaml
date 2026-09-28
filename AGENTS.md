@@ -129,6 +129,7 @@ j.parse('name: Alice\nitems:\n  - one\n  - two\n')
 | [`ts/`](ts/) | **Canonical** TypeScript implementation — the `@tabnas/yaml` package. The entire plugin (lexer matcher + grammar wiring + scalar/anchor/tag handling) lives in the single large [`ts/src/yaml.ts`](ts/src/yaml.ts). Depends on `@tabnas/jsonic` and `@tabnas/parser`. |
 | [`go/`](go/) | Go port — `github.com/tabnas/yaml/go`. The whole plugin is in [`go/yaml.go`](go/yaml.go); the package's `const VERSION` lives there too. Module path is `github.com/tabnas/yaml/go`, but its only tabnas dependency is **jsonic** (see below). |
 | [`rs/`](rs/) | Rust port — crate `tabnas-yaml`, library `tabnas_yaml`. The plugin is [`rs/src/lib.rs`](rs/src/lib.rs) (options, grammar, rule wiring, entry points) with the lexer in `rs/src/lex.rs`, the scalar handlers in `rs/src/text.rs` and the per-parse state in `rs/src/state.rs`; `pub const VERSION` lives in `lib.rs`. Path dependencies on sibling checkouts of **parser**, **jsonic** (and **json** beneath it) and, for tests, **support**. |
+| [`alchemy/render.alc`](alchemy/render.alc) | **YAML's render**, an [alchemy](https://github.com/tabnas/alchemy) library whose entry point `yaml-render` writes a tree's events as one YAML document. The manifest's `translate` object names it and the Rust crate embeds it (`render_text()`); see [The translation parts](#the-translation-parts). |
 | [`yaml-grammar.jsonic`](yaml-grammar.jsonic) | **Single source of truth for the grammar**, written in jsonic syntax. Lives at the **repo root** and is embedded verbatim into `ts/src/yaml.ts`, `go/yaml.go` and `rs/src/lib.rs` by [`ts/embed-grammar.js`](ts/embed-grammar.js). Do not edit the embedded copies by hand — edit the `.jsonic` and re-run the embed. |
 | [`test/spec/`](test/spec/) | **Repo-root shared fixtures**, auto-discovered and run by all three runtimes: `*.tsv` files with an `input`/`expected`/`opts` header row. See [`test/AGENTS.md`](test/AGENTS.md) for the exact format. |
 | [`test/yaml-test-suite/`](test/yaml-test-suite/) | The upstream YAML Test Suite corpus, vendored verbatim and run by **all three** runtimes, plus the two shared ledgers every runner reads: [`test/yaml-test-suite-lenient.tsv`](test/yaml-test-suite-lenient.tsv) (`error` cases this parser accepts) and [`test/yaml-test-suite-unparsed.tsv`](test/yaml-test-suite-unparsed.tsv) (parse-only cases it still rejects). |
@@ -251,7 +252,9 @@ exposes convenience entry points):
   YamlError>` (shared default instance), `make()` and
   `make_with(YamlOptions)`, the plugin as both `plugin() -> Plugin` and
   `yaml(&mut Tabnas, &YamlOptions)`, the `YamlOptions` struct, the
-  `YamlError` re-export, and `pub const VERSION`.
+  `YamlError` re-export, `pub const VERSION`, and the translation parts,
+  `render_text()` and `manifest_text()` (below), which TS and Go have no
+  counterpart for yet.
 - **`VERSION` must always equal `ts/package.json` "version"**, in all
   three runtimes. `go/version_test.go`, `ts/test/version.test.ts` and
   `rs/tests/version_test.rs` are the CI checks: they read
@@ -261,6 +264,51 @@ exposes convenience entry points):
 - `YamlOptions{ meta }` exists in both: with `meta: true`, parsing
   returns `{ meta, content }` (per-document `{directives, explicit,
   ended}`) instead of bare content.
+
+## The translation parts
+
+A host that translates between formats (aless's `--render yaml`, the
+design in tabnas/transduce's
+[`docs/translation.md`](https://github.com/tabnas/transduce/blob/main/docs/translation.md))
+reads two things from this repository, both through the Rust crate:
+
+- **The render**, [`alchemy/render.alc`](alchemy/render.alc): a library
+  of alchemy definitions with no `export`, which the host links with its
+  own program. Every definition is named `yaml-...`, so that no two
+  formats' helpers collide in one program, and the entry point is
+  `yaml-render`: a tree's events in, one YAML document out, in block
+  style with every string and key double-quoted. The events must be a
+  tree's, each key once per mapping: a walked value is one by
+  construction, and a host that streams a parse refuses a member the
+  parse repeats, since YAML forbids a repeated key and the render writes
+  what it is given. Its state is the stack of open containers, so it
+  grows with a document's nesting, never with its width.
+- **The manifest's `translate` object**, in
+  [`tabnas.plugin.json`](tabnas.plugin.json): YAML reads as a tree and
+  writes from one (`reads`, `writes`), the render is that file
+  (`render`), and `loss` is the sentences the host prints about what a
+  written document does not keep (comments, anchors and aliases, tags,
+  styles, a stream of several documents). There is no `lift`: YAML's
+  events carry the tree already. Admin's descriptor task keeps the
+  object and checks its shape.
+
+The Rust crate hands both over as `manifest_text()` and `render_text()`.
+A crate packaged for crates.io holds nothing outside `rs/`, so it embeds
+its own copies, `rs/translate/manifest.json` and
+`rs/translate/render.alc`: **change the file at the root, then copy it
+there.** `rs/tests/translate_test.rs` holds the two together: the
+embedded manifest is `tabnas.plugin.json`, the file it names is the
+embedded render, the shapes and the loss are well formed, and every
+definition is named for YAML. What it cannot
+check is the render itself, since this repository does not depend on
+alchemy (that is the maintainer's call, like any dependency). The round
+trip that does, every YAML fixture read, written through the render and
+read back to the same value, runs in aless's suite, which has both
+crates. It holds for every input the reader reads except those that meet
+[tabnas/yaml#86](https://github.com/tabnas/yaml/issues/86), a reader
+defect with a quoted key at the start of a line after a block sequence;
+the render's output for them is valid YAML. Change the render there
+first, and keep the naming rule.
 
 ## Repo-specific gotchas
 
