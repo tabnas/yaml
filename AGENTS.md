@@ -277,8 +277,13 @@ reads two things from this repository, both through the Rust crate:
   own program. Every definition is named `yaml-...`, so that no two
   formats' helpers collide in one program, and the entry point is
   `yaml-render`: a tree's events in, one YAML document out, in block
-  style with every string and key double-quoted. `render_text()` embeds
-  it with `include_str!`.
+  style with every string and key double-quoted. The events must be a
+  tree's, each key once per mapping: a walked value is one by
+  construction, and a host that streams a parse refuses a member the
+  parse repeats, since YAML forbids a repeated key and the render writes
+  what it is given. Its state is the stack of open containers, so it
+  grows with a document's nesting, never with its width. `render_text()`
+  embeds it with `include_str!`.
 - **The manifest's `translate` object**, in
   [`tabnas.plugin.json`](tabnas.plugin.json): YAML reads as a tree and
   writes from one (`reads`, `writes`), the render is that file

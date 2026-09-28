@@ -16,37 +16,28 @@
 ; A container's opening is held until its first child or its end, so an
 ; empty one is `{}` or `[]` on its key's line. A key whose quoted form is
 ; longer than 1024 characters, past which YAML stops reading an implicit
-; key, is written explicitly, `? key` on its own line. A mapping holds a
-; key once, so a repeated key is refused as unrepresentable, naming it.
+; key, is written explicitly, `? key` on its own line.
 ;
-; The state is the stack of open containers, one frame each: a marker and
-; the set of keys the container has written (`put` and `get` over a
-; record). That set is the one part of the state that grows with a
-; document's width rather than its nesting, and the state is capped at
-; max_metadata_bytes.
+; The events are a tree's: a mapping holds each key once. A walked value
+; is one by construction; a host that streams a parse must refuse a
+; member the parse repeats, since the render writes what it is given and
+; YAML forbids a repeated key.
 ;
-; The markers: `:object-open` and `:array-open` for a container with
-; nothing written yet, `:object` for a mapping waiting for a key,
-; `:member` for one whose key is written and waits for the value, and
-; `:array` for a sequence waiting for an item.
+; The state is the stack of open containers, one marker each, so it grows
+; with a document's nesting and never with its width: `:object-open` and
+; `:array-open` for a container with nothing written yet, `:object` for a
+; mapping waiting for a key, `:member` for one whose key is written and
+; waits for the value, and `:array` for a sequence waiting for an item.
 
 def yaml-indent [s]
   repeat (count s) "  "
 
-def yaml-marker [frame]
-  match frame
-    case [marker written] marker
-
-def yaml-written [frame]
-  match frame
-    case [marker written] written
-
 def yaml-top [s]
-  yaml-marker (top s)
+  top s
 
-; The top frame under another marker, its keys kept.
+; The top container under another marker.
 def yaml-mark [marker s]
-  push [marker (yaml-written (top s))] (pop s)
+  push marker (pop s)
 
 ; A value completed: a mapping waiting for its member's value waits for
 ; its next key.
@@ -121,10 +112,9 @@ def yaml-key [name at]
     case :greater (concat "? " (quoted name) "\n" at ":")
     case _ (concat (quoted name) ":")
 
-; A key the mapping has not written: written, where the mapping's keys go,
-; and remembered.
+; A key, written where the mapping's keys go.
 def yaml-member [name s]
-  let [s2 (push [:member (put name true (yaml-written (top s)))] (pop s))]
+  let [s2 (yaml-mark :member s)]
     match (yaml-top s)
       case :object-open
         transition s2 [(yaml-lead :mapping (pop s)) (yaml-key name (yaml-indent (pop s)))]
@@ -134,13 +124,10 @@ def yaml-member [name s]
 def yaml-step [s event]
   match event
     case object-start
-      transition (push [:object-open (record)] (yaml-opened s)) [(yaml-opening s)]
+      transition (push :object-open (yaml-opened s)) [(yaml-opening s)]
     case array-start
-      transition (push [:array-open (record)] (yaml-opened s)) [(yaml-opening s)]
-    case (key name)
-      match (kind (get name (yaml-written (top s))))
-        case :missing (yaml-member name s)
-        case _ (unrepresentable "a YAML mapping cannot hold a key twice" name)
+      transition (push :array-open (yaml-opened s)) [(yaml-opening s)]
+    case (key name) (yaml-member name s)
     case (scalar value)
       let [s2 (yaml-opened s)]
         transition (yaml-done s2) [(yaml-opening s) (yaml-lead :scalar s2) (yaml-scalar value) "\n"]
