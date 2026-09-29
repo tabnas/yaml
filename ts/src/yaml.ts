@@ -260,6 +260,29 @@ const FLOW_SCAN_CHARS = new Uint8Array(126)
 for (const c of '"\'\\#{}[]|>') FLOW_SCAN_CHARS[c.charCodeAt(0)] = 1
 
 
+// The value a `!!int` tag gives its text: YAML's core-schema hex (0x1f)
+// and octal (0o17) forms, then a decimal parse. A text no form reads
+// stays NaN, as before: the tag applies even when its value does not.
+function yamlTagInt(raw: string): number {
+  let m = raw.match(/^([-+]?)0x([0-9a-fA-F]+)$/) || raw.match(/^([-+]?)0o([0-7]+)$/)
+  if (m) {
+    let n = parseInt(m[2], raw.includes('0x') ? 16 : 8)
+    return '-' === m[1] ? -n : n
+  }
+  return parseInt(raw, 10)
+}
+
+// The value a `!!float` tag gives its text: the core schema's infinities
+// and not-a-number (.inf, -.inf, +.inf, .nan in three casings), then a
+// decimal parse.
+function yamlTagFloat(raw: string): number {
+  let m = raw.match(/^([-+]?)\.(inf|Inf|INF)$/)
+  if (m) return '-' === m[1] ? -Infinity : Infinity
+  if (/^\.(nan|NaN|NAN)$/.test(raw)) return NaN
+  return parseFloat(raw)
+}
+
+
 const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
   // Install once per instance: a second use(Yaml) on the same instance
   // returns here. options() does not re-run plugins, and make() builds a
@@ -447,6 +470,13 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
     return out
   }
 
+  // Whether offset `i` begins a line: the source start, just after a line
+  // break, or just after the byte order mark that opens the stream.
+  function atLineStart(src: string, i: number): boolean {
+    return 0 === i || src[i - 1] === '\n' || src[i - 1] === '\r' ||
+      (1 === i && 0xFEFF === src.charCodeAt(0))
+  }
+
   function isYamlSpace(c: string | undefined): boolean {
     return c === ' ' || c === '\t' || c === '\n' || c === '\r'
   }
@@ -457,13 +487,14 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
   // a node. Anything else is inside a plain scalar.
   function startsYamlNode(src: string, i: number): boolean {
     // Char codes throughout: this runs for every bracket and quote in block
-    // text, and indexing a string allocates a one-character string.
+    // text, and indexing a string allocates a one-character string. A byte
+    // order mark opening the stream counts as a line start.
     let p = i - 1
     let c = p >= 0 ? src.charCodeAt(p) : -1
-    if (c === 10 || c === 13 || c < 0) return true
+    if (c === 10 || c === 13 || c < 0 || (0 === p && 0xFEFF === c)) return true
     if (c !== 32 && c !== 9) return false
     while (c === 32 || c === 9) c = --p >= 0 ? src.charCodeAt(p) : -1
-    if (c === 10 || c === 13 || c < 0) return true
+    if (c === 10 || c === 13 || c < 0 || (0 === p && 0xFEFF === c)) return true
     if (c === 58) return true // `:`
     if (c === 45 || c === 63) { // `-` / `?`
       if (c === 45 && src.charCodeAt(p - 1) === 45 && src.charCodeAt(p - 2) === 45 &&
@@ -520,6 +551,7 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
     if (j < src.length && src[j] !== '\n' && src[j] !== '\r') return i
     let ls = i
     while (ls > 0 && src[ls - 1] !== '\n' && src[ls - 1] !== '\r') ls--
+    if (0 === ls && 0xFEFF === src.charCodeAt(0)) ls = 1
     let lineIndent = 0
     while (src[ls + lineIndent] === ' ') lineIndent++
     let isRoot = ls + lineIndent === i ||
@@ -671,6 +703,7 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
               // containingIndent and the --- check.
               let li = pnt.sI
               while (li > 0 && lex.src[li - 1] !== '\n' && lex.src[li - 1] !== '\r') li--
+              if (0 === li && 0xFEFF === lex.src.charCodeAt(0)) li = 1
               let lineStart = li
               while (li < pnt.sI && lex.src[li] === ' ') { containingIndent++; li++ }
               // Check if this line starts with --- (document start marker).
@@ -953,7 +986,10 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
             rawVal = fwd.substring(valStart + 1, valEnd - 1)
           } else {
             // Unquoted value — to end of line, stopping at `: ` and ` #`.
+            // A `#` straight after the tag's space starts a comment, so
+            // the value is empty (`!!str #c` is "").
             while (valEnd < fwd.length && fwd[valEnd] !== '\n' && fwd[valEnd] !== '\r') {
+              if (valEnd === valStart && valStart > tagEnd && fwd[valEnd] === '#') break
               if (fwd[valEnd] === ':' && (fwd[valEnd+1] === ' ' || fwd[valEnd+1] === '\n' ||
                   fwd[valEnd+1] === '\r' || fwd[valEnd+1] === undefined)) break
               if (fwd[valEnd] === ' ' && fwd[valEnd+1] === '#') break
@@ -964,8 +1000,8 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
           // Apply tag conversion.
           let result: any
           if (tag === 'str') result = String(rawVal)
-          else if (tag === 'int') result = parseInt(rawVal, 10)
-          else if (tag === 'float') result = parseFloat(rawVal)
+          else if (tag === 'int') result = yamlTagInt(rawVal)
+          else if (tag === 'float') result = yamlTagFloat(rawVal)
           else if (tag === 'bool') result = rawVal === 'true' || rawVal === 'True' || rawVal === 'TRUE'
           else if (tag === 'null') result = null
           else result = rawVal  // Unknown tag — keep as string.
@@ -1003,6 +1039,7 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
         // Find key indent and determine context for multiline scalars.
         let lineStart = pnt.sI
         while (lineStart > 0 && lex.src[lineStart - 1] !== '\n' && lex.src[lineStart - 1] !== '\r') lineStart--
+        if (0 === lineStart && 0xFEFF === lex.src.charCodeAt(0)) lineStart = 1
 
         // Current line indent (indent of the line where text starts).
         let currentLineIndent = 0
@@ -1176,6 +1213,7 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
           'on': true, 'On': true, 'ON': true,
           'off': false, 'Off': false, 'OFF': false,
           '.inf': Infinity, '.Inf': Infinity, '.INF': Infinity,
+          '+.inf': Infinity, '+.Inf': Infinity, '+.INF': Infinity,
           '-.inf': -Infinity, '-.Inf': -Infinity, '-.INF': -Infinity,
           '.nan': NaN, '.NaN': NaN, '.NAN': NaN,
         }
@@ -1277,6 +1315,13 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
                   let tkn = lex.token('#VL', null, '', lex.pnt)
                   lex.pnt.sI = 0
                   return tkn
+                }
+                // A byte order mark opening the stream is not content: step
+                // over it without counting a column. atLineStart and the
+                // flow scan treat the offset after it as a line start.
+                if (0 === lex.pnt.sI && 0xFEFF === src.charCodeAt(0)) {
+                  lex.pnt.sI = 1
+                  lex.refwd()
                 }
               }
               // Drain any queued tokens first (from multi-token explicit keys).
@@ -1495,8 +1540,7 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
               // #DR token whose val is the raw directive text. The stream rule
               // applies the directive (e.g. %TAG handle registration) at parse
               // time via the @apply-directive action.
-              if ((pnt.sI === 0 || lex.src[pnt.sI - 1] === '\n' ||
-                   lex.src[pnt.sI - 1] === '\r') && fwd[0] === '%') {
+              if (fwd[0] === '%' && atLineStart(lex.src, pnt.sI)) {
                 let pos = 0
                 while (pos < fwd.length && fwd[pos] !== '\n' && fwd[pos] !== '\r') pos++
                 let directiveSrc = fwd.substring(0, pos)
@@ -1672,8 +1716,8 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
                   let rawVal = fwd.substring(valStart + 1, valEnd - 1)
                   let result: any = rawVal
                   if (!tagHandles['!!']) {
-                    if (tag === 'int') result = parseInt(rawVal, 10)
-                    else if (tag === 'float') result = parseFloat(rawVal)
+                    if (tag === 'int') result = yamlTagInt(rawVal)
+                    else if (tag === 'float') result = yamlTagFloat(rawVal)
                     else if (tag === 'bool') result = rawVal === 'true' || rawVal === 'True' || rawVal === 'TRUE'
                     else if (tag === 'null') result = null
                   }
@@ -1703,8 +1747,11 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
                   continue yamlMatchLoop
                 }
                 // Unquoted: stop at `: `, ` #`, newline, flow indicators.
+                // A `#` straight after the tag's space starts a comment, so
+                // the value is empty (`!!str #c` is "").
                 while (valEnd < fwd.length && fwd[valEnd] !== '\n' && fwd[valEnd] !== '\r' &&
                        fwd[valEnd] !== ',' && fwd[valEnd] !== '}' && fwd[valEnd] !== ']') {
+                  if (valEnd === valStart && valStart > tagEnd && fwd[valEnd] === '#') break
                   if (fwd[valEnd] === ':' && (fwd[valEnd+1] === ' ' || fwd[valEnd+1] === '\n' ||
                       fwd[valEnd+1] === '\r' || fwd[valEnd+1] === undefined)) break
                   if (fwd[valEnd] === ' ' && fwd[valEnd+1] === '#') break
@@ -1717,8 +1764,8 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
                 // !!type is a user-defined tag, not a YAML core type.
                 if (!tagHandles['!!']) {
                   if (tag === 'str') result = String(rawVal)
-                  else if (tag === 'int') result = parseInt(rawVal, 10)
-                  else if (tag === 'float') result = parseFloat(rawVal)
+                  else if (tag === 'int') result = yamlTagInt(rawVal)
+                  else if (tag === 'float') result = yamlTagFloat(rawVal)
                   else if (tag === 'bool') result = rawVal === 'true' || rawVal === 'True' || rawVal === 'TRUE'
                   else if (tag === 'null') result = null
                 }
@@ -1968,14 +2015,13 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
               // (no spurious #IN gets emitted between #DS and the content).
               // Inline content on the same line as the marker (--- foo) is
               // left in place for the next call.
-              if ((pnt.sI === 0 || lex.src[pnt.sI - 1] === '\n' ||
-                   lex.src[pnt.sI - 1] === '\r') &&
-                  ((fwd[0] === '-' && fwd[1] === '-' && fwd[2] === '-' &&
+              if (((fwd[0] === '-' && fwd[1] === '-' && fwd[2] === '-' &&
                     (fwd[3] === '\n' || fwd[3] === '\r' ||
                      fwd[3] === ' ' || fwd[3] === '\t' || fwd[3] === undefined)) ||
                    (fwd[0] === '.' && fwd[1] === '.' && fwd[2] === '.' &&
                     (fwd[3] === '\n' || fwd[3] === '\r' ||
-                     fwd[3] === ' ' || fwd[3] === '\t' || fwd[3] === undefined)))) {
+                     fwd[3] === ' ' || fwd[3] === '\t' || fwd[3] === undefined))) &&
+                  atLineStart(lex.src, pnt.sI)) {
                 let isEnd = fwd[0] === '.'
                 let pos = 3
                 while (pos < fwd.length && (fwd[pos] === ' ' || fwd[pos] === '\t')) pos++

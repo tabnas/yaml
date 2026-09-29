@@ -47,33 +47,3 @@
 "100_000"	jsonic number syntax; core: str 100_000
 "85.230_15e+03"	jsonic number syntax; core: str 85.230_15e+03
 "85_230.15"	jsonic number syntax; core: str 85_230.15
-
-# Defect: a !!float tag on an infinity. The tag conversion calls a decimal
-# float parse, which does not know .inf, so the value is NaN.
-"!!float +.INF"	!!float on .inf reads NaN; core: inf inf()
-"!!float +.Inf"	!!float on .inf reads NaN; core: inf inf()
-"!!float +.inf"	!!float on .inf reads NaN; core: inf inf()
-"!!float -.INF"	!!float on .inf reads NaN; core: inf inf-neg()
-"!!float -.Inf"	!!float on .inf reads NaN; core: inf inf-neg()
-"!!float -.inf"	!!float on .inf reads NaN; core: inf inf-neg()
-"!!float .INF"	!!float on .inf reads NaN; core: inf inf()
-"!!float .Inf"	!!float on .inf reads NaN; core: inf inf()
-"!!float .inf"	!!float on .inf reads NaN; core: inf inf()
-
-# Defect: a !!int tag on a hex or octal literal. The tag conversion parses
-# in base 10, so 0x10 and 0o7 read as 0.
-"!!int 0o10"	!!int on 0x/0o reads 0; core: int 8
-"!!int 0o7"	!!int on 0x/0o reads 0; core: int 7
-"!!int 0x10"	!!int on 0x/0o reads 0; core: int 16
-"!!int 0x42"	!!int on 0x/0o reads 0; core: int 66
-"!!int 0xa"	!!int on 0x/0o reads 0; core: int 10
-
-# Defect: a leading + on an infinity. Only .inf and -.inf are keywords here,
-# so +.inf stays a string.
-"+.INF"	+.inf reads as a string; core: inf inf()
-"+.Inf"	+.inf reads as a string; core: inf inf()
-"+.inf"	+.inf reads as a string; core: inf inf()
-
-# Defect: a !!str tag followed by a comment. The tag takes the comment text
-# as its value instead of an empty string.
-"!!str #empty"	!!str before a comment; core: str 

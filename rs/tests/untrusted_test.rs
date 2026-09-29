@@ -258,7 +258,8 @@ fn odd_characters_are_handled_not_crashed() {
         ("nul", "a: \u{0}", Some("{\"a\":\"\u{0}\"}")),
         ("vertical-tab", "a: \u{b}", Some("{\"a\":\"\u{b}\"}")),
         ("escape", "a: \u{1b}[0m", Some("{\"a\":\"\u{1b}[0m\"}")),
-        ("byte-order-mark", "\u{feff}a: 1", Some("{\"\u{feff}a\":1}")),
+        // A byte order mark opening the stream is not content.
+        ("byte-order-mark", "\u{feff}a: 1", Some("{\"a\":1}")),
         ("astral", "a: \u{1F600}", Some("{\"a\":\"\u{1F600}\"}")),
         ("next-line", "a: \u{85}", Some("{\"a\":\"\u{85}\"}")),
         (
