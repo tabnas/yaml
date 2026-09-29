@@ -201,7 +201,7 @@ says how each resolves them, and does not restate the versions.
   indirect. It carries **no `replace`**, and a committed one is a bug:
   pointing a module at a sibling checkout is local wiring (see "Never
   commit the local wiring" below).
-- **Rust** (`rs/Cargo.toml`): `tabnas = { path = "../../parser/rs" }` and
+- **Rust** (`rs/Cargo.toml`): `tabnas = { package = "tabnas-parser", path = "../../parser/rs" }` and
   `tabnas-jsonic = { path = "../../jsonic/rs" }`, with
   `tabnas-support = { path = "../../support/rs" }` as a dev-dependency.
   jsonic takes `tabnas-json = { path = "../../json/rs" }` in turn, so
