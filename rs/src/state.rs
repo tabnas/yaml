@@ -218,11 +218,22 @@ pub(crate) fn initialise(context: &mut Context) {
 /// does not begin a node. The scan may run past `target` (to the end of a
 /// comment or a block scalar), since the lexer never stops inside either.
 pub(crate) fn update_flow(context: &mut Context, src: &str, target: usize) {
-    let mut depth = usize_at(context, FLOW_DEPTH);
-    let mut pos = usize_at(context, FLOW_POS);
-    let mut single = flag(context, FLOW_SQ);
-    let mut double = flag(context, FLOW_DQ);
-    if target < usize_at(context, FLOW_UPTO) {
+    // Each field is a hashed lookup in the context bag, so the scan reads
+    // only what it needs and writes back only what changed. The lexer asks
+    // at the same offset several times per token, and then nothing can have
+    // changed at all.
+    let up_to = usize_at(context, FLOW_UPTO);
+    if target == up_to {
+        return;
+    }
+    let before = (
+        usize_at(context, FLOW_DEPTH),
+        usize_at(context, FLOW_POS),
+        flag(context, FLOW_SQ),
+        flag(context, FLOW_DQ),
+    );
+    let (mut depth, mut pos, mut single, mut double) = before;
+    if target < up_to {
         depth = 0;
         pos = 0;
         single = false;
@@ -234,6 +245,11 @@ pub(crate) fn update_flow(context: &mut Context, src: &str, target: usize) {
     let mut index = pos;
     while index < target {
         let character = bytes[index];
+        // Fast path: only ten bytes matter in any state.
+        if !FLOW_SCAN_BYTES[usize::from(character)] {
+            index += 1;
+            continue;
+        }
         if double {
             if character == b'\\' {
                 index += 1;
@@ -300,11 +316,33 @@ pub(crate) fn update_flow(context: &mut Context, src: &str, target: usize) {
         }
         index += 1;
     }
-    set_usize(context, FLOW_DEPTH, depth);
-    set_usize(context, FLOW_POS, index);
-    set_flag(context, FLOW_SQ, single);
-    set_flag(context, FLOW_DQ, double);
+    if depth != before.0 {
+        set_usize(context, FLOW_DEPTH, depth);
+    }
+    if index != before.1 {
+        set_usize(context, FLOW_POS, index);
+    }
+    if single != before.2 {
+        set_flag(context, FLOW_SQ, single);
+    }
+    if double != before.3 {
+        set_flag(context, FLOW_DQ, double);
+    }
 }
+
+/// The bytes `update_flow` acts on: quotes, the escape backslash, the
+/// comment mark, flow brackets, and block scalar indicators. Every other
+/// byte leaves its state unchanged. Mirrors the canonical `FLOW_SCAN_CHARS`.
+const FLOW_SCAN_BYTES: [bool; 256] = {
+    let mut table = [false; 256];
+    let marked = b"\"'\\#{}[]|>";
+    let mut i = 0;
+    while i < marked.len() {
+        table[marked[i] as usize] = true;
+        i += 1;
+    }
+    table
+};
 
 fn is_space(byte: u8) -> bool {
     matches!(byte, b' ' | b'\t' | b'\n' | b'\r')

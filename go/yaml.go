@@ -71,6 +71,7 @@ type flowScanState struct {
 	depth         int
 	pos           int
 	upTo          int
+	cr            int8 // 0 not yet looked, 1 the source has a \r, 2 it has none
 	inDoubleQuote bool
 	inSingleQuote bool
 }
@@ -103,6 +104,7 @@ func (s *flowScanState) reset() {
 	s.depth = 0
 	s.pos = 0
 	s.upTo = 0
+	s.cr = 0
 	s.inDoubleQuote = false
 	s.inSingleQuote = false
 }
@@ -151,6 +153,7 @@ func (s *flowScanState) advance(src string, target int) {
 	if target < s.upTo {
 		s.depth = 0
 		s.pos = 0
+		s.cr = 0
 		s.inDoubleQuote = false
 		s.inSingleQuote = false
 	}
@@ -223,7 +226,15 @@ func (s *flowScanState) advance(src string, target int) {
 			case '\'':
 				s.inSingleQuote = true
 			default:
-				if end := blockScalarEnd(src, fi); end > fi {
+				// A lone \r ends a line too, but most sources have none:
+				// look once per parse, not once per line.
+				if s.cr == 0 {
+					s.cr = 2
+					if strings.IndexByte(src, '\r') >= 0 {
+						s.cr = 1
+					}
+				}
+				if end := blockScalarEnd(src, fi, s.cr == 1); end > fi {
 					fi = end - 1
 				}
 			}
@@ -311,17 +322,11 @@ func plainScalarRest(src string, i int) int {
 // chomping/indentation indicators, then only a comment) at i, the offset
 // just past its content lines, or i when it is not one. Mirrors
 // blockScalarEnd in src/yaml.ts.
-func blockScalarEnd(src string, i int) int {
-	at := func(k int) byte {
-		if k < len(src) {
-			return src[k]
-		}
-		return 0
-	}
+func blockScalarEnd(src string, i int, hasCR bool) int {
 	j := i + 1
 	explicit := 0
 	for k := 0; k < 2; k++ {
-		c := at(j)
+		c := byteAt(src, j)
 		if c == '+' || c == '-' {
 			j++
 		} else if c >= '1' && c <= '9' {
@@ -329,10 +334,10 @@ func blockScalarEnd(src string, i int) int {
 			j++
 		}
 	}
-	for at(j) == ' ' || at(j) == '\t' {
+	for byteAt(src, j) == ' ' || byteAt(src, j) == '\t' {
 		j++
 	}
-	if at(j) == '#' {
+	if byteAt(src, j) == '#' {
 		for j < len(src) && src[j] != '\n' && src[j] != '\r' {
 			j++
 		}
@@ -345,7 +350,7 @@ func blockScalarEnd(src string, i int) int {
 		ls--
 	}
 	lineIndent := 0
-	for at(ls+lineIndent) == ' ' {
+	for byteAt(src, ls+lineIndent) == ' ' {
 		lineIndent++
 	}
 	isRoot := ls+lineIndent == i || strings.HasPrefix(src[ls:], "---")
@@ -354,10 +359,10 @@ func blockScalarEnd(src string, i int) int {
 		parentIndent = -1
 	}
 	pos := j
-	if at(pos) == '\r' {
+	if byteAt(src, pos) == '\r' {
 		pos++
 	}
-	if at(pos) == '\n' {
+	if byteAt(src, pos) == '\n' {
 		pos++
 	}
 	blockIndent := -1
@@ -371,14 +376,14 @@ func blockScalarEnd(src string, i int) int {
 		}
 		hasColon := false
 		for ci := ls + lineIndent; ci < i; ci++ {
-			if src[ci] == ':' && (at(ci+1) == ' ' || at(ci+1) == '\t') {
+			if src[ci] == ':' && (byteAt(src, ci+1) == ' ' || byteAt(src, ci+1) == '\t') {
 				hasColon = true
 				break
 			}
 		}
 		if hasColon {
 			si := ls + lineIndent
-			for si < i && src[si] == '-' && (at(si+1) == ' ' || at(si+1) == '\t') {
+			for si < i && src[si] == '-' && (byteAt(src, si+1) == ' ' || byteAt(src, si+1) == '\t') {
 				base += 2
 				si += 2
 				for si < i && src[si] == ' ' {
@@ -392,19 +397,27 @@ func blockScalarEnd(src string, i int) int {
 	end := pos
 	for pos < len(src) {
 		n := 0
-		for at(pos+n) == ' ' {
+		for pos+n < len(src) && src[pos+n] == ' ' {
 			n++
 		}
-		c := at(pos + n)
-		lineEnd := pos + n
-		for lineEnd < len(src) && src[lineEnd] != '\n' && src[lineEnd] != '\r' {
-			lineEnd++
+		c := byteAt(src, pos+n)
+		// Content lines are most of a block scalar: find the line end with
+		// IndexByte (assembly) rather than byte by byte, then look for a
+		// lone \r before it.
+		lineEnd := len(src)
+		if k := strings.IndexByte(src[pos+n:], '\n'); k >= 0 {
+			lineEnd = pos + n + k
+		}
+		if hasCR {
+			if k := strings.IndexByte(src[pos+n:lineEnd], '\r'); k >= 0 {
+				lineEnd = pos + n + k
+			}
 		}
 		next := lineEnd
-		if at(next) == '\r' {
+		if next < len(src) && src[next] == '\r' {
 			next++
 		}
-		if at(next) == '\n' {
+		if next < len(src) && src[next] == '\n' {
 			next++
 		}
 		if pos+n >= len(src) || c == '\n' || c == '\r' {
@@ -427,6 +440,14 @@ func blockScalarEnd(src string, i int) int {
 		pos = next
 	}
 	return end
+}
+
+// byteAt is src[k], or 0 past the end.
+func byteAt(src string, k int) byte {
+	if k < len(src) {
+		return src[k]
+	}
+	return 0
 }
 
 // quotedKeyAt reports whether a quoted scalar opens at i and is a block
