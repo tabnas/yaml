@@ -3751,6 +3751,24 @@ func handleNumericColon(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, TX jsoni
 		*skipNumberMatch = true
 		return nil
 	}
+	// A `#` inside the scalar's token follows a non-blank character, and YAML
+	// starts a comment only at a `#` after white space, so `80#` is the plain
+	// scalar "80#". Left to the number matcher it read 80, and the rest of the
+	// line went as a comment (tabnas/yaml#95). TextCheck reads it whole, as it
+	// reads `foo#bar`, and as for trailing text it takes continuation lines
+	// and stops at a mapping colon (`80#:`). The token ends at a blank, or in
+	// a flow collection at its `,` `]` `}`, so a `#` past the collection's
+	// close keeps the reading it had.
+	tokenEnd := 0
+	for tokenEnd < len(fwd) && fwd[tokenEnd] != ' ' && fwd[tokenEnd] != '\t' &&
+		fwd[tokenEnd] != '\n' && fwd[tokenEnd] != '\r' &&
+		!(inFlow && (fwd[tokenEnd] == ',' || fwd[tokenEnd] == ']' || fwd[tokenEnd] == '}')) {
+		tokenEnd++
+	}
+	if strings.IndexByte(fwd[:tokenEnd], '#') > 0 {
+		*skipNumberMatch = true
+		return nil
+	}
 	if hasBlockComma {
 		end := 0
 		for end < len(fwd) && fwd[end] != ' ' && fwd[end] != '\t' &&
