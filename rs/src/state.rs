@@ -420,11 +420,28 @@ fn block_scalar_end(bytes: &[u8], index: usize) -> usize {
     if at(pos) == Some(b'\n') {
         pos += 1;
     }
-    let mut block_indent = if explicit > 0 {
-        Some(parent.unwrap_or(0) + explicit)
-    } else {
-        None
-    };
+    let mut block_indent = None;
+    if explicit > 0 {
+        // As the block scalar handler does: after a key on the same line
+        // (`- a: |2`), the indent the indicator counts from includes each
+        // `- ` before the key, not only the line's leading spaces.
+        let mut base = parent.unwrap_or(0);
+        let start = ls + line_indent;
+        let has_colon =
+            (start..index).any(|ci| bytes[ci] == b':' && matches!(at(ci + 1), Some(b' ' | b'\t')));
+        if has_colon {
+            let mut si = start;
+            while si < index && bytes[si] == b'-' && matches!(at(si + 1), Some(b' ' | b'\t')) {
+                base += 2;
+                si += 2;
+                while si < index && bytes[si] == b' ' {
+                    base += 1;
+                    si += 1;
+                }
+            }
+        }
+        block_indent = Some(base + explicit);
+    }
     let mut end = pos;
     while pos < bytes.len() {
         let mut n = 0usize;

@@ -39,6 +39,9 @@ a:\n  b: f("\n  c: [1, 2]	{"a":{"b":"f(\"","c":[1,2]}}
 a: "x [ y"\nb: [1, 2]	{"a":"x [ y","b":[1,2]}	
 a: 'it''s ['\nb: [1, 2]	{"a":"it's [","b":[1,2]}	
 k: &x "q"\nb: [1, 2]	{"k":"q","b":[1,2]}	
+- a: |2\n    text\n  b: [1, 2]	[{"a":"text\n","b":[1,2]}]	
+- a: |1\n   x\n  b: [1, 2]	[{"a":"x\n","b":[1,2]}]	
+- - a: |2\n      t\n    b: [1, 2]	[[{"a":"t\n","b":[1,2]}]]	
 
 # tabnas/yaml#88: a flow sequence first in an indented block sequence is an item
 k:\n  - []\n	{"k":[[]]}	

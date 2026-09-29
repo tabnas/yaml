@@ -158,6 +158,10 @@ func (s *flowScanState) advance(src string, target int) {
 	fi := s.pos
 	for ; fi < target; fi++ {
 		fc := src[fi]
+		// Fast path: only ten bytes matter in any state.
+		if !flowScanBytes[fc] {
+			continue
+		}
 		if s.inDoubleQuote {
 			if fc == '\\' {
 				fi++
@@ -227,6 +231,17 @@ func (s *flowScanState) advance(src string, target int) {
 	}
 	s.pos = fi
 }
+
+// flowScanBytes marks the bytes advance acts on: quotes, the escape
+// backslash, the comment mark, flow brackets, and block scalar indicators.
+// Every other byte leaves its state unchanged. Mirrors FLOW_SCAN_CHARS in
+// src/yaml.ts.
+var flowScanBytes = func() (t [256]bool) {
+	for _, c := range []byte("\"'\\#{}[]|>") {
+		t[c] = true
+	}
+	return
+}()
 
 func isYamlSpaceByte(c byte) bool {
 	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
@@ -347,10 +362,32 @@ func blockScalarEnd(src string, i int) int {
 	}
 	blockIndent := -1
 	if explicit > 0 {
-		blockIndent = explicit
-		if parentIndent > 0 {
-			blockIndent += parentIndent
+		// As the block scalar handler does: after a key on the same line
+		// (`- a: |2`), the indent the indicator counts from includes each
+		// `- ` before the key, not only the line's leading spaces.
+		base := parentIndent
+		if base < 0 {
+			base = 0
 		}
+		hasColon := false
+		for ci := ls + lineIndent; ci < i; ci++ {
+			if src[ci] == ':' && (at(ci+1) == ' ' || at(ci+1) == '\t') {
+				hasColon = true
+				break
+			}
+		}
+		if hasColon {
+			si := ls + lineIndent
+			for si < i && src[si] == '-' && (at(si+1) == ' ' || at(si+1) == '\t') {
+				base += 2
+				si += 2
+				for si < i && src[si] == ' ' {
+					base++
+					si++
+				}
+			}
+		}
+		blockIndent = base + explicit
 	}
 	end := pos
 	for pos < len(src) {

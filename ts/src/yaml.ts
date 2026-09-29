@@ -528,7 +528,26 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
     let pos = j
     if (src[pos] === '\r') pos++
     if (src[pos] === '\n') pos++
-    let blockIndent = explicit > 0 ? Math.max(parentIndent, 0) + explicit : -1
+    let blockIndent = -1
+    if (explicit > 0) {
+      // As the block scalar handler does: after a key on the same line
+      // (`- a: |2`), the indent the indicator counts from includes each
+      // `- ` before the key, not only the line's leading spaces.
+      let base = Math.max(parentIndent, 0)
+      let hasColon = false
+      for (let ci = ls + lineIndent; ci < i; ci++) {
+        if (src[ci] === ':' && (src[ci + 1] === ' ' || src[ci + 1] === '\t')) { hasColon = true; break }
+      }
+      if (hasColon) {
+        let si = ls + lineIndent
+        while (si < i && src[si] === '-' && (src[si + 1] === ' ' || src[si + 1] === '\t')) {
+          base += 2
+          si += 2
+          while (si < i && src[si] === ' ') { base++; si++ }
+        }
+      }
+      blockIndent = base + explicit
+    }
     let end = pos
     while (pos < src.length) {
       let n = 0
