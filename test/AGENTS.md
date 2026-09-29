@@ -1,6 +1,6 @@
 # Agents Guide — shared spec fixtures
 
-This directory holds two different things:
+This directory holds three different things:
 
 - `spec/*.tsv` — the cross-runtime **parity** fixtures described below.
 - `yaml-test-suite/` — the official third-party **conformance** corpus,
@@ -9,6 +9,13 @@ This directory holds two different things:
   it accepts) and `yaml-test-suite-unparsed.tsv` (valid parse-only cases it
   rejects). Every runner reads both files, so the runtimes cannot drift.
   Lines are only ever DELETED from a ledger — see each file's header.
+- `yaml-test-schema/` — the third-party
+  [YAML Test Schema](https://github.com/perlpunk/yaml-test-schema)
+  core-schema corpus (how scalars resolve), vendored verbatim with its
+  licence, plus its ledger `yaml-test-schema-deviations.tsv` (inputs this
+  parser reads differently from the core schema, each with a reason). Same
+  discipline: a listed input that starts reading correctly must lose its
+  line. See `yaml-test-schema/README.md`.
 
 `spec/*.tsv` holds the cross-runtime parity fixtures. All three runtimes
 auto-discover and run **every** file in this directory, so a change here
