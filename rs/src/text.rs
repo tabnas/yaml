@@ -947,7 +947,7 @@ fn radix_to_f64(digits: &str, radix: u32) -> f64 {
     let kept = bits.len().min(MANTISSA);
     let mut mantissa = bits[..kept]
         .iter()
-        .fold(0u64, |acc, &bit| acc << 1 | u64::from(bit));
+        .fold(0u64, |acc, &bit| (acc << 1) | u64::from(bit));
     if bits.len() > MANTISSA {
         let round = bits[MANTISSA];
         let sticky = bits[MANTISSA + 1..].iter().any(|&bit| bit);
