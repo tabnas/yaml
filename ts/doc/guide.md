@@ -235,14 +235,26 @@ report; the `code`/`lineNumber`/`columnNumber` fields are for your code
 to branch on.
 
 
-## Turn the YAML grammar back off
+## Parse relaxed JSON without the YAML grammar
 
-Every rule and alternate the plugin adds is tagged `g: yaml`. To strip
-them from an instance (reverting to plain relaxed-JSON parsing),
-exclude that group:
+The plugin cannot be switched off on an instance once it is installed.
+Its rules and alternates are tagged `g: yaml`, but excluding that group
+(`j.options({ rule: { exclude: 'yaml' } })`) does not revert the instance
+to relaxed JSON: the plugin also makes `stream` the start rule, installs
+its own lex matcher and replaces jsonic's text and number checks, and
+those stay behind with no rules to serve them, so every parse fails.
 
-```js ignore
-const j = new Tabnas().use(jsonic).use(Yaml)
-j.options({ rule: { exclude: 'yaml' } })
-// j now parses relaxed JSON, without the YAML block-syntax extensions.
+Keep a second instance without the plugin instead. Instances are cheap and
+independent:
+
+```js
+const { Tabnas } = require('@tabnas/parser')
+const { jsonic } = require('@tabnas/jsonic')
+const { Yaml } = require('@tabnas/yaml')
+
+const yaml = new Tabnas().use(jsonic).use(Yaml)
+const relaxed = new Tabnas().use(jsonic)
+
+yaml.parse('a: 1\nb: [x, y]\n')   // => { a: 1, b: ['x', 'y'] }
+relaxed.parse('{a: 1, b: [x, y]}')  // => { a: 1, b: ['x', 'y'] }
 ```
