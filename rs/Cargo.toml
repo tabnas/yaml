@@ -17,7 +17,7 @@ path = "src/lib.rs"
 # clone https://github.com/tabnas/parser and https://github.com/tabnas/jsonic
 # next to this repo. Neither crate is published, so there is no registry
 # version to fall back on.
-tabnas = { path = "../../parser/rs" }
+tabnas = { package = "tabnas-parser", path = "../../parser/rs" }
 tabnas-jsonic = { path = "../../jsonic/rs" }
 indexmap = "2"
 regex = "1.10"

@@ -85,7 +85,7 @@ fi
 lock_without_sibling_versions() {
   awk '
     /^\[\[package\]\]$/                                                 { sib = 0 }
-    /^name = "(tabnas|tabnas-json|tabnas-jsonic|tabnas-support)"$/      { sib = 1 }
+    /^name = "(tabnas-parser|tabnas-json|tabnas-jsonic|tabnas-support)"$/      { sib = 1 }
     sib && /^version = /                                                { print "version = \"<sibling>\""; next }
                                                                         { print }
   ' "$1"
