@@ -104,21 +104,27 @@ fn anchor_alias(count: usize) -> String {
 /// jsonic's val before-close stashed a clone of it, and every pair insert
 /// then copied the whole map through `Arc::make_mut`.
 fn block_seq_values(count: usize) -> String {
-    (0..count)
-        .map(|index| format!("k{index}:\n  - {index}\n"))
-        .collect()
+    let mut out = String::new();
+    for index in 0..count {
+        out.push_str(&format!("k{index}:\n  - {index}\n"));
+    }
+    out
 }
 
 fn nested_map_values(count: usize) -> String {
-    (0..count)
-        .map(|index| format!("k{index}:\n  x: {index}\n"))
-        .collect()
+    let mut out = String::new();
+    for index in 0..count {
+        out.push_str(&format!("k{index}:\n  x: {index}\n"));
+    }
+    out
 }
 
 fn empty_values(count: usize) -> String {
-    (0..count)
-        .map(|index| format!("k{index}:\nj{index}: 1\n"))
-        .collect()
+    let mut out = String::new();
+    for index in 0..count {
+        out.push_str(&format!("k{index}:\nj{index}: 1\n"));
+    }
+    out
 }
 
 /// Parse time per byte must not grow with the input. A quadratic parser
