@@ -84,3 +84,19 @@ a: -5	{"a":-5}
 [-1, +2, -3:4]	[-1,2,"-3:4"]	
 {a: 12:30}	{"a":"12:30"}	
 {a: 1:2, b: 3}	{"a":"1:2","b":3}	
+
+# tabnas/yaml#95: a `#` straight after a leading number is part of the scalar, since
+# YAML starts a comment only at a `#` after white space
+a: 80#	{"a":"80#"}	
+a: 80#x	{"a":"80#x"}	
+a: 80#x # c\nb: 1	{"a":"80#x","b":1}	
+a: 80 # c	{"a":80}	
+- 80#	["80#"]	
+weight:\n  enum:\n    - 80#\n  type: string	{"weight":{"enum":["80#"],"type":"string"}}	
+a: -1#	{"a":"-1#"}	
+a: 1.5#	{"a":"1.5#"}	
+a: 12:30#	{"a":"12:30#"}	
+80#: v	{"80#":"v"}	
+[80#]	["80#"]	
+[1, 80#, 2]	[1,"80#",2]	
+{a: 80#}	{"a":"80#"}	

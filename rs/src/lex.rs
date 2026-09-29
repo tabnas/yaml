@@ -1722,16 +1722,24 @@ fn numeric_plain(
         return Some(text::plain_scalar(src, fwd, cursor, context));
     }
 
-    if embedded_colon || block_comma {
-        // In a flow collection the scalar also ends at its `,` `]` `}`:
-        // `[1, 12:30]` holds "12:30", not "12:30,".
-        let mut end = 0;
-        while end < fwd.len()
-            && !blank_line_end_or_eof(at(fwd, end))
-            && !(in_flow && (is(fwd, end, b',') || is(fwd, end, b']') || is(fwd, end, b'}')))
-        {
-            end += 1;
-        }
+    // In a flow collection the scalar also ends at its `,` `]` `}`:
+    // `[1, 12:30]` holds "12:30", not "12:30,".
+    let mut end = 0;
+    while end < fwd.len()
+        && !blank_line_end_or_eof(at(fwd, end))
+        && !(in_flow && (is(fwd, end, b',') || is(fwd, end, b']') || is(fwd, end, b'}')))
+    {
+        end += 1;
+    }
+    // A `#` inside the token follows a non-blank character, and YAML
+    // starts a comment only at a `#` after white space, so `80#` is the
+    // plain scalar "80#". Left to the number matcher it read 80, and the
+    // rest of the line went as a comment (tabnas/yaml#95). A `#` past a
+    // flow collection's `]` or `}` is outside the token and keeps the
+    // reading it had.
+    let embedded_hash = fwd.as_bytes()[..end].contains(&b'#');
+
+    if embedded_colon || block_comma || embedded_hash {
         let text = fwd[..end].to_string();
         let next = advance_cols(src, cursor, end);
         return Some(Act::moved(
