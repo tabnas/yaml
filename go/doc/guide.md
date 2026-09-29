@@ -205,13 +205,12 @@ result, err := j.Parse(src)
 
 ## Parse relaxed JSON without the YAML grammar
 
-The plugin cannot be switched off on an instance once it is installed.
-Its rules and alternates are tagged with the rule group `yaml`, but
-excluding that group (`Rule: &tabnasjsonic.RuleOptions{Exclude: "yaml"}`)
-does not revert the instance to relaxed JSON: the plugin also makes
-`stream` the start rule, installs its own lex matcher and replaces
-jsonic's text and number checks, and those stay behind with no rules to
-serve them, so every parse fails.
+Once installed, the plugin stays on. Its rules and alternates carry the
+rule group `yaml`, but excluding that group with
+`Rule: &tabnasjsonic.RuleOptions{Exclude: "yaml"}` leaves an instance
+that parses nothing. The plugin also makes `stream` the start rule,
+installs its own lex matcher, and replaces jsonic's text and number
+checks, and those stay behind with no rules to serve them.
 
 Keep a second instance without the plugin instead:
 
@@ -224,5 +223,5 @@ b, err := relaxed.Parse("{a: 1, b: [x, y]}") // map[a:1 b:[x y]]
 ```
 
 `TestGuideRelaxedJSONRecipe` in `guide_test.go` runs this recipe, and
-checks that excluding the group still does not work, so this section
-changes when either does.
+checks that excluding the group still fails, so this section changes
+when either does.

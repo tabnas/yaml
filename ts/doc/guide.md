@@ -237,12 +237,12 @@ to branch on.
 
 ## Parse relaxed JSON without the YAML grammar
 
-The plugin cannot be switched off on an instance once it is installed.
-Its rules and alternates are tagged `g: yaml`, but excluding that group
-(`j.options({ rule: { exclude: 'yaml' } })`) does not revert the instance
-to relaxed JSON: the plugin also makes `stream` the start rule, installs
-its own lex matcher and replaces jsonic's text and number checks, and
-those stay behind with no rules to serve them, so every parse fails.
+Once installed, the plugin stays on. Its rules and alternates carry the
+group `g: yaml`, but excluding that group with
+`j.options({ rule: { exclude: 'yaml' } })` leaves an instance that parses
+nothing. The plugin also makes `stream` the start rule, installs its own
+lex matcher, and replaces jsonic's text and number checks, and those stay
+behind with no rules to serve them.
 
 Keep a second instance without the plugin instead. Instances are cheap and
 independent:
