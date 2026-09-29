@@ -203,14 +203,25 @@ result, err := j.Parse(src)
 ```
 
 
-## Turn the YAML grammar back off
+## Parse relaxed JSON without the YAML grammar
 
-Every rule and alternate the plugin adds is tagged with the rule group
-`yaml`. To strip them (reverting to plain relaxed-JSON parsing),
-exclude that group with `SetOptions`:
+Once installed, the plugin stays on. Its rules and alternates carry the
+rule group `yaml`, but excluding that group with
+`Rule: &tabnasjsonic.RuleOptions{Exclude: "yaml"}` leaves an instance
+that parses nothing. The plugin also makes `stream` the start rule,
+installs its own lex matcher, and replaces jsonic's text and number
+checks, and those stay behind with no rules to serve them.
+
+Keep a second instance without the plugin instead:
 
 ```go
-j := tabnasyaml.MakeJsonic()
-j.SetOptions(tabnasjsonic.Options{Rule: &tabnasjsonic.RuleOptions{Exclude: "yaml"}})
-// j now parses relaxed JSON, without the YAML block-syntax extensions.
+yaml := tabnasyaml.MakeJsonic()
+relaxed := tabnasjsonic.Make()
+
+a, err := yaml.Parse("a: 1\nb: [x, y]\n")  // map[a:1 b:[x y]]
+b, err := relaxed.Parse("{a: 1, b: [x, y]}") // map[a:1 b:[x y]]
 ```
+
+`TestGuideRelaxedJSONRecipe` in `guide_test.go` runs this recipe, and
+checks that excluding the group still fails, so this section changes
+when either does.

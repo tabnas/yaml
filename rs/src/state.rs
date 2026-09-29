@@ -55,6 +55,7 @@ pub(crate) const CUR_META: &str = "yamlCurMeta";
 /// whether it is inside a single or double quoted scalar.
 pub(crate) const FLOW_DEPTH: &str = "yamlFlowDepth";
 pub(crate) const FLOW_POS: &str = "yamlFlowPos";
+pub(crate) const FLOW_UPTO: &str = "yamlFlowUpTo";
 pub(crate) const FLOW_SQ: &str = "yamlFlowSingle";
 pub(crate) const FLOW_DQ: &str = "yamlFlowDouble";
 
@@ -199,6 +200,7 @@ pub(crate) fn initialise(context: &mut Context) {
     set_flag(context, PENDING_CL, false);
     set_usize(context, FLOW_DEPTH, 0);
     set_usize(context, FLOW_POS, 0);
+    set_usize(context, FLOW_UPTO, 0);
     set_flag(context, FLOW_SQ, false);
     set_flag(context, FLOW_DQ, false);
 }
@@ -206,25 +208,48 @@ pub(crate) fn initialise(context: &mut Context) {
 /// Bring the flow-collection depth cache up to `target`, a byte offset.
 ///
 /// The canonical `updateFlowState` scans forward from where it last
-/// stopped, skipping quoted regions so a bracket inside a scalar does not
-/// change the depth. Rescanning from zero on every token would make the
-/// whole parse quadratic, which is what the cache exists to prevent.
+/// stopped. Rescanning from zero on every token would make the whole parse
+/// quadratic, which is what the cache exists to prevent.
+///
+/// The scan reads the source the way the lexer does, or text is counted
+/// as syntax (tabnas/yaml#89). A quoted region is skipped, and so are the
+/// regions where a bracket or a quote is ordinary text: a comment, a block
+/// scalar's content lines, and, in block context, any `{` `[` `"` `'` that
+/// does not begin a node. The scan may run past `target` (to the end of a
+/// comment or a block scalar), since the lexer never stops inside either.
 pub(crate) fn update_flow(context: &mut Context, src: &str, target: usize) {
-    let mut depth = usize_at(context, FLOW_DEPTH);
-    let mut pos = usize_at(context, FLOW_POS);
-    let mut single = flag(context, FLOW_SQ);
-    let mut double = flag(context, FLOW_DQ);
-    if target < pos {
+    // Each field is a hashed lookup in the context bag, so the scan reads
+    // only what it needs and writes back only what changed. The lexer asks
+    // at the same offset several times per token, and then nothing can have
+    // changed at all.
+    let up_to = usize_at(context, FLOW_UPTO);
+    if target == up_to {
+        return;
+    }
+    let before = (
+        usize_at(context, FLOW_DEPTH),
+        usize_at(context, FLOW_POS),
+        flag(context, FLOW_SQ),
+        flag(context, FLOW_DQ),
+    );
+    let (mut depth, mut pos, mut single, mut double) = before;
+    if target < up_to {
         depth = 0;
         pos = 0;
         single = false;
         double = false;
     }
+    set_usize(context, FLOW_UPTO, target);
     let bytes = src.as_bytes();
     let target = target.min(bytes.len());
     let mut index = pos;
     while index < target {
         let character = bytes[index];
+        // Fast path: only ten bytes matter in any state.
+        if !FLOW_SCAN_BYTES[usize::from(character)] {
+            index += 1;
+            continue;
+        }
         if double {
             if character == b'\\' {
                 index += 1;
@@ -236,7 +261,7 @@ pub(crate) fn update_flow(context: &mut Context, src: &str, target: usize) {
         }
         if single {
             if character == b'\'' {
-                if index + 1 < target && bytes[index + 1] == b'\'' {
+                if index + 1 < bytes.len() && bytes[index + 1] == b'\'' {
                     index += 1;
                 } else {
                     single = false;
@@ -245,27 +270,258 @@ pub(crate) fn update_flow(context: &mut Context, src: &str, target: usize) {
             index += 1;
             continue;
         }
-        match character {
-            b'{' | b'[' => depth += 1,
-            b'}' | b']' => {
-                depth = depth.saturating_sub(1);
+        if character == b'#' && (index == 0 || is_space(bytes[index - 1])) {
+            while index < bytes.len() && bytes[index] != b'\n' && bytes[index] != b'\r' {
+                index += 1;
             }
-            b'"' => double = true,
-            b'\'' => {
-                // An apostrophe inside a word does not open a scalar.
-                let previous = if index > 0 { bytes[index - 1] } else { 0 };
-                if !previous.is_ascii_alphanumeric() {
-                    single = true;
+            continue;
+        }
+        if depth > 0 {
+            match character {
+                b'{' | b'[' => depth += 1,
+                b'}' | b']' => depth -= 1,
+                b'"' => double = true,
+                b'\'' => {
+                    // An apostrophe inside a word does not open a scalar.
+                    let previous = if index > 0 { bytes[index - 1] } else { 0 };
+                    if !previous.is_ascii_alphanumeric() {
+                        single = true;
+                    }
+                }
+                _ => {}
+            }
+            index += 1;
+            continue;
+        }
+        // Block context: only a node's first character opens anything.
+        if matches!(character, b'{' | b'[' | b'"' | b'\'' | b'|' | b'>') {
+            if !starts_node(bytes, index) {
+                // Inside a plain scalar, which nothing can open until it
+                // ends at `: `, ` #` or the end of the line: skip to there.
+                index = plain_scalar_rest(bytes, index);
+                continue;
+            }
+            match character {
+                b'{' | b'[' => depth += 1,
+                b'"' => double = true,
+                b'\'' => single = true,
+                _ => {
+                    let end = block_scalar_end(bytes, index);
+                    if end > index {
+                        index = end;
+                        continue;
+                    }
                 }
             }
-            _ => {}
         }
         index += 1;
     }
-    set_usize(context, FLOW_DEPTH, depth);
-    set_usize(context, FLOW_POS, target);
-    set_flag(context, FLOW_SQ, single);
-    set_flag(context, FLOW_DQ, double);
+    if depth != before.0 {
+        set_usize(context, FLOW_DEPTH, depth);
+    }
+    if index != before.1 {
+        set_usize(context, FLOW_POS, index);
+    }
+    if single != before.2 {
+        set_flag(context, FLOW_SQ, single);
+    }
+    if double != before.3 {
+        set_flag(context, FLOW_DQ, double);
+    }
+}
+
+/// The bytes `update_flow` acts on: quotes, the escape backslash, the
+/// comment mark, flow brackets, and block scalar indicators. Every other
+/// byte leaves its state unchanged. Mirrors the canonical `FLOW_SCAN_CHARS`.
+const FLOW_SCAN_BYTES: [bool; 256] = {
+    let mut table = [false; 256];
+    let marked = b"\"'\\#{}[]|>";
+    let mut i = 0;
+    while i < marked.len() {
+        table[marked[i] as usize] = true;
+        i += 1;
+    }
+    table
+};
+
+fn is_space(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\n' | b'\r')
+}
+
+/// Whether the byte at `index` (block context) is the first character of
+/// a node: first on its line, or after a `: ` / `- ` / `? ` indicator, a
+/// `---` marker, or a node property (`&anchor`, `!tag`) that itself starts
+/// a node. Anything else is inside a plain scalar. Mirrors the canonical
+/// `startsYamlNode`.
+fn starts_node(bytes: &[u8], index: usize) -> bool {
+    let mut p = index;
+    while p > 0 && matches!(bytes[p - 1], b' ' | b'\t') {
+        p -= 1;
+    }
+    if p == 0 || matches!(bytes[p - 1], b'\n' | b'\r') {
+        return true;
+    }
+    if p == index {
+        return false;
+    }
+    let p = p - 1;
+    let pc = bytes[p];
+    if pc == b':' {
+        return true;
+    }
+    if pc == b'-' || pc == b'?' {
+        if pc == b'-'
+            && p >= 2
+            && bytes[p - 1] == b'-'
+            && bytes[p - 2] == b'-'
+            && (p < 3 || matches!(bytes[p - 3], b'\n' | b'\r'))
+        {
+            return true;
+        }
+        return starts_node(bytes, p);
+    }
+    let mut w = p;
+    while w > 0 && !is_space(bytes[w - 1]) {
+        w -= 1;
+    }
+    if bytes[w] == b'&' || bytes[w] == b'!' {
+        return starts_node(bytes, w);
+    }
+    false
+}
+
+/// From `index` inside a block-context plain scalar, the offset where it
+/// can end: the next line break, a `:` followed by whitespace or the end,
+/// or a `#` after whitespace. Mirrors the canonical `plainScalarRest`.
+fn plain_scalar_rest(bytes: &[u8], index: usize) -> usize {
+    let mut j = index + 1;
+    while j < bytes.len() {
+        match bytes[j] {
+            b'\n' | b'\r' => return j,
+            b':' if bytes.get(j + 1).is_none_or(|next| is_space(*next)) => return j,
+            b'#' if matches!(bytes[j - 1], b' ' | b'\t') => return j,
+            _ => {}
+        }
+        j += 1;
+    }
+    j
+}
+
+/// A block scalar indicator (`|` or `>`, optional chomping/indentation
+/// indicators, then only a comment) at `index`: the offset just past its
+/// content lines, or `index` when it is not one. Mirrors the canonical
+/// `blockScalarEnd`.
+fn block_scalar_end(bytes: &[u8], index: usize) -> usize {
+    let at = |k: usize| bytes.get(k).copied();
+    let mut j = index + 1;
+    let mut explicit = 0usize;
+    for _ in 0..2 {
+        match at(j) {
+            Some(b'+' | b'-') => j += 1,
+            Some(c @ b'1'..=b'9') => {
+                explicit = usize::from(c - b'0');
+                j += 1;
+            }
+            _ => {}
+        }
+    }
+    while matches!(at(j), Some(b' ' | b'\t')) {
+        j += 1;
+    }
+    if at(j) == Some(b'#') {
+        while j < bytes.len() && !matches!(bytes[j], b'\n' | b'\r') {
+            j += 1;
+        }
+    }
+    if j < bytes.len() && !matches!(bytes[j], b'\n' | b'\r') {
+        return index;
+    }
+    let mut ls = index;
+    while ls > 0 && !matches!(bytes[ls - 1], b'\n' | b'\r') {
+        ls -= 1;
+    }
+    let mut line_indent = 0usize;
+    while at(ls + line_indent) == Some(b' ') {
+        line_indent += 1;
+    }
+    let is_root = ls + line_indent == index || bytes[ls..].starts_with(b"---");
+    // The indent a content line must exceed; None is the document root's -1.
+    let parent: Option<usize> = if is_root && line_indent == 0 {
+        None
+    } else {
+        Some(line_indent)
+    };
+    let mut pos = j;
+    if at(pos) == Some(b'\r') {
+        pos += 1;
+    }
+    if at(pos) == Some(b'\n') {
+        pos += 1;
+    }
+    let mut block_indent = None;
+    if explicit > 0 {
+        // As the block scalar handler does: after a key on the same line
+        // (`- a: |2`), the indent the indicator counts from includes each
+        // `- ` before the key, not only the line's leading spaces.
+        let mut base = parent.unwrap_or(0);
+        let start = ls + line_indent;
+        let has_colon =
+            (start..index).any(|ci| bytes[ci] == b':' && matches!(at(ci + 1), Some(b' ' | b'\t')));
+        if has_colon {
+            let mut si = start;
+            while si < index && bytes[si] == b'-' && matches!(at(si + 1), Some(b' ' | b'\t')) {
+                base += 2;
+                si += 2;
+                while si < index && bytes[si] == b' ' {
+                    base += 1;
+                    si += 1;
+                }
+            }
+        }
+        block_indent = Some(base + explicit);
+    }
+    let mut end = pos;
+    while pos < bytes.len() {
+        let mut n = 0usize;
+        while at(pos + n) == Some(b' ') {
+            n += 1;
+        }
+        let c = at(pos + n);
+        let mut line_stop = pos + n;
+        while line_stop < bytes.len() && !matches!(bytes[line_stop], b'\n' | b'\r') {
+            line_stop += 1;
+        }
+        let mut next = line_stop;
+        if at(next) == Some(b'\r') {
+            next += 1;
+        }
+        if at(next) == Some(b'\n') {
+            next += 1;
+        }
+        if matches!(c, None | Some(b'\n' | b'\r')) {
+            pos = next;
+            continue;
+        }
+        let indent = match block_indent {
+            Some(indent) => indent,
+            None => {
+                if parent.is_some_and(|parent| n <= parent) {
+                    break;
+                }
+                block_indent = Some(n);
+                n
+            }
+        };
+        if n < indent {
+            break;
+        }
+        if n == 0 && (bytes[pos..].starts_with(b"---") || bytes[pos..].starts_with(b"...")) {
+            break;
+        }
+        end = line_stop;
+        pos = next;
+    }
+    end
 }
 
 /// The flow depth at `target`, after bringing the cache up to it.

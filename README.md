@@ -109,3 +109,9 @@ An ASCII version is in [`ts/doc/grammar.txt`](ts/doc/grammar.txt).
 ## License
 
 MIT. Copyright (c) Richard Rodger.
+
+The test corpora vendored under [`test/`](test/), the
+[YAML Test Suite](https://github.com/yaml/yaml-test-suite) and the
+[YAML Test Schema](https://github.com/perlpunk/yaml-test-schema), are the
+work of their authors and keep their own licences: see
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).

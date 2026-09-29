@@ -1,0 +1,79 @@
+# yaml-test-schema: core-schema cases this parser does NOT read as the
+# YAML 1.2 core schema says.
+#
+# The corpus is test/yaml-test-schema/schema-core.json. Every other case
+# in it MUST read exactly as the core schema says, and every input listed
+# here MUST still read differently. All three runners
+# (ts/test/yaml-test-schema.test.ts, go/yaml_test_schema_test.go,
+# rs/tests/yaml_test_schema_test.rs) read this file, so the runtimes cannot
+# drift.
+#
+# When the parser comes to read one of these as the core schema does,
+# DELETE its line: the test will tell you to. Never add a line to silence a
+# regression in a case that used to pass.
+#
+# Format: <input, as a JSON string> <TAB> <reason>
+# (lines starting with # and blank lines are ignored)
+
+# Documented leniency: YAML 1.1 booleans. The plugin reads yes/no/on/off (in
+# these three casings) as booleans, as its README says; the core schema
+# reads them as strings.
+"NO"	YAML 1.1 boolean; core: str NO
+"No"	YAML 1.1 boolean; core: str No
+"OFF"	YAML 1.1 boolean; core: str OFF
+"ON"	YAML 1.1 boolean; core: str ON
+"Off"	YAML 1.1 boolean; core: str Off
+"On"	YAML 1.1 boolean; core: str On
+"YES"	YAML 1.1 boolean; core: str YES
+"Yes"	YAML 1.1 boolean; core: str Yes
+"no"	YAML 1.1 boolean; core: str no
+"off"	YAML 1.1 boolean; core: str off
+"on"	YAML 1.1 boolean; core: str on
+"yes"	YAML 1.1 boolean; core: str yes
+
+# Inherited leniency: jsonic's number syntax. Digit separators (_), binary
+# (0b), and a sign before a radix prefix are numbers to jsonic; the core
+# schema has none of them, so it reads these as strings.
+"+0100_200"	jsonic number syntax; core: str +0100_200
+"+0b100"	jsonic number syntax; core: str +0b100
+"-0100_200"	jsonic number syntax; core: str -0100_200
+"-0b101"	jsonic number syntax; core: str -0b101
+"-0x30"	jsonic number syntax; core: str -0x30
+".1_4"	jsonic number syntax; core: str .1_4
+"02_0"	jsonic number syntax; core: str 02_0
+"0b0"	jsonic number syntax; core: str 0b0
+"0b100_101"	jsonic number syntax; core: str 0b100_101
+"0x2_0"	jsonic number syntax; core: str 0x2_0
+"100_000"	jsonic number syntax; core: str 100_000
+"85.230_15e+03"	jsonic number syntax; core: str 85.230_15e+03
+"85_230.15"	jsonic number syntax; core: str 85_230.15
+
+# Defect: a !!float tag on an infinity. The tag conversion calls a decimal
+# float parse, which does not know .inf, so the value is NaN.
+"!!float +.INF"	!!float on .inf reads NaN; core: inf inf()
+"!!float +.Inf"	!!float on .inf reads NaN; core: inf inf()
+"!!float +.inf"	!!float on .inf reads NaN; core: inf inf()
+"!!float -.INF"	!!float on .inf reads NaN; core: inf inf-neg()
+"!!float -.Inf"	!!float on .inf reads NaN; core: inf inf-neg()
+"!!float -.inf"	!!float on .inf reads NaN; core: inf inf-neg()
+"!!float .INF"	!!float on .inf reads NaN; core: inf inf()
+"!!float .Inf"	!!float on .inf reads NaN; core: inf inf()
+"!!float .inf"	!!float on .inf reads NaN; core: inf inf()
+
+# Defect: a !!int tag on a hex or octal literal. The tag conversion parses
+# in base 10, so 0x10 and 0o7 read as 0.
+"!!int 0o10"	!!int on 0x/0o reads 0; core: int 8
+"!!int 0o7"	!!int on 0x/0o reads 0; core: int 7
+"!!int 0x10"	!!int on 0x/0o reads 0; core: int 16
+"!!int 0x42"	!!int on 0x/0o reads 0; core: int 66
+"!!int 0xa"	!!int on 0x/0o reads 0; core: int 10
+
+# Defect: a leading + on an infinity. Only .inf and -.inf are keywords here,
+# so +.inf stays a string.
+"+.INF"	+.inf reads as a string; core: inf inf()
+"+.Inf"	+.inf reads as a string; core: inf inf()
+"+.inf"	+.inf reads as a string; core: inf inf()
+
+# Defect: a !!str tag followed by a comment. The tag takes the comment text
+# as its value instead of an empty string.
+"!!str #empty"	!!str before a comment; core: str 

@@ -41,8 +41,8 @@ fn trailing_comma_after_a_digit_in_block_context() {
 /// The explicit-key handler detects inline content that itself opens a
 /// block mapping or sequence and queues a colon AND an indent token.
 ///
-/// The canonical implementation keeps the surrounding quotes as part of
-/// the explicit-key text, so the key here is `"/api/foo"` with quotes.
+/// A quoted explicit key is the scalar inside the quotes
+/// (tabnas/yaml#86), so the key here is `/api/foo`.
 #[test]
 fn an_explicit_key_whose_value_is_an_inline_block_mapping() {
     assert_eq!(
@@ -54,7 +54,7 @@ fn an_explicit_key_whose_value_is_an_inline_block_mapping() {
             "    put:\n",
             "      summary: put foo\n",
         )),
-        j!({"paths": {"\"/api/foo\"": {
+        j!({"paths": {"/api/foo": {
             "get": {"summary": "get foo"},
             "put": {"summary": "put foo"}
         }}})

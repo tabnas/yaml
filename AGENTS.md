@@ -105,6 +105,20 @@ disagree about which inputs are errors. The leniency is inherited by
 design — this plugin layers on jsonic's deliberately relaxed grammar,
 which does not reject every construct YAML 1.2 forbids.
 
+A second corpus measures scalar resolution: the
+[YAML Test Schema](https://github.com/perlpunk/yaml-test-schema)'s
+core-schema file, vendored byte-identical at
+[`test/yaml-test-schema/`](test/yaml-test-schema/) with its licence and
+source commit. Its 245 inputs are single scalars (`0x10`, `.inf`, `~`,
+`!!int 0o7`, `Yes`), each with the value the YAML 1.2 core schema gives it.
+All three runtimes assert every one; the ones this parser reads otherwise
+are listed, with a reason each, in
+[`test/yaml-test-schema-deviations.tsv`](test/yaml-test-schema-deviations.tsv),
+under the same discipline as the suite's ledgers. The listed ones are the
+documented YAML 1.1 booleans, jsonic's number syntax (`1_000`, `0b1`), and
+a few defects in tagged and signed scalars. Attribution for both corpora is
+in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+
 Unlike most tabnas grammar plugins, this one is **layered on top of
 jsonic, not the bare engine**: it is a plugin for the
 [`@tabnas/jsonic`](https://github.com/tabnas/jsonic) relaxed-JSON
@@ -127,14 +141,15 @@ j.parse('name: Alice\nitems:\n  - one\n  - two\n')
 | Path | What it is |
 |---|---|
 | [`ts/`](ts/) | **Canonical** TypeScript implementation — the `@tabnas/yaml` package. The entire plugin (lexer matcher + grammar wiring + scalar/anchor/tag handling) lives in the single large [`ts/src/yaml.ts`](ts/src/yaml.ts). Depends on `@tabnas/jsonic` and `@tabnas/parser`. |
-| [`go/`](go/) | Go port — `github.com/tabnas/yaml/go`. The whole plugin is in [`go/yaml.go`](go/yaml.go); the package's `const VERSION` lives there too. Module path is `github.com/tabnas/yaml/go`, but its only tabnas dependency is **jsonic** (see below). |
+| [`go/`](go/) | Go port — `github.com/tabnas/yaml/go`. The whole plugin is in [`go/yaml.go`](go/yaml.go); the package's `const VERSION` lives there too. Module path is `github.com/tabnas/yaml/go`; its dependencies are whatever [`go/go.mod`](go/go.mod) requires (see below). |
 | [`rs/`](rs/) | Rust port — crate `tabnas-yaml`, library `tabnas_yaml`. The plugin is [`rs/src/lib.rs`](rs/src/lib.rs) (options, grammar, rule wiring, entry points) with the lexer in `rs/src/lex.rs`, the scalar handlers in `rs/src/text.rs` and the per-parse state in `rs/src/state.rs`; `pub const VERSION` lives in `lib.rs`. Path dependencies on sibling checkouts of **parser**, **jsonic** (and **json** beneath it) and, for tests, **support**. |
 | [`alchemy/render.alc`](alchemy/render.alc) | **YAML's render**, an [alchemy](https://github.com/tabnas/alchemy) library whose entry point `yaml-render` writes a tree's events as one YAML document. The manifest's `translate` object names it and the Rust crate embeds it (`render_text()`); see [The translation parts](#the-translation-parts). |
 | [`yaml-grammar.jsonic`](yaml-grammar.jsonic) | **Single source of truth for the grammar**, written in jsonic syntax. Lives at the **repo root** and is embedded verbatim into `ts/src/yaml.ts`, `go/yaml.go` and `rs/src/lib.rs` by [`ts/embed-grammar.js`](ts/embed-grammar.js). Do not edit the embedded copies by hand — edit the `.jsonic` and re-run the embed. |
 | [`test/spec/`](test/spec/) | **Repo-root shared fixtures**, auto-discovered and run by all three runtimes: `*.tsv` files with an `input`/`expected`/`opts` header row. See [`test/AGENTS.md`](test/AGENTS.md) for the exact format. |
 | [`test/yaml-test-suite/`](test/yaml-test-suite/) | The upstream YAML Test Suite corpus, vendored verbatim and run by **all three** runtimes, plus the two shared ledgers every runner reads: [`test/yaml-test-suite-lenient.tsv`](test/yaml-test-suite-lenient.tsv) (`error` cases this parser accepts) and [`test/yaml-test-suite-unparsed.tsv`](test/yaml-test-suite-unparsed.tsv) (parse-only cases it still rejects). |
-| [`ts/test/`](ts/test/) | TS `*.test.ts` suites (compiled to `dist-test/`): `yaml.test.ts` (unit), `parity.test.ts` (the shared `test/spec/*.tsv` fixtures), `yaml-test-suite.test.ts` (official corpus), `doc-examples.test.ts`, `debug-model.test.ts` (the `@tabnas/debug` composition test). |
-| [`go/`](go/) `*_test.go` | Go suites: `yaml_test.go` + `yaml_scenarios_test.go` (unit), `parity_test.go` (`TestSpec` runs the shared `test/spec/*.tsv` fixtures), `parity_regression_test.go` (TS/Go parity regressions), `yaml_test_suite_test.go` (official corpus), plus `bench_test.go` / `perf_test.go` / `scaling_test.go` (performance). |
+| [`test/yaml-test-schema/`](test/yaml-test-schema/) | The YAML Test Schema's core-schema corpus, vendored verbatim with its licence, and run by **all three** runtimes against the ledger [`test/yaml-test-schema-deviations.tsv`](test/yaml-test-schema-deviations.tsv). See its [`README.md`](test/yaml-test-schema/README.md). |
+| [`ts/test/`](ts/test/) | TS `*.test.ts` suites (compiled to `dist-test/`): `yaml.test.ts` (unit), `parity.test.ts` (the shared `test/spec/*.tsv` fixtures), `yaml-test-suite.test.ts` (official corpus), `yaml-test-schema.test.ts` (the scalar-resolution corpus), `doc-examples.test.ts`, `debug-model.test.ts` (the `@tabnas/debug` composition test). |
+| [`go/`](go/) `*_test.go` | Go suites: `yaml_test.go` + `yaml_scenarios_test.go` (unit), `parity_test.go` (`TestSpec` runs the shared `test/spec/*.tsv` fixtures), `parity_regression_test.go` (TS/Go parity regressions), `yaml_test_suite_test.go` (official corpus), `yaml_test_schema_test.go` (the scalar-resolution corpus), `guide_test.go` (the guide's relaxed-JSON recipe), plus `bench_test.go` / `perf_test.go` / `scaling_test.go` (performance). |
 | [`ts/doc/`](ts/doc/), [`go/doc/`](go/doc/) | Per-runtime Diataxis guides (`yaml-ts.md`, `yaml-go.md`) and the generated railroad diagram (`ts/doc/grammar.{svg,txt}`). |
 | [`bench/`](bench/) | TS benchmark harness (`bench/ts/*.mjs`, fixtures generated by `bench/fixtures/generate.mjs`); the Go side benches via `go/bench_test.go`. |
 
@@ -164,25 +179,26 @@ state handlers (`bo`/`ao`/`bc`/`ac`) and `@`-prefixed function refs in
 the grammar resolve to closures wired in the source code, not in the
 `.jsonic` file.
 
-## The tabnas dependencies (sibling checkout)
+## The tabnas dependencies
 
 This plugin sits on top of jsonic, which sits on the parser engine. The
-tabnas packages are unpublished, so every runtime resolves them via
-**sibling checkouts**:
+manifests are the record of what each runtime depends on; this section
+says how each resolves them, and does not restate the versions.
 
-- **TypeScript** (`ts/package.json`): `@tabnas/jsonic` and
-  `@tabnas/parser` are `peerDependencies` (`">=2"`), mirrored as
-  `file:../../jsonic/ts` and `file:../../parser/ts` devDependencies for
-  local builds (npm >=7 / Node >=24 auto-installs peers;
-  `engines.node` is `">=24"`). `@tabnas/debug` and `@tabnas/railroad`
-  are **dev-only** `file:` devDependencies — debug for the
-  `debug-model` composition test, railroad to regenerate
-  `ts/doc/grammar.{svg,txt}`.
+- **TypeScript** ([`ts/package.json`](ts/package.json)): `@tabnas/jsonic`
+  and `@tabnas/parser` are `peerDependencies`, and they, `@tabnas/debug`,
+  `@tabnas/railroad` and `@tabnas/support` are devDependencies installed
+  from npm (debug for the `debug-model` composition test, railroad to
+  regenerate `ts/doc/grammar.{svg,txt}`). `engines.node` is `">=24"`.
 - **Go** (`go/go.mod`): the module is `github.com/tabnas/yaml/go`, and
-  its **only** require is `github.com/tabnas/jsonic/go`, resolved with
-  `replace github.com/tabnas/jsonic/go => ../../jsonic/go` (a sibling
-  checkout). The Go plugin imports `jsonic` directly and never imports
-  the parser engine — jsonic re-exports the engine surface it needs.
+  it resolves its tabnas modules from the Go module proxy at the versions
+  [`go/go.mod`](go/go.mod) requires. Read the manifest rather than a list
+  here: at the time of writing it requires jsonic, the parser engine and
+  support directly (the plugin imports jsonic; `parity_regression_test.go`
+  imports the parser and `parity_test.go` imports support), with json
+  indirect. It carries **no `replace`**, and a committed one is a bug:
+  pointing a module at a sibling checkout is local wiring (see "Never
+  commit the local wiring" below).
 - **Rust** (`rs/Cargo.toml`): `tabnas = { path = "../../parser/rs" }` and
   `tabnas-jsonic = { path = "../../jsonic/rs" }`, with
   `tabnas-support = { path = "../../support/rs" }` as a dev-dependency.
@@ -191,11 +207,9 @@ tabnas packages are unpublished, so every runtime resolves them via
   published, so there is no registry version to fall back on.
   `ci/rust/run.sh` checks for all four before it runs anything.
 
-Clone `https://github.com/tabnas/jsonic` and
-`https://github.com/tabnas/parser` (plus `debug`/`railroad` for the
-composition test and diagram) as siblings of this repo, build their TS
-(`npm install && npm run build` in each, in dependency order), then work
-here. CI checks the whole closure out and builds it first.
+So only the Rust side needs sibling checkouts: clone `parser`, `jsonic`,
+`json` and `support` from `https://github.com/tabnas/` next to this repo.
+CI checks the whole closure out and builds it first.
 
 ## Authority and alignment rules
 
@@ -304,11 +318,14 @@ check is the render itself, since this repository does not depend on
 alchemy (that is the maintainer's call, like any dependency). The round
 trip that does, every YAML fixture read, written through the render and
 read back to the same value, runs in aless's suite, which has both
-crates. It holds for every input the reader reads except those that meet
-[tabnas/yaml#86](https://github.com/tabnas/yaml/issues/86), a reader
-defect with a quoted key at the start of a line after a block sequence;
-the render's output for them is valid YAML. Change the render there
-first, and keep the naming rule.
+crates. The reader defects that round trip used to meet, a quoted key at
+the start of a line after a block sequence
+([tabnas/yaml#86](https://github.com/tabnas/yaml/issues/86)) and a flow
+sequence first in an indented block sequence
+([tabnas/yaml#88](https://github.com/tabnas/yaml/issues/88)), are fixed,
+and `test/spec/issue-regressions.tsv` holds them; the round trip's ledger
+of those cases empties once aless takes this release. Change the render
+there first, and keep the naming rule.
 
 ## Repo-specific gotchas
 
@@ -336,11 +353,6 @@ first, and keep the naming rule.
   there, because the canonical matcher assigns columns the engine's own
   advancement would not produce and `@val-set-el-in` reads one. See the
   module note at the top of `rs/src/lex.rs`.
-- The Go module path says `tabnas/yaml/go`, but the dependency is on
-  **jsonic**, not parser, and `go/go.sum` still carries a stale
-  `github.com/jsonicjs/jsonic/go` hash from the pre-rename history — the
-  active require/replace points at `github.com/tabnas/jsonic/go =>
-  ../../jsonic/go`.
 - **A block scalar indicator followed by text on the same line
   (`a: > x`) is NOT a block scalar.** YAML calls that an error; this
   plugin falls through to plain-scalar handling and yields
