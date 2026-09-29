@@ -258,10 +258,7 @@ fn block_scalar(src: &str, fwd: &str, cursor: (usize, usize, usize)) -> Option<A
     let is_doc_start;
     let is_doc_root;
     {
-        let mut index = cursor.0;
-        while index > 0 && !line_end(at(src, index - 1)) {
-            index -= 1;
-        }
+        let mut index = crate::lex::line_start_of(src, cursor.0);
         let line_start = index;
         while index < cursor.0 && is(src, index, b' ') {
             containing_indent += 1;
@@ -540,10 +537,7 @@ pub(crate) fn plain_scalar(
 ) -> Act {
     let in_flow = state::flow_depth_at(context, src, cursor.0) > 0;
 
-    let mut line_start = cursor.0;
-    while line_start > 0 && !line_end(at(src, line_start - 1)) {
-        line_start -= 1;
-    }
+    let line_start = crate::lex::line_start_of(src, cursor.0);
 
     let mut current_line_indent = 0usize;
     {
@@ -847,8 +841,17 @@ pub(crate) fn type_tag(
     }
 
     // An unquoted value, to `: `, ` #`, the line end or a flow indicator.
+    // A `#` straight after the tag's space starts a comment, so the value
+    // is empty (`!!str #c` is "").
     while value_end < fwd.len() {
         let byte = at(fwd, value_end);
+        if value_end == value_start
+            && byte == i32::from(b'#')
+            && value_start > 0
+            && blank(at(fwd, value_start - 1))
+        {
+            break;
+        }
         if line_end(byte)
             || byte == i32::from(b',')
             || byte == i32::from(b'}')
@@ -895,11 +898,80 @@ fn convert_tag(tag: &str, raw: &str, redefined: bool, quoted: bool) -> Value {
     }
     match tag {
         "str" if !quoted => Value::String(raw.to_string()),
-        "int" => Value::Number(crate::parse_int(raw)),
-        "float" => Value::Number(crate::parse_float(raw)),
+        "int" => Value::Number(tag_int(raw)),
+        "float" => Value::Number(tag_float(raw)),
         "bool" => Value::Bool(raw == "true" || raw == "True" || raw == "TRUE"),
         "null" => Value::Null,
         _ => Value::String(raw.to_string()),
+    }
+}
+
+/// The value a `!!int` tag gives its text: YAML's core-schema hex
+/// (`0x1f`) and octal (`0o17`) forms, then a decimal parse. Mirrors the
+/// canonical `yamlTagInt`.
+fn tag_int(raw: &str) -> f64 {
+    let (sign, body) = match raw.as_bytes().first() {
+        Some(b'-') => (-1.0, &raw[1..]),
+        Some(b'+') => (1.0, &raw[1..]),
+        _ => (1.0, raw),
+    };
+    let radix = if let Some(digits) = body.strip_prefix("0x") {
+        Some((digits, 16))
+    } else {
+        body.strip_prefix("0o").map(|digits| (digits, 8))
+    };
+    if let Some((digits, radix)) = radix {
+        if !digits.is_empty() && digits.chars().all(|c| c.is_digit(radix)) {
+            return sign * radix_to_f64(digits, radix);
+        }
+    }
+    crate::parse_int(raw)
+}
+
+/// Hex or octal digits as the nearest `f64`, ties to even, as
+/// JavaScript's `parseInt` reads them: exact however many digits there
+/// are, and infinite past the largest finite value.
+fn radix_to_f64(digits: &str, radix: u32) -> f64 {
+    let width = if radix == 16 { 4 } else { 3 };
+    // The value's bits, most significant first, without leading zeros.
+    let mut bits = Vec::with_capacity(digits.len() * width);
+    for digit in digits.chars().filter_map(|c| c.to_digit(radix)) {
+        for shift in (0..width).rev() {
+            let bit = (digit >> shift) & 1 == 1;
+            if bit || !bits.is_empty() {
+                bits.push(bit);
+            }
+        }
+    }
+    const MANTISSA: usize = 53;
+    let kept = bits.len().min(MANTISSA);
+    let mut mantissa = bits[..kept]
+        .iter()
+        .fold(0u64, |acc, &bit| (acc << 1) | u64::from(bit));
+    if bits.len() > MANTISSA {
+        let round = bits[MANTISSA];
+        let sticky = bits[MANTISSA + 1..].iter().any(|&bit| bit);
+        if round && (sticky || mantissa & 1 == 1) {
+            mantissa += 1;
+        }
+    }
+    let exponent = bits.len() - kept;
+    if exponent > 1100 {
+        return f64::INFINITY;
+    }
+    // Both factors are exact, so the product rounds only on overflow.
+    mantissa as f64 * 2f64.powi(exponent as i32)
+}
+
+/// The value a `!!float` tag gives its text: the core schema's infinities
+/// and not-a-number, then a decimal parse. Mirrors the canonical
+/// `yamlTagFloat`.
+fn tag_float(raw: &str) -> f64 {
+    match raw {
+        ".inf" | ".Inf" | ".INF" | "+.inf" | "+.Inf" | "+.INF" => f64::INFINITY,
+        "-.inf" | "-.Inf" | "-.INF" => f64::NEG_INFINITY,
+        ".nan" | ".NaN" | ".NAN" => f64::NAN,
+        _ => crate::parse_float(raw),
     }
 }
 

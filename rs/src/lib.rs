@@ -702,7 +702,7 @@ pub(crate) fn yaml_keyword(text: &str) -> Option<Value> {
             Value::Bool(false)
         }
         "null" | "Null" | "NULL" | "~" => Value::Null,
-        ".inf" | ".Inf" | ".INF" => Value::Number(f64::INFINITY),
+        ".inf" | ".Inf" | ".INF" | "+.inf" | "+.Inf" | "+.INF" => Value::Number(f64::INFINITY),
         "-.inf" | "-.Inf" | "-.INF" => Value::Number(f64::NEG_INFINITY),
         ".nan" | ".NaN" | ".NAN" => Value::Number(f64::NAN),
         _ => return None,
@@ -1043,11 +1043,37 @@ fn wire_rules(parser: &mut Tabnas) {
         spec.add_ao(|rule, context| {
             let pending = state::list_take(context, state::PENDING_ANCHORS);
             if !pending.is_empty() {
-                let open_node = rule.node.borrow().clone();
+                // Only whether the open node was a scalar is ever read back,
+                // so a container is recorded as `Undefined`: a clone of an
+                // inherited container is a second handle on the parent's
+                // accumulator (see below).
+                let open_node = match &*rule.node.borrow() {
+                    node if is_container(node) => Value::Undefined,
+                    node => node.clone(),
+                };
                 rule.u_mut()
                     .insert("yamlAnchors".to_string(), Value::array(pending));
                 rule.u_mut()
                     .insert("yamlAnchorOpenNode".to_string(), open_node);
+            }
+            // A YAML alt that opens on `#IN` or `#EL` (pushing `indent` or
+            // `yamlBlockList`, or backing up for an empty value) leaves this val's node as the cell
+            // it inherited from its parent: the parent MAP when the value is
+            // a pair's and starts on the next line. jsonic's val before-close
+            // stashes a clone of that node (`u.openval`), a second `Arc` on
+            // the map the pair is about to insert into, so every insert
+            // copied the whole map and a mapping of N such values parsed in
+            // O(N^2). jsonic's own alts reset the node when they open; these
+            // do the same. The value is the child's either way.
+            // The empty-value alt (`#IN`, backed up) is the same shape: the
+            // val ends with no value, and the stash held the map while the
+            // pair inserted that absence.
+            let yaml_alt = matches!(
+                rule.o0().map(|token| token.name.as_ref()),
+                Some("#EL" | "#IN")
+            );
+            if yaml_alt && is_container(&rule.node.borrow()) {
+                set_node(rule, Value::Undefined);
             }
         });
         spec.add_bc(|rule, _context| {

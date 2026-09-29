@@ -99,6 +99,34 @@ fn anchor_alias(count: usize) -> String {
     out
 }
 
+/// A root mapping whose values each start on the next line. These three
+/// were quadratic: the value's `val` rule inherited the parent map's node,
+/// jsonic's val before-close stashed a clone of it, and every pair insert
+/// then copied the whole map through `Arc::make_mut`.
+fn block_seq_values(count: usize) -> String {
+    let mut out = String::new();
+    for index in 0..count {
+        out.push_str(&format!("k{index}:\n  - {index}\n"));
+    }
+    out
+}
+
+fn nested_map_values(count: usize) -> String {
+    let mut out = String::new();
+    for index in 0..count {
+        out.push_str(&format!("k{index}:\n  x: {index}\n"));
+    }
+    out
+}
+
+fn empty_values(count: usize) -> String {
+    let mut out = String::new();
+    for index in 0..count {
+        out.push_str(&format!("k{index}:\nj{index}: 1\n"));
+    }
+    out
+}
+
 /// Parse time per byte must not grow with the input. A quadratic parser
 /// doubles its per-byte cost every time the input doubles; the bound here
 /// is loose enough for a noisy runner and far tighter than that.
@@ -111,9 +139,28 @@ fn parse_time_grows_about_linearly() {
         ("literalBlock", literal_block),
         ("anchorAlias", anchor_alias),
     ];
-    for (name, generate) in shapes {
+    assert_linear(&parser, &shapes, 2000, 4.0);
+}
+
+/// The next-line value shapes, over a wider range and a tighter bound: a
+/// debug build's fixed cost per entry dilutes the quadratic term. Measured,
+/// the quadratic parse grew 2.3x to 3.2x per byte from 250 to 4000
+/// entries and the linear one 0.75x to 0.9x.
+#[test]
+fn next_line_values_parse_in_linear_time() {
+    let parser = tabnas_yaml::make();
+    let shapes: [Shape; 3] = [
+        ("blockSeqValues", block_seq_values),
+        ("nestedMapValues", nested_map_values),
+        ("emptyValues", empty_values),
+    ];
+    assert_linear(&parser, &shapes, 4000, 1.8);
+}
+
+fn assert_linear(parser: &tabnas::Tabnas, shapes: &[Shape], large: usize, bound: f64) {
+    for &(name, generate) in shapes {
         let mut small_per_byte = 0.0f64;
-        for (index, count) in [250usize, 2000].into_iter().enumerate() {
+        for (index, count) in [250usize, large].into_iter().enumerate() {
             let src = generate(count);
             let elapsed = fastest(
                 || {
@@ -127,9 +174,9 @@ fn parse_time_grows_about_linearly() {
             } else {
                 let growth = per_byte / small_per_byte.max(f64::MIN_POSITIVE);
                 assert!(
-                    growth < 4.0,
+                    growth < bound,
                     "{name}: per-byte parse cost grew {growth:.1}x between 250 and \
-                     2000 entries, which is the shape of a super-linear parse"
+                     {large} entries, which is the shape of a super-linear parse"
                 );
             }
         }

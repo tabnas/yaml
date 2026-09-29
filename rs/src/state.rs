@@ -344,6 +344,10 @@ const FLOW_SCAN_BYTES: [bool; 256] = {
     table
 };
 
+/// U+FEFF, the byte order mark, in UTF-8. A stream may open with it; the
+/// offset after it is a line start.
+const BOM_BYTES: &[u8] = "\u{FEFF}".as_bytes();
+
 fn is_space(byte: u8) -> bool {
     matches!(byte, b' ' | b'\t' | b'\n' | b'\r')
 }
@@ -358,7 +362,7 @@ fn starts_node(bytes: &[u8], index: usize) -> bool {
     while p > 0 && matches!(bytes[p - 1], b' ' | b'\t') {
         p -= 1;
     }
-    if p == 0 || matches!(bytes[p - 1], b'\n' | b'\r') {
+    if p == 0 || matches!(bytes[p - 1], b'\n' | b'\r') || (p == 3 && bytes.starts_with(BOM_BYTES)) {
         return true;
     }
     if p == index {
@@ -439,6 +443,9 @@ fn block_scalar_end(bytes: &[u8], index: usize) -> usize {
     let mut ls = index;
     while ls > 0 && !matches!(bytes[ls - 1], b'\n' | b'\r') {
         ls -= 1;
+    }
+    if ls == 0 && bytes.starts_with(BOM_BYTES) {
+        ls = BOM_BYTES.len();
     }
     let mut line_indent = 0usize;
     while at(ls + line_indent) == Some(b' ') {

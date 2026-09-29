@@ -3,6 +3,7 @@ package tabnasyaml
 import (
 	"fmt"
 	"math"
+	"math/big"
 	"regexp"
 	"strconv"
 	"strings"
@@ -254,6 +255,17 @@ var flowScanBytes = func() (t [256]bool) {
 	return
 }()
 
+// bomText is U+FEFF, the byte order mark, in UTF-8.
+const bomText = "\uFEFF"
+
+// atLineStart reports whether offset i begins a line: the source start,
+// just after a line break, or just after the byte order mark that opens
+// the stream. Mirrors atLineStart in src/yaml.ts.
+func atLineStart(src string, i int) bool {
+	return i == 0 || src[i-1] == '\n' || src[i-1] == '\r' ||
+		(i == len(bomText) && strings.HasPrefix(src, bomText))
+}
+
 func isYamlSpaceByte(c byte) bool {
 	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
 }
@@ -268,7 +280,7 @@ func startsYamlNode(src string, i int) bool {
 	for p >= 0 && (src[p] == ' ' || src[p] == '\t') {
 		p--
 	}
-	if p < 0 || src[p] == '\n' || src[p] == '\r' {
+	if p < 0 || src[p] == '\n' || src[p] == '\r' || (p == len(bomText)-1 && strings.HasPrefix(src, bomText)) {
 		return true
 	}
 	if p == i-1 {
@@ -348,6 +360,9 @@ func blockScalarEnd(src string, i int, hasCR bool) int {
 	ls := i
 	for ls > 0 && src[ls-1] != '\n' && src[ls-1] != '\r' {
 		ls--
+	}
+	if ls == 0 && strings.HasPrefix(src, bomText) {
+		ls = len(bomText)
 	}
 	lineIndent := 0
 	for byteAt(src, ls+lineIndent) == ' ' {
@@ -591,6 +606,7 @@ var yamlValueMap = map[string]any{
 	"on": true, "On": true, "ON": true,
 	"off": false, "Off": false, "OFF": false,
 	".inf": math.Inf(1), ".Inf": math.Inf(1), ".INF": math.Inf(1),
+	"+.inf": math.Inf(1), "+.Inf": math.Inf(1), "+.INF": math.Inf(1),
 	"-.inf": math.Inf(-1), "-.Inf": math.Inf(-1), "-.INF": math.Inf(-1),
 	".nan": math.NaN(), ".NaN": math.NaN(), ".NAN": math.NaN(),
 }
@@ -1421,6 +1437,13 @@ func Yaml(j *jsonic.Jsonic, opts map[string]any) error {
 				return tkn
 			}
 		}
+		// A byte order mark opening the stream is not content: step over
+		// it without counting a column. atLineStart and the flow scan
+		// treat the offset after it as a line start. This sits outside the
+		// reset, which a second parse of the same source skips.
+		if pnt.SI == 0 && strings.HasPrefix(src, bomText) {
+			pnt.SI = len(bomText)
+		}
 
 		if pnt.SI >= pnt.Len {
 			return nil
@@ -1771,14 +1794,13 @@ func Yaml(j *jsonic.Jsonic, opts map[string]any) error {
 
 			// Document markers: --- → #DS, ... → #DE.
 			// Only at column 0 (start of line or start of source).
-			if (pnt.SI == 0 || lex.Src[pnt.SI-1] == '\n' || lex.Src[pnt.SI-1] == '\r') &&
-				isDocMarker(fwd, 0) {
+			if isDocMarker(fwd, 0) && atLineStart(lex.Src, pnt.SI) {
 				return handleDocMarker(lex, pnt, fwd, DS, DE)
 			}
 
 			// Directive line at column 0: emit #DR token. The stream rule
 			// applies %TAG handles via the @apply-directive action.
-			if fwd[0] == '%' && (pnt.SI == 0 || lex.Src[pnt.SI-1] == '\n' || lex.Src[pnt.SI-1] == '\r') {
+			if fwd[0] == '%' && atLineStart(lex.Src, pnt.SI) {
 				pos := 0
 				for pos < len(fwd) && fwd[pos] != '\n' && fwd[pos] != '\r' {
 					pos++
@@ -2360,6 +2382,9 @@ func handleBlockScalar(lex *jsonic.Lex, pnt *jsonic.Point, src, fwd string, ch b
 	for li > 0 && src[li-1] != '\n' && src[li-1] != '\r' {
 		li--
 	}
+	if li == 0 && strings.HasPrefix(src, bomText) {
+		li = len(bomText)
+	}
 	lineStart := li
 	for li < pnt.SI && src[li] == ' ' {
 		containingIndent++
@@ -2654,7 +2679,12 @@ func handleTagInTextCheck(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, tagHan
 		}
 		rawVal = jsSubstringLessOneUnit(fwd, valStart+1, valEnd)
 	} else {
+		// A `#` straight after the tag's space starts a comment.
 		for valEnd < len(fwd) && fwd[valEnd] != '\n' && fwd[valEnd] != '\r' {
+			if valEnd == valStart && fwd[valEnd] == '#' && valStart > 0 &&
+				(fwd[valStart-1] == ' ' || fwd[valStart-1] == '\t') {
+				break
+			}
 			if fwd[valEnd] == ':' && (valEnd+1 >= len(fwd) || fwd[valEnd+1] == ' ' ||
 				fwd[valEnd+1] == '\n' || fwd[valEnd+1] == '\r') {
 				break
@@ -2694,6 +2724,9 @@ func handlePlainScalar(lex *jsonic.Lex, pnt *jsonic.Point, src, fwd string, flow
 	lineStartPos := pnt.SI
 	for lineStartPos > 0 && src[lineStartPos-1] != '\n' && src[lineStartPos-1] != '\r' {
 		lineStartPos--
+	}
+	if lineStartPos == 0 && strings.HasPrefix(src, bomText) {
+		lineStartPos = len(bomText)
 	}
 	currentLineIndent := 0
 	ci := lineStartPos
@@ -2971,9 +3004,14 @@ func handleTypeTag(lex *jsonic.Lex, pnt *jsonic.Point, fwd string,
 		return nil // Will re-enter matcher
 	}
 
-	// Unquoted value.
+	// Unquoted value. A `#` straight after the tag's space starts a
+	// comment, so the value is empty (`!!str #c` is "").
 	for valEnd < len(fwd) && fwd[valEnd] != '\n' && fwd[valEnd] != '\r' &&
 		fwd[valEnd] != ',' && fwd[valEnd] != '}' && fwd[valEnd] != ']' {
+		if valEnd == valStart && fwd[valEnd] == '#' && valStart > 0 &&
+			(fwd[valStart-1] == ' ' || fwd[valStart-1] == '\t') {
+			break
+		}
 		if fwd[valEnd] == ':' && (valEnd+1 >= len(fwd) || fwd[valEnd+1] == ' ' ||
 			fwd[valEnd+1] == '\n' || fwd[valEnd+1] == '\r') {
 			break
@@ -3750,12 +3788,14 @@ func applyTagConversion(tag, rawVal string, tagHandles map[string]string) any {
 	case "str":
 		return rawVal
 	case "int":
+		// yamlTagInt: the core schema's hex and octal forms, then
 		// `parseInt(rawVal, 10)`. A tag that cannot read its value still
 		// applies: the result is NaN, a number, not the text.
-		return jsParseInt(rawVal)
+		return yamlTagInt(rawVal)
 	case "float":
+		// yamlTagFloat: the core schema's infinities and NaN, then
 		// `parseFloat(rawVal)`, the same way.
-		return jsParseFloat(rawVal)
+		return yamlTagFloat(rawVal)
 	case "bool":
 		return rawVal == "true" || rawVal == "True" || rawVal == "TRUE"
 	case "null":
@@ -3763,6 +3803,52 @@ func applyTagConversion(tag, rawVal string, tagHandles map[string]string) any {
 	default:
 		return rawVal
 	}
+}
+
+var (
+	tagHexRe = regexp.MustCompile(`^([-+]?)0x([0-9a-fA-F]+)$`)
+	tagOctRe = regexp.MustCompile(`^([-+]?)0o([0-7]+)$`)
+	tagInfRe = regexp.MustCompile(`^([-+]?)\.(inf|Inf|INF)$`)
+	tagNanRe = regexp.MustCompile(`^\.(nan|NaN|NAN)$`)
+)
+
+// yamlTagInt is the value a !!int tag gives its text: YAML's core-schema
+// hex (0x1f) and octal (0o17) forms, then a decimal parse. Mirrors
+// yamlTagInt in src/yaml.ts.
+func yamlTagInt(raw string) any {
+	base := 16
+	m := tagHexRe.FindStringSubmatch(raw)
+	if m == nil {
+		base = 8
+		m = tagOctRe.FindStringSubmatch(raw)
+	}
+	if m != nil {
+		// Exact, then rounded to the nearest float64 (ties to even) as
+		// JavaScript's parseInt does, so a value past 64 bits is not lost.
+		n, _ := new(big.Int).SetString(m[2], base)
+		v, _ := new(big.Float).SetInt(n).Float64()
+		if m[1] == "-" {
+			v = -v
+		}
+		return v
+	}
+	return jsParseInt(raw)
+}
+
+// yamlTagFloat is the value a !!float tag gives its text: the core
+// schema's infinities and not-a-number, then a decimal parse. Mirrors
+// yamlTagFloat in src/yaml.ts.
+func yamlTagFloat(raw string) any {
+	if m := tagInfRe.FindStringSubmatch(raw); m != nil {
+		if m[1] == "-" {
+			return math.Inf(-1)
+		}
+		return math.Inf(1)
+	}
+	if tagNanRe.MatchString(raw) {
+		return math.NaN()
+	}
+	return jsParseFloat(raw)
 }
 
 // tinToName converts a Tin to its name string.

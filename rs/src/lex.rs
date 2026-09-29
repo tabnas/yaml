@@ -478,6 +478,26 @@ fn decide(src: &str, start: (usize, usize, usize), context: &mut Context) -> Act
 
     let first = at(src, start.0);
     let mut cursor = start;
+    // A byte order mark opening the stream is not content: step over it
+    // without counting a column. `at_line_start` and the flow scan treat
+    // the offset after it as a line start.
+    if cursor.0 == 0 && src.starts_with(BOM) {
+        cursor.0 = BOM.len_utf8();
+        // The engine chose this call's matchers for the mark, which leave
+        // a flow opener or a comment unclaimed (see `dispatch_family`), so
+        // they are taken here, as after an anchor or a tag.
+        let here = at(src, cursor.0);
+        if here == i32::from(b'[') || here == i32::from(b'{') {
+            let name = flow_punctuation(here).expect("an opener is flow punctuation");
+            let token = Tok::new(name, Value::Undefined, &src[cursor.0..=cursor.0], cursor);
+            return Act::moved((cursor.0 + 1, cursor.1, cursor.2 + 1), Some(token));
+        }
+        if here == i32::from(b'#') {
+            while cursor.0 < src.len() && !line_end(at(src, cursor.0)) {
+                cursor.0 += 1;
+            }
+        }
+    }
     loop {
         // Consuming the last of the source without producing a token
         // leaves the engine's matcher chain with nothing to claim and no
@@ -758,8 +778,28 @@ fn flow_punctuation(byte: i32) -> Option<&'static str> {
     })
 }
 
+/// U+FEFF, the byte order mark.
+pub(crate) const BOM: char = '\u{FEFF}';
+
+/// Whether `offset` begins a line: the source start, just after a line
+/// break, or just after the byte order mark that opens the stream.
 fn at_line_start(src: &str, offset: usize) -> bool {
-    offset == 0 || line_end(at(src, offset - 1))
+    offset == 0
+        || line_end(at(src, offset - 1))
+        || (offset == BOM.len_utf8() && src.starts_with(BOM))
+}
+
+/// The start of the line holding `offset`, not counting a byte order mark
+/// that opens the stream.
+pub(crate) fn line_start_of(src: &str, offset: usize) -> usize {
+    let mut index = offset;
+    while index > 0 && !line_end(at(src, index - 1)) {
+        index -= 1;
+    }
+    if index == 0 && src.starts_with(BOM) {
+        index = BOM.len_utf8();
+    }
+    index
 }
 
 /// Three of `-` or three of `.` at `index`, with nothing said about what
