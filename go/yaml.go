@@ -70,6 +70,7 @@ var (
 type flowScanState struct {
 	depth         int
 	pos           int
+	upTo          int
 	inDoubleQuote bool
 	inSingleQuote bool
 }
@@ -101,6 +102,7 @@ func advanceCol(pnt *jsonic.Point, fwd string, n int) {
 func (s *flowScanState) reset() {
 	s.depth = 0
 	s.pos = 0
+	s.upTo = 0
 	s.inDoubleQuote = false
 	s.inSingleQuote = false
 }
@@ -134,16 +136,27 @@ func stripCommentLines(src string) string {
 }
 
 // advance scans src forward from the cached position to target, updating
-// flow-collection depth and quote state. If target < pos the cache is
-// reset (cleanSource may have replaced lex.Src and shortened the cursor).
+// flow-collection depth and quote state. If target is behind the last
+// target the cache is reset (cleanSource may have replaced lex.Src and
+// shortened the cursor).
+//
+// The scan reads the source the way the lexer does, or text is counted as
+// syntax (tabnas/yaml#89; mirrors updateFlowState in src/yaml.ts). A quoted
+// region is skipped, and so are the regions where a bracket or a quote is
+// ordinary text: a comment, a block scalar's content lines, and, in block
+// context, any `{` `[` `"` `'` that does not begin a node. The scan may run
+// past target (to the end of a comment or a block scalar), since the lexer
+// never stops inside either.
 func (s *flowScanState) advance(src string, target int) {
-	if target < s.pos {
+	if target < s.upTo {
 		s.depth = 0
 		s.pos = 0
 		s.inDoubleQuote = false
 		s.inSingleQuote = false
 	}
-	for fi := s.pos; fi < target; fi++ {
+	s.upTo = target
+	fi := s.pos
+	for ; fi < target; fi++ {
 		fc := src[fi]
 		if s.inDoubleQuote {
 			if fc == '\\' {
@@ -155,7 +168,7 @@ func (s *flowScanState) advance(src string, target int) {
 		}
 		if s.inSingleQuote {
 			if fc == '\'' {
-				if fi+1 < target && src[fi+1] == '\'' {
+				if fi+1 < len(src) && src[fi+1] == '\'' {
 					fi++ // escaped ''
 				} else {
 					s.inSingleQuote = false
@@ -163,28 +176,276 @@ func (s *flowScanState) advance(src string, target int) {
 			}
 			continue
 		}
-		switch fc {
-		case '{', '[':
-			s.depth++
-		case '}', ']':
-			if s.depth > 0 {
-				s.depth--
+		if fc == '#' && (fi == 0 || isYamlSpaceByte(src[fi-1])) {
+			for fi+1 < len(src) && src[fi+1] != '\n' && src[fi+1] != '\r' {
+				fi++
 			}
-		case '"':
-			s.inDoubleQuote = true
-		case '\'':
-			// Apostrophes preceded by a word char are not quote openers
-			// (matches src/yaml.ts:941-947).
-			if fi > 0 {
-				pc := src[fi-1]
-				if (pc >= 'A' && pc <= 'Z') || (pc >= 'a' && pc <= 'z') || (pc >= '0' && pc <= '9') {
-					continue
+			continue
+		}
+		if s.depth > 0 {
+			switch fc {
+			case '{', '[':
+				s.depth++
+			case '}', ']':
+				s.depth--
+			case '"':
+				s.inDoubleQuote = true
+			case '\'':
+				// Apostrophes preceded by a word char are not quote openers.
+				if fi > 0 {
+					pc := src[fi-1]
+					if (pc >= 'A' && pc <= 'Z') || (pc >= 'a' && pc <= 'z') || (pc >= '0' && pc <= '9') {
+						continue
+					}
+				}
+				s.inSingleQuote = true
+			}
+			continue
+		}
+		// Block context: only a node's first character opens anything.
+		switch fc {
+		case '{', '[', '"', '\'', '|', '>':
+			if !startsYamlNode(src, fi) {
+				continue
+			}
+			switch fc {
+			case '{', '[':
+				s.depth++
+			case '"':
+				s.inDoubleQuote = true
+			case '\'':
+				s.inSingleQuote = true
+			default:
+				if end := blockScalarEnd(src, fi); end > fi {
+					fi = end - 1
 				}
 			}
-			s.inSingleQuote = true
 		}
 	}
-	s.pos = target
+	s.pos = fi
+}
+
+func isYamlSpaceByte(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
+}
+
+// startsYamlNode reports whether the byte at i (block context) is the first
+// character of a node: first on its line, or after a `: ` / `- ` / `? `
+// indicator, a `---` marker, or a node property (&anchor, !tag) that itself
+// starts a node. Anything else is inside a plain scalar. Mirrors
+// startsYamlNode in src/yaml.ts.
+func startsYamlNode(src string, i int) bool {
+	p := i - 1
+	for p >= 0 && (src[p] == ' ' || src[p] == '\t') {
+		p--
+	}
+	if p < 0 || src[p] == '\n' || src[p] == '\r' {
+		return true
+	}
+	if p == i-1 {
+		return false
+	}
+	pc := src[p]
+	if pc == ':' {
+		return true
+	}
+	if pc == '-' || pc == '?' {
+		if pc == '-' && p >= 2 && src[p-1] == '-' && src[p-2] == '-' &&
+			(p-3 < 0 || src[p-3] == '\n' || src[p-3] == '\r') {
+			return true
+		}
+		return startsYamlNode(src, p)
+	}
+	w := p
+	for w > 0 && !isYamlSpaceByte(src[w-1]) {
+		w--
+	}
+	if src[w] == '&' || src[w] == '!' {
+		return startsYamlNode(src, w)
+	}
+	return false
+}
+
+// blockScalarEnd returns, for a block scalar indicator (| or >, optional
+// chomping/indentation indicators, then only a comment) at i, the offset
+// just past its content lines, or i when it is not one. Mirrors
+// blockScalarEnd in src/yaml.ts.
+func blockScalarEnd(src string, i int) int {
+	at := func(k int) byte {
+		if k < len(src) {
+			return src[k]
+		}
+		return 0
+	}
+	j := i + 1
+	explicit := 0
+	for k := 0; k < 2; k++ {
+		c := at(j)
+		if c == '+' || c == '-' {
+			j++
+		} else if c >= '1' && c <= '9' {
+			explicit = int(c - '0')
+			j++
+		}
+	}
+	for at(j) == ' ' || at(j) == '\t' {
+		j++
+	}
+	if at(j) == '#' {
+		for j < len(src) && src[j] != '\n' && src[j] != '\r' {
+			j++
+		}
+	}
+	if j < len(src) && src[j] != '\n' && src[j] != '\r' {
+		return i
+	}
+	ls := i
+	for ls > 0 && src[ls-1] != '\n' && src[ls-1] != '\r' {
+		ls--
+	}
+	lineIndent := 0
+	for at(ls+lineIndent) == ' ' {
+		lineIndent++
+	}
+	isRoot := ls+lineIndent == i || strings.HasPrefix(src[ls:], "---")
+	parentIndent := lineIndent
+	if isRoot && lineIndent == 0 {
+		parentIndent = -1
+	}
+	pos := j
+	if at(pos) == '\r' {
+		pos++
+	}
+	if at(pos) == '\n' {
+		pos++
+	}
+	blockIndent := -1
+	if explicit > 0 {
+		blockIndent = explicit
+		if parentIndent > 0 {
+			blockIndent += parentIndent
+		}
+	}
+	end := pos
+	for pos < len(src) {
+		n := 0
+		for at(pos+n) == ' ' {
+			n++
+		}
+		c := at(pos + n)
+		lineEnd := pos + n
+		for lineEnd < len(src) && src[lineEnd] != '\n' && src[lineEnd] != '\r' {
+			lineEnd++
+		}
+		next := lineEnd
+		if at(next) == '\r' {
+			next++
+		}
+		if at(next) == '\n' {
+			next++
+		}
+		if pos+n >= len(src) || c == '\n' || c == '\r' {
+			pos = next
+			continue
+		}
+		if blockIndent < 0 {
+			if n <= parentIndent {
+				break
+			}
+			blockIndent = n
+		}
+		if n < blockIndent {
+			break
+		}
+		if n == 0 && (strings.HasPrefix(src[pos:], "---") || strings.HasPrefix(src[pos:], "...")) {
+			break
+		}
+		end = lineEnd
+		pos = next
+	}
+	return end
+}
+
+// quotedKeyAt reports whether a quoted scalar opens at i and is a block
+// mapping key: its closing quote is followed, on the same line, by `:` and
+// then whitespace or the end of the line. Mirrors quotedKeyAt in
+// src/yaml.ts.
+func quotedKeyAt(src string, i int) bool {
+	q := src[i]
+	j := i + 1
+	for j < len(src) && src[j] != '\n' && src[j] != '\r' {
+		if q == '"' && src[j] == '\\' {
+			j += 2
+			continue
+		}
+		if src[j] == q {
+			if q == '\'' && j+1 < len(src) && src[j+1] == '\'' {
+				j += 2
+				continue
+			}
+			break
+		}
+		j++
+	}
+	if j >= len(src) || src[j] != q {
+		return false
+	}
+	j++
+	for j < len(src) && (src[j] == ' ' || src[j] == '\t') {
+		j++
+	}
+	return j < len(src) && src[j] == ':' && (j+1 >= len(src) || isYamlSpaceByte(src[j+1]))
+}
+
+// unquoteWholeScalar returns text with its quotes removed when the whole of
+// it is one quoted scalar on one line; otherwise text unchanged. Double
+// quotes take the common escapes; single quotes take a doubled quote.
+// Mirrors unquoteWholeScalar in src/yaml.ts.
+func unquoteWholeScalar(text string) string {
+	if len(text) < 2 {
+		return text
+	}
+	q := text[0]
+	if (q != '"' && q != '\'') || text[len(text)-1] != q {
+		return text
+	}
+	var b strings.Builder
+	last := len(text) - 1
+	for j := 1; j < last; j++ {
+		c := text[j]
+		switch {
+		case q == '\'' && c == '\'':
+			if text[j+1] != '\'' || j+1 == last {
+				return text
+			}
+			b.WriteByte('\'')
+			j++
+		case q == '"' && c == '"':
+			return text
+		case q == '"' && c == '\\':
+			j++
+			if j >= last {
+				return text
+			}
+			switch text[j] {
+			case 'n':
+				b.WriteByte('\n')
+			case 't':
+				b.WriteByte('\t')
+			case 'r':
+				b.WriteByte('\r')
+			case '0':
+				b.WriteByte(0)
+			case '"', '\\', '/', ' ':
+				b.WriteByte(text[j])
+			default:
+				return text
+			}
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
 }
 
 // Parse parses a YAML string and returns the resulting Go value.
@@ -1472,7 +1733,10 @@ func Yaml(j *jsonic.Jsonic, opts map[string]any) error {
 			}
 
 			// Plain scalars starting with digits that contain colons (e.g. 20:03:20).
-			if fwd[0] >= '0' && fwd[0] <= '9' {
+			// A sign before the digit counts too: `+190:20:30` is one plain
+			// scalar (mirrors src/yaml.ts).
+			if (fwd[0] >= '0' && fwd[0] <= '9') ||
+				((fwd[0] == '+' || fwd[0] == '-') && len(fwd) > 1 && fwd[1] >= '0' && fwd[1] <= '9') {
 				if tkn := handleNumericColon(lex, pnt, fwd, TX, &skipNumberMatch, flowState); tkn != nil {
 					return tkn
 				}
@@ -1708,10 +1972,13 @@ func Yaml(j *jsonic.Jsonic, opts map[string]any) error {
 				}
 
 				// Skip #IN when next content is a flow indicator or quoted
-				// string at column 0 — there's no block to indent into.
+				// string at column 0 — there's no block to indent into. A
+				// quoted KEY is different: it continues (or closes back to)
+				// the root block mapping, so it needs its #IN like a plain key
+				// does (tabnas/yaml#86).
 				if spaces == 0 &&
 					(fwd[pos] == '{' || fwd[pos] == '[' ||
-						fwd[pos] == '"' || fwd[pos] == '\'') {
+						((fwd[pos] == '"' || fwd[pos] == '\'') && !quotedKeyAt(fwd, pos))) {
 					pnt.SI += pos
 					pnt.RI += rows
 					pnt.CI = 1
@@ -2681,6 +2948,8 @@ func handleExplicitKey(lex *jsonic.Lex, pnt *jsonic.Point, fwd string,
 	if m := explicitKeyTagRe.FindStringSubmatch(key); m != nil {
 		key = m[2]
 	}
+	// A quoted explicit key is the scalar inside the quotes (`? "k"` is k).
+	key = unquoteWholeScalar(key)
 	consumed := keyEnd
 
 	// Skip comment at end of key line.
@@ -3302,8 +3571,12 @@ func handleNumericColon(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, TX jsoni
 	for pi < len(fwd) && fwd[pi] != '\n' && fwd[pi] != '\r' {
 		if fwd[pi] == ':' && pi+1 < len(fwd) && fwd[pi+1] != ' ' && fwd[pi+1] != '\t' &&
 			fwd[pi+1] != '\n' && fwd[pi+1] != '\r' {
+			// An embedded colon does not end the scan: the scalar can go on
+			// past a space ("09:00 AM"), which only the trailing-text branch
+			// reads as one scalar (tabnas/yaml#90).
 			hasEmbeddedColon = true
-			break
+			pi++
+			continue
 		}
 		// A COMMA IS NOT A SEPARATOR IN BLOCK CONTEXT.
 		//
@@ -3370,9 +3643,12 @@ func handleNumericColon(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, TX jsoni
 	if !hasEmbeddedColon {
 		return nil
 	}
+	// In a flow collection the scalar also ends at its `,` `]` `}`:
+	// `[1, 12:30]` holds "12:30", not "12:30,".
 	end := 0
 	for end < len(fwd) && fwd[end] != ' ' && fwd[end] != '\t' &&
-		fwd[end] != '\n' && fwd[end] != '\r' {
+		fwd[end] != '\n' && fwd[end] != '\r' &&
+		!(inFlow && (fwd[end] == ',' || fwd[end] == ']' || fwd[end] == '}')) {
 		end++
 	}
 	text := fwd[:end]
@@ -3480,8 +3756,11 @@ const grammarText = `
   rule: indent: open: [
     # Key pair => map.
     { s: ['#KEY' '#CL'] p: map b: 2 g: yaml }
-    # Element marker => list.
-    { s: '#EL' p: list g: yaml }
+    # Element marker => block sequence. yamlBlockList, not jsonic's list:
+    # list reads a '[' as its own opening bracket, so a flow sequence as the
+    # first item (k:\n  - [1, 2]) became the block sequence itself, or
+    # failed at the next item (tabnas/yaml#88).
+    { s: '#EL' p: yamlBlockList g: yaml }
     # Flow collection as a block-mapping value on the FOLLOWING line:
     #     required:
     #       [a, b, c]

@@ -117,6 +117,7 @@ fn every_fixture_is_present() {
         "flow-collections.tsv",
         "happy.tsv",
         "indentation.tsv",
+        "issue-regressions.tsv",
         "line-endings.tsv",
         "merge-key.tsv",
         "meta.tsv",

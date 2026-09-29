@@ -41,8 +41,11 @@
   rule: indent: open: [
     # Key pair => map.
     { s: ['#KEY' '#CL'] p: map b: 2 g: yaml }
-    # Element marker => list.
-    { s: '#EL' p: list g: yaml }
+    # Element marker => block sequence. yamlBlockList, not jsonic's list:
+    # list reads a '[' as its own opening bracket, so a flow sequence as the
+    # first item (k:\n  - [1, 2]) became the block sequence itself, or
+    # failed at the next item (tabnas/yaml#88).
+    { s: '#EL' p: yamlBlockList g: yaml }
     # Flow collection as a block-mapping value on the FOLLOWING line:
     #     required:
     #       [a, b, c]

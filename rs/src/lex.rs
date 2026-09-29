@@ -616,8 +616,10 @@ fn decide(src: &str, start: (usize, usize, usize), context: &mut Context) -> Act
             return single_quoted(src, fwd, cursor);
         }
 
-        // A value that starts with a digit but is not a number.
-        if at(fwd, 0) >= 0 && (at(fwd, 0) as u8).is_ascii_digit() {
+        // A value that starts with a digit (or a sign and a digit) but is
+        // not a number: `+190:20:30` is one plain scalar.
+        let digit = |index: usize| at(fwd, index) >= 0 && (at(fwd, index) as u8).is_ascii_digit();
+        if digit(0) || ((is(fwd, 0, b'+') || is(fwd, 0, b'-')) && digit(1)) {
             if let Some(act) = numeric_plain(src, fwd, cursor, context) {
                 return act;
             }
@@ -1625,9 +1627,13 @@ fn numeric_plain(
     let mut block_comma = false;
     let mut index = 1;
     while index < fwd.len() && !line_end(at(fwd, index)) {
+        // An embedded colon does not end the scan: the scalar can go on
+        // past a space (`09:00 AM`), which only the trailing-text branch
+        // reads as one scalar (tabnas/yaml#90).
         if is(fwd, index, b':') && !blank_line_end_or_eof(at(fwd, index + 1)) {
             embedded_colon = true;
-            break;
+            index += 1;
+            continue;
         }
         // A comma is NOT a separator in block context. Flow indicators
         // only indicate inside a flow collection, so `example: 1,2,3` is
@@ -1677,8 +1683,13 @@ fn numeric_plain(
     }
 
     if embedded_colon || block_comma {
+        // In a flow collection the scalar also ends at its `,` `]` `}`:
+        // `[1, 12:30]` holds "12:30", not "12:30,".
         let mut end = 0;
-        while end < fwd.len() && !blank_line_end_or_eof(at(fwd, end)) {
+        while end < fwd.len()
+            && !blank_line_end_or_eof(at(fwd, end))
+            && !(in_flow && (is(fwd, end, b',') || is(fwd, end, b']') || is(fwd, end, b'}')))
+        {
             end += 1;
         }
         let text = fwd[..end].to_string();
@@ -1834,9 +1845,13 @@ fn block_newline(
     }
 
     // Neither does a flow collection or a quoted scalar at column 0:
-    // there is no block for an indent to describe.
+    // there is no block for an indent to describe. A quoted KEY is
+    // different: it continues (or closes back to) the root block mapping,
+    // so it needs its #IN like a plain key does (tabnas/yaml#86).
     if spaces == 0
-        && (is(fwd, pos, b'{') || is(fwd, pos, b'[') || is(fwd, pos, b'"') || is(fwd, pos, b'\''))
+        && (is(fwd, pos, b'{')
+            || is(fwd, pos, b'[')
+            || ((is(fwd, pos, b'"') || is(fwd, pos, b'\'')) && !quoted_key_at(fwd, pos)))
     {
         return Ok((cursor.0 + pos, cursor.1 + rows, 0));
     }
@@ -1857,6 +1872,84 @@ fn block_newline(
 /// line, a multi-line plain key, a block-scalar key, and a value that is
 /// itself a block mapping or sequence.
 #[allow(clippy::too_many_lines)]
+/// Whether a quoted scalar opens at `index` and is a block mapping key:
+/// its closing quote is followed, on the same line, by `:` and then
+/// whitespace or the end of the line. Mirrors the canonical `quotedKeyAt`.
+fn quoted_key_at(src: &str, index: usize) -> bool {
+    let bytes = src.as_bytes();
+    let quote = bytes[index];
+    let mut j = index + 1;
+    while j < bytes.len() && !matches!(bytes[j], b'\n' | b'\r') {
+        if quote == b'"' && bytes[j] == b'\\' {
+            j += 2;
+            continue;
+        }
+        if bytes[j] == quote {
+            if quote == b'\'' && bytes.get(j + 1) == Some(&b'\'') {
+                j += 2;
+                continue;
+            }
+            break;
+        }
+        j += 1;
+    }
+    if bytes.get(j) != Some(&quote) {
+        return false;
+    }
+    j += 1;
+    while matches!(bytes.get(j), Some(b' ' | b'\t')) {
+        j += 1;
+    }
+    bytes.get(j) == Some(&b':')
+        && matches!(bytes.get(j + 1), None | Some(b' ' | b'\t' | b'\n' | b'\r'))
+}
+
+/// `text` with its quotes removed when the whole of it is one quoted
+/// scalar on one line; otherwise `text` unchanged. Double quotes take the
+/// common escapes; single quotes take a doubled quote. Mirrors the
+/// canonical `unquoteWholeScalar`.
+fn unquote_whole_scalar(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let Some(&quote) = chars.first() else {
+        return text.to_string();
+    };
+    if (quote != '"' && quote != '\'') || chars.len() < 2 || chars[chars.len() - 1] != quote {
+        return text.to_string();
+    }
+    let last = chars.len() - 1;
+    let mut out = String::new();
+    let mut j = 1;
+    while j < last {
+        let c = chars[j];
+        if quote == '\'' && c == '\'' {
+            if chars[j + 1] != '\'' || j + 1 == last {
+                return text.to_string();
+            }
+            out.push('\'');
+            j += 1;
+        } else if quote == '"' && c == '"' {
+            return text.to_string();
+        } else if quote == '"' && c == '\\' {
+            j += 1;
+            if j >= last {
+                return text.to_string();
+            }
+            match chars[j] {
+                'n' => out.push('\n'),
+                't' => out.push('\t'),
+                'r' => out.push('\r'),
+                '0' => out.push('\0'),
+                e @ ('"' | '\\' | '/' | ' ') => out.push(e),
+                _ => return text.to_string(),
+            }
+        } else {
+            out.push(c);
+        }
+        j += 1;
+    }
+    out
+}
+
 fn explicit_key(src: &str, fwd: &str, cursor: (usize, usize, usize), context: &mut Context) -> Act {
     let start = if blank(at(fwd, 1)) { 2 } else { 1 };
     let mut key_end = start;
@@ -1872,6 +1965,8 @@ fn explicit_key(src: &str, fwd: &str, cursor: (usize, usize, usize), context: &m
     if let Some(stripped) = strip_key_tag(&key) {
         key = stripped;
     }
+    // A quoted explicit key is the scalar inside the quotes (`? "k"` is k).
+    key = unquote_whole_scalar(&key);
 
     let mut consumed = key_end;
     while consumed < fwd.len() && !line_end(at(fwd, consumed)) {

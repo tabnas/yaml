@@ -77,8 +77,11 @@ const grammarText = `
   rule: indent: open: [
     # Key pair => map.
     { s: ['#KEY' '#CL'] p: map b: 2 g: yaml }
-    # Element marker => list.
-    { s: '#EL' p: list g: yaml }
+    # Element marker => block sequence. yamlBlockList, not jsonic's list:
+    # list reads a '[' as its own opening bracket, so a flow sequence as the
+    # first item (k:\\n  - [1, 2]) became the block sequence itself, or
+    # failed at the next item (tabnas/yaml#88).
+    { s: '#EL' p: yamlBlockList g: yaml }
     # Flow collection as a block-mapping value on the FOLLOWING line:
     #     required:
     #       [a, b, c]
@@ -308,18 +311,33 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
   // Incremental flow-depth cache for text.check (avoids O(n²) rescan).
   let _flowDepth = 0
   let _flowScanPos = 0
+  let _flowScanUpTo = 0
   // Persistent quote state so multi-call scans handle quotes spanning slices.
   let _inSingleQuote = false
   let _inDoubleQuote = false
 
   // Bring _flowDepth up to date with `upTo` by scanning lex.src incrementally.
-  // Skips quoted regions so embedded brackets don't mis-count the flow depth.
+  //
+  // The scan has to read the source the way the lexer does, or text is
+  // counted as syntax. A quoted region is skipped, and so are the regions
+  // where a bracket or a quote is ordinary text (tabnas/yaml#89):
+  //   - a comment (`#` at the start of a line or after whitespace);
+  //   - a block scalar's content lines (`|` / `>`);
+  //   - in block context, any `{` `[` `"` `'` that does not begin a node:
+  //     the `{` in `f({` or the `"` in `say "hi` is inside a plain scalar.
+  // Counting those left the depth above zero, so the rest of the document
+  // was read as flow (a `{` failed the parse), or left a quote open, so a
+  // later `[1, 2]` was read as the one string "1, 2]".
+  // The scan may run past `upTo` (to the end of a comment or a block
+  // scalar), since the lexer never stops inside either.
   function updateFlowState(src: string, upTo: number) {
-    if (upTo < _flowScanPos) {
+    if (upTo < _flowScanUpTo) {
       _flowDepth = 0; _flowScanPos = 0
       _inSingleQuote = false; _inDoubleQuote = false
     }
-    for (let fi = _flowScanPos; fi < upTo; fi++) {
+    _flowScanUpTo = upTo
+    let fi = _flowScanPos
+    for (; fi < upTo; fi++) {
       let fc = src[fi]
       if (_inDoubleQuote) {
         if (fc === '\\') fi++
@@ -333,17 +351,161 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
         }
         continue
       }
-      if (fc === '{' || fc === '[') _flowDepth++
-      else if (fc === '}' || fc === ']') { if (_flowDepth > 0) _flowDepth-- }
-      else if (fc === '"') { _inDoubleQuote = true }
-      else if (fc === "'") {
-        let pc = fi > 0 ? src.charCodeAt(fi - 1) : 0
-        if (!((pc >= 65 && pc <= 90) || (pc >= 97 && pc <= 122) || (pc >= 48 && pc <= 57))) {
-          _inSingleQuote = true
+      if (fc === '#' && (fi === 0 || isYamlSpace(src[fi - 1]))) {
+        while (fi + 1 < src.length && src[fi + 1] !== '\n' && src[fi + 1] !== '\r') fi++
+        continue
+      }
+      if (_flowDepth > 0) {
+        if (fc === '{' || fc === '[') _flowDepth++
+        else if (fc === '}' || fc === ']') _flowDepth--
+        else if (fc === '"') _inDoubleQuote = true
+        else if (fc === "'") {
+          let pc = fi > 0 ? src.charCodeAt(fi - 1) : 0
+          if (!((pc >= 65 && pc <= 90) || (pc >= 97 && pc <= 122) || (pc >= 48 && pc <= 57))) {
+            _inSingleQuote = true
+          }
+        }
+        continue
+      }
+      // Block context: only a node's first character opens anything.
+      if ((fc === '{' || fc === '[' || fc === '"' || fc === "'" ||
+           fc === '|' || fc === '>') && startsYamlNode(src, fi)) {
+        if (fc === '{' || fc === '[') _flowDepth++
+        else if (fc === '"') _inDoubleQuote = true
+        else if (fc === "'") _inSingleQuote = true
+        else {
+          let end = blockScalarEnd(src, fi)
+          if (end > fi) fi = end - 1
         }
       }
     }
-    _flowScanPos = upTo
+    _flowScanPos = fi
+  }
+
+  // Whether a quoted scalar opens at `i` and is a block mapping key: its
+  // closing quote is followed, on the same line, by `:` and then whitespace
+  // or the end of the line.
+  function quotedKeyAt(src: string, i: number): boolean {
+    let q = src[i]
+    let j = i + 1
+    while (j < src.length && src[j] !== '\n' && src[j] !== '\r') {
+      if (q === '"' && src[j] === '\\') { j += 2; continue }
+      if (src[j] === q) {
+        if (q === "'" && src[j + 1] === "'") { j += 2; continue }
+        break
+      }
+      j++
+    }
+    if (src[j] !== q) return false
+    j++
+    while (src[j] === ' ' || src[j] === '\t') j++
+    return src[j] === ':' && (j + 1 >= src.length || isYamlSpace(src[j + 1]))
+  }
+
+  // `text` with its quotes removed when the whole of it is one quoted
+  // scalar on one line; otherwise `text` unchanged. Double quotes take the
+  // common escapes; single quotes take '' for a quote.
+  function unquoteWholeScalar(text: string): string {
+    let q = text[0]
+    if ((q !== '"' && q !== "'") || text.length < 2 || text[text.length - 1] !== q) {
+      return text
+    }
+    let out = ''
+    for (let j = 1; j < text.length - 1; j++) {
+      let c = text[j]
+      if (q === "'" && c === "'") {
+        if (text[j + 1] !== "'" || j + 1 === text.length - 1) return text
+        out += "'"; j++
+      } else if (q === '"' && c === '"') {
+        return text
+      } else if (q === '"' && c === '\\') {
+        let e = text[++j]
+        let m: Record<string, string> =
+          { n: '\n', t: '\t', r: '\r', '0': '\0', '"': '"', '\\': '\\', '/': '/', ' ': ' ' }
+        if (j >= text.length - 1 || !(e in m)) return text
+        out += m[e]
+      } else {
+        out += c
+      }
+    }
+    return out
+  }
+
+  function isYamlSpace(c: string | undefined): boolean {
+    return c === ' ' || c === '\t' || c === '\n' || c === '\r'
+  }
+
+  // Whether the character at `i` (block context) is the first character of
+  // a node: first on its line, or after a `: ` / `- ` / `? ` indicator, a
+  // `---` marker, or a node property (`&anchor`, `!tag`) that itself starts
+  // a node. Anything else is inside a plain scalar.
+  function startsYamlNode(src: string, i: number): boolean {
+    let p = i - 1
+    while (p >= 0 && (src[p] === ' ' || src[p] === '\t')) p--
+    if (p < 0 || src[p] === '\n' || src[p] === '\r') return true
+    if (p === i - 1) return false
+    let pc = src[p]
+    if (pc === ':') return true
+    if (pc === '-' || pc === '?') {
+      if (pc === '-' && src[p - 1] === '-' && src[p - 2] === '-' &&
+          (p - 3 < 0 || src[p - 3] === '\n' || src[p - 3] === '\r')) return true
+      return startsYamlNode(src, p)
+    }
+    let w = p
+    while (w > 0 && !isYamlSpace(src[w - 1])) w--
+    if (src[w] === '&' || src[w] === '!') return startsYamlNode(src, w)
+    return false
+  }
+
+  // A block scalar indicator (`|` or `>`, optional chomping/indentation
+  // indicators, then only a comment) at `i`: the offset just past its content
+  // lines, or `i` when it is not one. Content runs while lines are blank or
+  // indented at least as far as the first content line, which must be deeper
+  // than the indicator's line (column 0 is allowed for a document's root).
+  function blockScalarEnd(src: string, i: number): number {
+    let j = i + 1
+    let explicit = 0
+    for (let k = 0; k < 2; k++) {
+      if (src[j] === '+' || src[j] === '-') j++
+      else if (src[j] >= '1' && src[j] <= '9') { explicit = +src[j]; j++ }
+    }
+    while (src[j] === ' ' || src[j] === '\t') j++
+    if (src[j] === '#') {
+      while (j < src.length && src[j] !== '\n' && src[j] !== '\r') j++
+    }
+    if (j < src.length && src[j] !== '\n' && src[j] !== '\r') return i
+    let ls = i
+    while (ls > 0 && src[ls - 1] !== '\n' && src[ls - 1] !== '\r') ls--
+    let lineIndent = 0
+    while (src[ls + lineIndent] === ' ') lineIndent++
+    let isRoot = ls + lineIndent === i ||
+      (src[ls] === '-' && src[ls + 1] === '-' && src[ls + 2] === '-')
+    let parentIndent = isRoot && lineIndent === 0 ? -1 : lineIndent
+    let pos = j
+    if (src[pos] === '\r') pos++
+    if (src[pos] === '\n') pos++
+    let blockIndent = explicit > 0 ? Math.max(parentIndent, 0) + explicit : -1
+    let end = pos
+    while (pos < src.length) {
+      let n = 0
+      while (src[pos + n] === ' ') n++
+      let c = src[pos + n]
+      let lineEnd = pos + n
+      while (lineEnd < src.length && src[lineEnd] !== '\n' && src[lineEnd] !== '\r') lineEnd++
+      let next = lineEnd
+      if (src[next] === '\r') next++
+      if (src[next] === '\n') next++
+      if (c === undefined || c === '\n' || c === '\r') { pos = next; continue }
+      if (blockIndent < 0) {
+        if (n <= parentIndent) break
+        blockIndent = n
+      }
+      if (n < blockIndent) break
+      if (n === 0 && (src.startsWith('---', pos) || src.startsWith('...', pos))) break
+      end = lineEnd
+      pos = next
+    }
+    return end
   }
 
 
@@ -1040,6 +1202,7 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
                 yamlStreamCurMeta = null
                 _flowDepth = 0
                 _flowScanPos = 0
+                _flowScanUpTo = 0
                 _inSingleQuote = false
                 _inDoubleQuote = false
                 // Empty / whitespace-only / comments-only source: emit one
@@ -1544,6 +1707,9 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
                   explicitKeyTag = tagMatch[1]
                   key = tagMatch[2]
                 }
+                // A quoted explicit key is the scalar inside the quotes, not
+                // the quoted text (`? "k"` is the key k).
+                key = unquoteWholeScalar(key)
                 let consumed = keyEnd
                 // Track position before consuming newline (for !hasValue case).
                 let beforeNewline = consumed
@@ -1933,7 +2099,10 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
               // trailing commas (e.g. 12,), or non-numeric text after a space
               // (e.g. "64 characters, hexadecimal.") must be captured before
               // jsonic's number matcher grabs just the digits.
-              if (fwd[0] >= '0' && fwd[0] <= '9') {
+              // A sign before the digit counts too: `+190:20:30` is one plain
+              // scalar, where the number matcher would take `+190`.
+              if ((fwd[0] >= '0' && fwd[0] <= '9') ||
+                  ((fwd[0] === '+' || fwd[0] === '-') && fwd[1] >= '0' && fwd[1] <= '9')) {
                 updateFlowState(lex.src as string, pnt.sI)
                 let inFlow = _flowDepth > 0
                 let hasEmbeddedColon = false
@@ -1941,10 +2110,16 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
                 let hasBlockComma = false
                 let pi = 1
                 while (pi < fwd.length && fwd[pi] !== '\n' && fwd[pi] !== '\r') {
+                  // An embedded colon (20:03:20) does not end the scan: the
+                  // scalar can go on past a space ("09:00 AM"), and only the
+                  // trailing-text branch below reads that as one scalar.
+                  // Stopping here took "09:00" and left "AM" to fail the
+                  // parse (tabnas/yaml#90).
                   if (fwd[pi] === ':' && fwd[pi + 1] !== ' ' && fwd[pi + 1] !== '\t' &&
                       fwd[pi + 1] !== '\n' && fwd[pi + 1] !== '\r' && fwd[pi + 1] !== undefined) {
                     hasEmbeddedColon = true
-                    break
+                    pi++
+                    continue
                   }
                   // A COMMA IS NOT A SEPARATOR IN BLOCK CONTEXT.
                   //
@@ -2003,10 +2178,13 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
                 }
 
                 if (hasEmbeddedColon || hasBlockComma) {
-                  // Scan to end of plain scalar token (space, tab, newline, eof).
+                  // Scan to end of plain scalar token (space, tab, newline,
+                  // eof, or in a flow collection its `,` `]` `}`: `[1, 12:30]`
+                  // holds "12:30", not "12:30,").
                   let end = 0
                   while (end < fwd.length && fwd[end] !== ' ' && fwd[end] !== '\t' &&
-                         fwd[end] !== '\n' && fwd[end] !== '\r') end++
+                         fwd[end] !== '\n' && fwd[end] !== '\r' &&
+                         !(inFlow && (fwd[end] === ',' || fwd[end] === ']' || fwd[end] === '}'))) end++
                   let text = fwd.substring(0, end)
                   let tkn = lex.token('#TX', text, text, lex.pnt)
                   pnt.sI += end
@@ -2248,9 +2426,14 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
                 // Skip #IN when the next content is a flow indicator or quoted
                 // string at column 0 — there's no block to indent into. Match
                 // the previous behavior of the inline `--- foo` handler.
+                // A quoted KEY at column 0 is different: it continues (or
+                // closes back to) the root block mapping, so it needs its #IN
+                // like a plain key does. Without it a block sequence ending
+                // just before it swallowed the pair (tabnas/yaml#86).
                 if (spaces === 0 &&
                     (fwd[pos] === '{' || fwd[pos] === '[' ||
-                     fwd[pos] === '"' || fwd[pos] === "'")) {
+                     ((fwd[pos] === '"' || fwd[pos] === "'") &&
+                      !quotedKeyAt(fwd, pos)))) {
                   pnt.sI += pos
                   pnt.rI += rows
                   pnt.cI = 0

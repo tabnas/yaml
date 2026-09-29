@@ -89,18 +89,11 @@ func TestParity_ExplicitKeyInlineBlockMapping(t *testing.T) {
 	if !ok {
 		t.Fatalf("missing paths map: %#v", got)
 	}
-	// The TS implementation keeps the surrounding quotes as part of the
-	// explicit-key text. We assert the same shape for parity.
-	wantKey := `"/api/foo"`
-	pathVal, ok := paths[wantKey]
+	// A quoted explicit key is the scalar inside the quotes
+	// (tabnas/yaml#86), so the key is /api/foo, not "/api/foo".
+	pathVal, ok := paths["/api/foo"]
 	if !ok {
-		// Fall back to checking unquoted form too — older TS builds may
-		// strip the quotes; either is acceptable as long as the value
-		// shape is correct.
-		pathVal, ok = paths["/api/foo"]
-	}
-	if !ok {
-		t.Fatalf("missing %q (or unquoted) in paths: %#v", wantKey, paths)
+		t.Fatalf("missing /api/foo in paths: %#v", paths)
 	}
 	pathMap, ok := asMap(pathVal)
 	if !ok {
