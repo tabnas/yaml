@@ -2286,23 +2286,34 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
                   return null
                 }
 
-                // End of the plain scalar token (space, tab, newline, eof, or
-                // in a flow collection its `,` `]` `}`: `[1, 12:30]` holds
-                // "12:30", not "12:30,").
-                let end = 0
-                while (end < fwd.length && fwd[end] !== ' ' && fwd[end] !== '\t' &&
-                       fwd[end] !== '\n' && fwd[end] !== '\r' &&
-                       !(inFlow && (fwd[end] === ',' || fwd[end] === ']' || fwd[end] === '}'))) end++
+                // A `#` inside the scalar's token follows a non-blank
+                // character, and YAML starts a comment only at a `#` after
+                // white space, so `80#` is the plain scalar "80#". Left to
+                // the number matcher it read 80, and the rest of the line
+                // went as a comment (tabnas/yaml#95). The text handler reads
+                // it whole, as it reads `foo#bar`, and as for trailing text it
+                // takes continuation lines and stops at a mapping colon
+                // (`80#:`). The token ends at a blank, or in a flow collection
+                // at its `,` `]` `}`, so a `#` past the collection's close
+                // keeps the reading it had.
+                let tokenEnd = 0
+                while (tokenEnd < fwd.length && fwd[tokenEnd] !== ' ' && fwd[tokenEnd] !== '\t' &&
+                       fwd[tokenEnd] !== '\n' && fwd[tokenEnd] !== '\r' &&
+                       !(inFlow && (fwd[tokenEnd] === ',' || fwd[tokenEnd] === ']' ||
+                         fwd[tokenEnd] === '}'))) tokenEnd++
+                if (fwd.substring(0, tokenEnd).includes('#')) {
+                  skipNumberMatch = true
+                  return null
+                }
 
-                // A `#` inside the token follows a non-blank character, and
-                // YAML starts a comment only at a `#` after white space, so
-                // `80#` is the plain scalar "80#". Left to the number matcher
-                // it read 80, and the rest of the line went as a comment
-                // (tabnas/yaml#95). A `#` past a flow collection's `]` or `}`
-                // is outside the token and keeps the reading it had.
-                let hasEmbeddedHash = fwd.substring(0, end).includes('#')
-
-                if (hasEmbeddedColon || hasBlockComma || hasEmbeddedHash) {
+                if (hasEmbeddedColon || hasBlockComma) {
+                  // Scan to end of plain scalar token (space, tab, newline,
+                  // eof, or in a flow collection its `,` `]` `}`: `[1, 12:30]`
+                  // holds "12:30", not "12:30,").
+                  let end = 0
+                  while (end < fwd.length && fwd[end] !== ' ' && fwd[end] !== '\t' &&
+                         fwd[end] !== '\n' && fwd[end] !== '\r' &&
+                         !(inFlow && (fwd[end] === ',' || fwd[end] === ']' || fwd[end] === '}'))) end++
                   let text = fwd.substring(0, end)
                   let tkn = lex.token('#TX', text, text, lex.pnt)
                   pnt.sI += end

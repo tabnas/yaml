@@ -1722,24 +1722,37 @@ fn numeric_plain(
         return Some(text::plain_scalar(src, fwd, cursor, context));
     }
 
-    // In a flow collection the scalar also ends at its `,` `]` `}`:
-    // `[1, 12:30]` holds "12:30", not "12:30,".
-    let mut end = 0;
-    while end < fwd.len()
-        && !blank_line_end_or_eof(at(fwd, end))
-        && !(in_flow && (is(fwd, end, b',') || is(fwd, end, b']') || is(fwd, end, b'}')))
-    {
-        end += 1;
-    }
-    // A `#` inside the token follows a non-blank character, and YAML
-    // starts a comment only at a `#` after white space, so `80#` is the
-    // plain scalar "80#". Left to the number matcher it read 80, and the
-    // rest of the line went as a comment (tabnas/yaml#95). A `#` past a
-    // flow collection's `]` or `}` is outside the token and keeps the
+    // A `#` inside the scalar's token follows a non-blank character, and
+    // YAML starts a comment only at a `#` after white space, so `80#` is
+    // the plain scalar "80#". Left to the number matcher it read 80, and
+    // the rest of the line went as a comment (tabnas/yaml#95). The
+    // plain-scalar handler reads it whole, as it reads `foo#bar`, and as
+    // for trailing text it takes continuation lines and stops at a mapping
+    // colon (`80#:`). The token ends at a blank, or in a flow collection at
+    // its `,` `]` `}`, so a `#` past the collection's close keeps the
     // reading it had.
-    let embedded_hash = fwd.as_bytes()[..end].contains(&b'#');
+    let mut token_end = 0;
+    while token_end < fwd.len()
+        && !blank_line_end_or_eof(at(fwd, token_end))
+        && !(in_flow
+            && (is(fwd, token_end, b',') || is(fwd, token_end, b']') || is(fwd, token_end, b'}')))
+    {
+        token_end += 1;
+    }
+    if fwd.as_bytes()[..token_end].contains(&b'#') {
+        return Some(text::plain_scalar(src, fwd, cursor, context));
+    }
 
-    if embedded_colon || block_comma || embedded_hash {
+    if embedded_colon || block_comma {
+        // In a flow collection the scalar also ends at its `,` `]` `}`:
+        // `[1, 12:30]` holds "12:30", not "12:30,".
+        let mut end = 0;
+        while end < fwd.len()
+            && !blank_line_end_or_eof(at(fwd, end))
+            && !(in_flow && (is(fwd, end, b',') || is(fwd, end, b']') || is(fwd, end, b'}')))
+        {
+            end += 1;
+        }
         let text = fwd[..end].to_string();
         let next = advance_cols(src, cursor, end);
         return Some(Act::moved(
