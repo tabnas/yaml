@@ -252,6 +252,14 @@ const grammarText = `
 // --- END EMBEDDED yaml-grammar.jsonic ---
 
 
+// The characters updateFlowState acts on, by char code: quotes, the escape
+// backslash, the comment mark, flow brackets, and block scalar indicators.
+// Every other character leaves its state unchanged, so it is skipped with
+// one table read.
+const FLOW_SCAN_CHARS = new Uint8Array(126)
+for (const c of '"\'\\#{}[]|>') FLOW_SCAN_CHARS[c.charCodeAt(0)] = 1
+
+
 const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
   // Install once per instance: a second use(Yaml) on the same instance
   // returns here. options() does not re-run plugins, and make() builds a
@@ -338,6 +346,9 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
     _flowScanUpTo = upTo
     let fi = _flowScanPos
     for (; fi < upTo; fi++) {
+      // Fast path: only these ten characters matter in any state.
+      let cc = src.charCodeAt(fi)
+      if (cc > 125 || 0 === FLOW_SCAN_CHARS[cc]) continue
       let fc = src[fi]
       if (_inDoubleQuote) {
         if (fc === '\\') fi++
@@ -368,9 +379,14 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
         continue
       }
       // Block context: only a node's first character opens anything.
-      if ((fc === '{' || fc === '[' || fc === '"' || fc === "'" ||
-           fc === '|' || fc === '>') && startsYamlNode(src, fi)) {
-        if (fc === '{' || fc === '[') _flowDepth++
+      if (fc === '{' || fc === '[' || fc === '"' || fc === "'" ||
+          fc === '|' || fc === '>') {
+        if (!startsYamlNode(src, fi)) {
+          // Inside a plain scalar, which nothing can open until it ends at
+          // `: `, ` #` or the end of the line: skip to there.
+          fi = plainScalarRest(src, fi) - 1
+        }
+        else if (fc === '{' || fc === '[') _flowDepth++
         else if (fc === '"') _inDoubleQuote = true
         else if (fc === "'") _inSingleQuote = true
         else {
@@ -440,21 +456,49 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
   // `---` marker, or a node property (`&anchor`, `!tag`) that itself starts
   // a node. Anything else is inside a plain scalar.
   function startsYamlNode(src: string, i: number): boolean {
+    // Char codes throughout: this runs for every bracket and quote in block
+    // text, and indexing a string allocates a one-character string.
     let p = i - 1
-    while (p >= 0 && (src[p] === ' ' || src[p] === '\t')) p--
-    if (p < 0 || src[p] === '\n' || src[p] === '\r') return true
-    if (p === i - 1) return false
-    let pc = src[p]
-    if (pc === ':') return true
-    if (pc === '-' || pc === '?') {
-      if (pc === '-' && src[p - 1] === '-' && src[p - 2] === '-' &&
-          (p - 3 < 0 || src[p - 3] === '\n' || src[p - 3] === '\r')) return true
+    let c = p >= 0 ? src.charCodeAt(p) : -1
+    if (c === 10 || c === 13 || c < 0) return true
+    if (c !== 32 && c !== 9) return false
+    while (c === 32 || c === 9) c = --p >= 0 ? src.charCodeAt(p) : -1
+    if (c === 10 || c === 13 || c < 0) return true
+    if (c === 58) return true // `:`
+    if (c === 45 || c === 63) { // `-` / `?`
+      if (c === 45 && src.charCodeAt(p - 1) === 45 && src.charCodeAt(p - 2) === 45 &&
+          (p - 3 < 0 || src.charCodeAt(p - 3) === 10 || src.charCodeAt(p - 3) === 13)) return true
       return startsYamlNode(src, p)
     }
     let w = p
-    while (w > 0 && !isYamlSpace(src[w - 1])) w--
-    if (src[w] === '&' || src[w] === '!') return startsYamlNode(src, w)
+    while (w > 0 && !isYamlSpaceCode(src.charCodeAt(w - 1))) w--
+    c = src.charCodeAt(w)
+    if (c === 38 || c === 33) return startsYamlNode(src, w) // `&` / `!`
     return false
+  }
+
+  // From `i` inside a block-context plain scalar, the offset where it can
+  // end: the next line break, a `:` followed by whitespace or the end, or a
+  // `#` after whitespace.
+  function plainScalarRest(src: string, i: number): number {
+    let j = i + 1
+    for (; j < src.length; j++) {
+      let c = src.charCodeAt(j)
+      if (c === 10 || c === 13) break
+      if (c === 58) { // `:`
+        let n = j + 1 < src.length ? src.charCodeAt(j + 1) : -1
+        if (n < 0 || isYamlSpaceCode(n)) break
+      }
+      else if (c === 35) { // `#`
+        let b = src.charCodeAt(j - 1)
+        if (b === 32 || b === 9) break
+      }
+    }
+    return j
+  }
+
+  function isYamlSpaceCode(c: number): boolean {
+    return c === 32 || c === 9 || c === 10 || c === 13
   }
 
   // A block scalar indicator (`|` or `>`, optional chomping/indentation

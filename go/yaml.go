@@ -206,6 +206,9 @@ func (s *flowScanState) advance(src string, target int) {
 		switch fc {
 		case '{', '[', '"', '\'', '|', '>':
 			if !startsYamlNode(src, fi) {
+				// Inside a plain scalar, which nothing can open until it
+				// ends at `: `, ` #` or the end of the line: skip to there.
+				fi = plainScalarRest(src, fi) - 1
 				continue
 			}
 			switch fc {
@@ -264,6 +267,29 @@ func startsYamlNode(src string, i int) bool {
 		return startsYamlNode(src, w)
 	}
 	return false
+}
+
+// plainScalarRest returns, from i inside a block-context plain scalar, the
+// offset where it can end: the next line break, a `:` followed by
+// whitespace or the end, or a `#` after whitespace. Mirrors plainScalarRest
+// in src/yaml.ts.
+func plainScalarRest(src string, i int) int {
+	j := i + 1
+	for ; j < len(src); j++ {
+		switch src[j] {
+		case '\n', '\r':
+			return j
+		case ':':
+			if j+1 >= len(src) || isYamlSpaceByte(src[j+1]) {
+				return j
+			}
+		case '#':
+			if src[j-1] == ' ' || src[j-1] == '\t' {
+				return j
+			}
+		}
+	}
+	return j
 }
 
 // blockScalarEnd returns, for a block scalar indicator (| or >, optional

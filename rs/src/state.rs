@@ -278,9 +278,13 @@ pub(crate) fn update_flow(context: &mut Context, src: &str, target: usize) {
             continue;
         }
         // Block context: only a node's first character opens anything.
-        if matches!(character, b'{' | b'[' | b'"' | b'\'' | b'|' | b'>')
-            && starts_node(bytes, index)
-        {
+        if matches!(character, b'{' | b'[' | b'"' | b'\'' | b'|' | b'>') {
+            if !starts_node(bytes, index) {
+                // Inside a plain scalar, which nothing can open until it
+                // ends at `: `, ` #` or the end of the line: skip to there.
+                index = plain_scalar_rest(bytes, index);
+                continue;
+            }
             match character {
                 b'{' | b'[' => depth += 1,
                 b'"' => double = true,
@@ -346,6 +350,23 @@ fn starts_node(bytes: &[u8], index: usize) -> bool {
         return starts_node(bytes, w);
     }
     false
+}
+
+/// From `index` inside a block-context plain scalar, the offset where it
+/// can end: the next line break, a `:` followed by whitespace or the end,
+/// or a `#` after whitespace. Mirrors the canonical `plainScalarRest`.
+fn plain_scalar_rest(bytes: &[u8], index: usize) -> usize {
+    let mut j = index + 1;
+    while j < bytes.len() {
+        match bytes[j] {
+            b'\n' | b'\r' => return j,
+            b':' if bytes.get(j + 1).is_none_or(|next| is_space(*next)) => return j,
+            b'#' if matches!(bytes[j - 1], b' ' | b'\t') => return j,
+            _ => {}
+        }
+        j += 1;
+    }
+    j
 }
 
 /// A block scalar indicator (`|` or `>`, optional chomping/indentation
