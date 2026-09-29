@@ -104,6 +104,8 @@ live grammar with [`@tabnas/railroad`](https://github.com/tabnas/railroad):
 ![yaml grammar railroad diagram](ts/doc/grammar.svg)
 
 An ASCII version is in [`ts/doc/grammar.txt`](ts/doc/grammar.txt).
+`npm run diagram` in `ts/` regenerates both, and the test suite fails
+when either no longer matches the grammar.
 
 
 ## License

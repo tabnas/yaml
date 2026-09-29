@@ -20,11 +20,12 @@
   },
   "scripts": {
     "pretest": "npm run build",
-    "test": "node --enable-source-maps --test \"dist-test/*.test.js\" && node --test test/docs.test.js test/embed-grammar.test.js",
+    "test": "node --enable-source-maps --test \"dist-test/*.test.js\" && node --test test/docs.test.js test/embed-grammar.test.js test/grammar-diagram.test.js",
     "pretest-some": "npm run build",
     "test-some": "node --enable-source-maps --test-name-pattern=\"$npm_config_pattern\" --test \"dist-test/*.test.js\"",
     "watch": "tsc --build src test -w",
     "embed": "node embed-grammar.js",
+    "diagram": "node scripts/grammar-diagram.cjs",
     "build": "node embed-grammar.js && tsc --build src && tsc --build test",
     "clean": "rm -rf dist dist-test node_modules yarn.lock package-lock.json",
     "reset": "npm run clean && npm i && npm run build && npm test",
