@@ -3,6 +3,7 @@ package tabnasyaml
 import (
 	"fmt"
 	"math"
+	"math/big"
 	"regexp"
 	"strconv"
 	"strings"
@@ -1435,12 +1436,13 @@ func Yaml(j *jsonic.Jsonic, opts map[string]any) error {
 				pnt.SI = 0
 				return tkn
 			}
-			// A byte order mark opening the stream is not content: step
-			// over it without counting a column. atLineStart and the flow
-			// scan treat the offset after it as a line start.
-			if pnt.SI == 0 && strings.HasPrefix(src, bomText) {
-				pnt.SI = len(bomText)
-			}
+		}
+		// A byte order mark opening the stream is not content: step over
+		// it without counting a column. atLineStart and the flow scan
+		// treat the offset after it as a line start. This sits outside the
+		// reset, which a second parse of the same source skips.
+		if pnt.SI == 0 && strings.HasPrefix(src, bomText) {
+			pnt.SI = len(bomText)
 		}
 
 		if pnt.SI >= pnt.Len {
@@ -3821,14 +3823,14 @@ func yamlTagInt(raw string) any {
 		m = tagOctRe.FindStringSubmatch(raw)
 	}
 	if m != nil {
-		n, err := strconv.ParseUint(m[2], base, 64)
-		if err == nil {
-			v := float64(n)
-			if m[1] == "-" {
-				v = -v
-			}
-			return v
+		// Exact, then rounded to the nearest float64 (ties to even) as
+		// JavaScript's parseInt does, so a value past 64 bits is not lost.
+		n, _ := new(big.Int).SetString(m[2], base)
+		v, _ := new(big.Float).SetInt(n).Float64()
+		if m[1] == "-" {
+			v = -v
 		}
+		return v
 	}
 	return jsParseInt(raw)
 }

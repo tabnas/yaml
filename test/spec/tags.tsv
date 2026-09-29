@@ -53,3 +53,9 @@ a: !!int 012	{"a":12}
 [!!int 0xa, !!float .inf]	[10,"@@Infinity"]	
 a: !!str # a comment\nb: 1	{"a":"","b":1}	
 - !!str #c\n- x	["","x"]	
+a: !!int 0x10000000000000000	{"a":18446744073709552000}	
+a: !!int -0x10000000000000000	{"a":-18446744073709552000}	
+a: !!int 0x20000000000001	{"a":9007199254740992}	
+a: !!int 0x20000000000003	{"a":9007199254740996}	
+a: !!int 0o1777777777777777777777	{"a":18446744073709552000}	
+a: !!int 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff	{"a":"@@Infinity"}	

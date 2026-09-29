@@ -240,3 +240,29 @@ func TestParity_CommaStillSeparatesInFlow(t *testing.T) {
 		t.Errorf("got %s, want %s", gotJSON, want)
 	}
 }
+
+// A byte order mark opening the stream is stripped on every parse, not
+// only the first: the per-parse reset is skipped when one instance parses
+// the same source again, as the package-level Parse does.
+func TestParity_ByteOrderMarkOnRepeatedParse(t *testing.T) {
+	j := MakeJsonic()
+	cases := []struct{ src, want string }{
+		{bomText + "a: 1", `{"a":1}`},
+		{bomText + "[1, 2]", `[1,2]`},
+		{bomText + "- a\n- b", `["a","b"]`},
+	}
+	for _, c := range cases {
+		for round := 1; round <= 2; round++ {
+			for name, parse := range map[string]func(string) (any, error){"Parse": Parse, "instance": j.Parse} {
+				got, err := parse(c.src)
+				if err != nil {
+					t.Fatalf("%s %q round %d: %v", name, c.src, round, err)
+				}
+				gotJSON, _ := json.Marshal(got)
+				if string(gotJSON) != c.want {
+					t.Errorf("%s %q round %d: got %s, want %s", name, c.src, round, gotJSON, c.want)
+				}
+			}
+		}
+	}
+}

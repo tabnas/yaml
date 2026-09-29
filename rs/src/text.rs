@@ -922,12 +922,45 @@ fn tag_int(raw: &str) -> f64 {
     };
     if let Some((digits, radix)) = radix {
         if !digits.is_empty() && digits.chars().all(|c| c.is_digit(radix)) {
-            if let Ok(n) = u64::from_str_radix(digits, radix) {
-                return sign * n as f64;
-            }
+            return sign * radix_to_f64(digits, radix);
         }
     }
     crate::parse_int(raw)
+}
+
+/// Hex or octal digits as the nearest `f64`, ties to even, as
+/// JavaScript's `parseInt` reads them: exact however many digits there
+/// are, and infinite past the largest finite value.
+fn radix_to_f64(digits: &str, radix: u32) -> f64 {
+    let width = if radix == 16 { 4 } else { 3 };
+    // The value's bits, most significant first, without leading zeros.
+    let mut bits = Vec::with_capacity(digits.len() * width);
+    for digit in digits.chars().filter_map(|c| c.to_digit(radix)) {
+        for shift in (0..width).rev() {
+            let bit = (digit >> shift) & 1 == 1;
+            if bit || !bits.is_empty() {
+                bits.push(bit);
+            }
+        }
+    }
+    const MANTISSA: usize = 53;
+    let kept = bits.len().min(MANTISSA);
+    let mut mantissa = bits[..kept]
+        .iter()
+        .fold(0u64, |acc, &bit| acc << 1 | u64::from(bit));
+    if bits.len() > MANTISSA {
+        let round = bits[MANTISSA];
+        let sticky = bits[MANTISSA + 1..].iter().any(|&bit| bit);
+        if round && (sticky || mantissa & 1 == 1) {
+            mantissa += 1;
+        }
+    }
+    let exponent = bits.len() - kept;
+    if exponent > 1100 {
+        return f64::INFINITY;
+    }
+    // Both factors are exact, so the product rounds only on overflow.
+    mantissa as f64 * 2f64.powi(exponent as i32)
 }
 
 /// The value a `!!float` tag gives its text: the core schema's infinities
