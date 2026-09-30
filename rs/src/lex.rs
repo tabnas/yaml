@@ -1731,6 +1731,10 @@ fn numeric_plain(
     // colon (`80#:`). The token ends at a blank, or in a flow collection at
     // its `,` `]` `}`, so a `#` past the collection's close keeps the
     // reading it had.
+    //
+    // Outside a flow collection `[` `]` `{` `}` indicate nothing either, so
+    // `5[` and `12[x]` are plain scalars too. The number matcher took the
+    // digits and the parse failed on the bracket (tabnas/yaml#99).
     let mut token_end = 0;
     while token_end < fwd.len()
         && !blank_line_end_or_eof(at(fwd, token_end))
@@ -1739,7 +1743,10 @@ fn numeric_plain(
     {
         token_end += 1;
     }
-    if fwd.as_bytes()[..token_end].contains(&b'#') {
+    let token = &fwd.as_bytes()[..token_end];
+    if token.contains(&b'#')
+        || (!in_flow && token.iter().any(|b| matches!(b, b'[' | b']' | b'{' | b'}')))
+    {
         return Some(text::plain_scalar(src, fwd, cursor, context));
     }
 
