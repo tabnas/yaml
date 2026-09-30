@@ -2296,12 +2296,18 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
                 // (`80#:`). The token ends at a blank, or in a flow collection
                 // at its `,` `]` `}`, so a `#` past the collection's close
                 // keeps the reading it had.
+                //
+                // Outside a flow collection `[` `]` `{` `}` indicate nothing
+                // either, so `5[` and `12[x]` are plain scalars too. The
+                // number matcher took the digits and the parse failed on the
+                // bracket (tabnas/yaml#99).
                 let tokenEnd = 0
                 while (tokenEnd < fwd.length && fwd[tokenEnd] !== ' ' && fwd[tokenEnd] !== '\t' &&
                        fwd[tokenEnd] !== '\n' && fwd[tokenEnd] !== '\r' &&
                        !(inFlow && (fwd[tokenEnd] === ',' || fwd[tokenEnd] === ']' ||
                          fwd[tokenEnd] === '}'))) tokenEnd++
-                if (fwd.substring(0, tokenEnd).includes('#')) {
+                const token = fwd.substring(0, tokenEnd)
+                if (token.includes('#') || (!inFlow && /[[\]{}]/.test(token))) {
                   skipNumberMatch = true
                   return null
                 }

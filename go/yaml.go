@@ -3759,13 +3759,18 @@ func handleNumericColon(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, TX jsoni
 	// and stops at a mapping colon (`80#:`). The token ends at a blank, or in
 	// a flow collection at its `,` `]` `}`, so a `#` past the collection's
 	// close keeps the reading it had.
+	//
+	// Outside a flow collection `[` `]` `{` `}` indicate nothing either, so
+	// `5[` and `12[x]` are plain scalars too. The number matcher took the
+	// digits and the parse failed on the bracket (tabnas/yaml#99).
 	tokenEnd := 0
 	for tokenEnd < len(fwd) && fwd[tokenEnd] != ' ' && fwd[tokenEnd] != '\t' &&
 		fwd[tokenEnd] != '\n' && fwd[tokenEnd] != '\r' &&
 		!(inFlow && (fwd[tokenEnd] == ',' || fwd[tokenEnd] == ']' || fwd[tokenEnd] == '}')) {
 		tokenEnd++
 	}
-	if strings.IndexByte(fwd[:tokenEnd], '#') > 0 {
+	token := fwd[:tokenEnd]
+	if strings.IndexByte(token, '#') > 0 || (!inFlow && strings.ContainsAny(token, "[]{}")) {
 		*skipNumberMatch = true
 		return nil
 	}
