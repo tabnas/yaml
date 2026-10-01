@@ -196,7 +196,7 @@ rules it adds, alongside jsonic's `val` / `map` / `pair` / `list` /
 | `yamlBlockList` | block sequence (`- ` items) |
 | `yamlBlockElem` | subsequent items in a block sequence |
 | `yamlElemMap` | a mapping that is a sequence element (`- key: val`) |
-| `yamlElemPair` | additional pairs within a `yamlElemMap` |
+| `yamlElemPair` | each pair within a `yamlElemMap`, the first included |
 
 Every alternate the plugin adds is tagged with the rule group `yaml`, so
 the whole extension can be removed from an instance with

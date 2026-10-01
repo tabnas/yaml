@@ -38,8 +38,9 @@ fn second_entries(depth: usize) -> String {
 }
 
 /// `depth` levels of a sequence holding a mapping, each nested in the
-/// mapping's SECOND pair: two containers a level. After its first pair the
-/// mapping's rule is replaced by its rotation, `yamlElemPair`.
+/// mapping's SECOND pair: two containers a level. Before its first pair
+/// the mapping's rule is replaced by its rotation, `yamlElemPair`, which
+/// each later pair rotates again.
 fn second_pairs(depth: usize) -> String {
     let mut src = String::new();
     for level in 0..depth {
