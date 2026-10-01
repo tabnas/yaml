@@ -218,24 +218,21 @@ const GRAMMAR_TEXT: &str = r##"
     inject: { append: false }
   }
 
-  # yamlElemMap: "- key: val" patterns.
+  # yamlElemMap: a mapping that starts in a sequence entry, "- key: val",
+  # or "[key: val]" in a flow sequence. It only opens the mapping (its
+  # before-open action makes the node) and hands the first pair, unread,
+  # to yamlElemPair, which reads every pair. A pair rule opening on the
+  # open mapping names the member in u.key before it pushes the value's
+  # rule, so a consumer that follows rule events has the key before a
+  # value that is a collection opens. When the rule that opened the
+  # mapping named the first member as well, that consumer was never told
+  # the key, and the first member's value opened ahead of it
+  # (tabnas/yaml#105).
   rule: yamlElemMap: open: [
-    { s: ['#KEY' '#CL'] p: val a: '@elem-key' g: yaml }
-  ]
-  rule: yamlElemMap: close: [
-    # Doc-frame markers terminate elem-map; back up for the stream rule.
-    { s: '#DS' b: 1 g: 'yaml,end' }
-    { s: '#DE' b: 1 g: 'yaml,end' }
-    { s: '#DR' b: 1 g: 'yaml,end' }
-    { s: '#IN' c: '@t0-eq-map-in' r: yamlElemPair g: 'yaml,comma' }
-    { s: '#IN' b: 1 g: 'yaml,close' }
-    { s: '#CA' b: 1 g: 'yaml,comma' }
-    { s: '#CS' b: 1 g: 'yaml,close' }
-    { s: '#CB' b: 1 g: 'yaml,close' }
-    { s: '#ZZ' g: 'yaml,end' }
+    { s: ['#KEY' '#CL'] r: yamlElemPair b: 2 g: yaml }
   ]
 
-  # Additional pairs in a yamlElemMap.
+  # Every pair in a yamlElemMap, the first included.
   rule: yamlElemPair: open: [
     { s: ['#KEY' '#CL'] p: val a: '@elem-key' g: yaml }
   ]
@@ -1210,12 +1207,12 @@ fn wire_rules(parser: &mut Tabnas) {
         });
     });
 
+    // `yamlElemMap` only makes the map: its open alternate hands every
+    // pair, the first included, to `yamlElemPair` (see the grammar), so it
+    // never reaches a close phase and stores nothing itself.
     parser.define_rule("yamlElemMap", |spec| {
         spec.add_bo(|rule, _context| {
             set_node(rule, Value::object(IndexMap::new()));
-        });
-        spec.add_bc(|rule, _context| {
-            store_elem_pair(rule);
         });
     });
 
@@ -1478,7 +1475,7 @@ const DEPTH_GUARD: &str = "depth";
 /// `list`, and YAML's own block collections. A block sequence opens as
 /// `yamlBlockList` and, after its first entry, is replaced by
 /// `yamlBlockElem`; a mapping that starts in a sequence entry opens as
-/// `yamlElemMap` and is replaced by `yamlElemPair` after its first pair.
+/// `yamlElemMap` and is replaced by `yamlElemPair` before its first pair.
 /// Each replacement shares the container's cell and takes its place on
 /// the stack, so a container is counted once under whichever name it has
 /// reached. jsonic's `pair` and `elem`, and `indent`, hold none.

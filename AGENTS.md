@@ -345,6 +345,15 @@ there first, and keep the naming rule.
   shared `val`/`map`/`list`/`pair`/`elem`/`indent` rules; the full rule
   set is asserted in `debug-model.test.ts`, and in
   `rs/tests/yaml_test.rs::the_grammar_adds_the_yaml_rules`.
+- **A member is named on the open mapping, before its value's rule is
+  pushed.** `yamlElemMap` only opens a mapping that starts in a sequence
+  entry and hands every pair, the first included, to `yamlElemPair`,
+  whose open pass sets `u.key`, as jsonic's `pair` does. A consumer that
+  follows rule events (tabnas/transduce streams a parse that way) takes
+  the key from that pass; a rule that opens a mapping and names its first
+  member in the same pass never tells it, and a first member whose value
+  is a collection is then refused (tabnas/yaml#105). The
+  `key-before-value` tests in all three runtimes hold this.
 - **The Rust port keeps its per-parse state in the parse context.** The
   TS and Go plugins close over thirteen variables (anchors, pending
   anchors, pending tokens, tag handles, the stream accumulators, the

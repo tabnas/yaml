@@ -189,24 +189,21 @@ const grammarText = `
     inject: { append: false }
   }
 
-  # yamlElemMap: "- key: val" patterns.
+  # yamlElemMap: a mapping that starts in a sequence entry, "- key: val",
+  # or "[key: val]" in a flow sequence. It only opens the mapping (its
+  # before-open action makes the node) and hands the first pair, unread,
+  # to yamlElemPair, which reads every pair. A pair rule opening on the
+  # open mapping names the member in u.key before it pushes the value's
+  # rule, so a consumer that follows rule events has the key before a
+  # value that is a collection opens. When the rule that opened the
+  # mapping named the first member as well, that consumer was never told
+  # the key, and the first member's value opened ahead of it
+  # (tabnas/yaml#105).
   rule: yamlElemMap: open: [
-    { s: ['#KEY' '#CL'] p: val a: '@elem-key' g: yaml }
-  ]
-  rule: yamlElemMap: close: [
-    # Doc-frame markers terminate elem-map; back up for the stream rule.
-    { s: '#DS' b: 1 g: 'yaml,end' }
-    { s: '#DE' b: 1 g: 'yaml,end' }
-    { s: '#DR' b: 1 g: 'yaml,end' }
-    { s: '#IN' c: '@t0-eq-map-in' r: yamlElemPair g: 'yaml,comma' }
-    { s: '#IN' b: 1 g: 'yaml,close' }
-    { s: '#CA' b: 1 g: 'yaml,comma' }
-    { s: '#CS' b: 1 g: 'yaml,close' }
-    { s: '#CB' b: 1 g: 'yaml,close' }
-    { s: '#ZZ' g: 'yaml,end' }
+    { s: ['#KEY' '#CL'] r: yamlElemPair b: 2 g: yaml }
   ]
 
-  # Additional pairs in a yamlElemMap.
+  # Every pair in a yamlElemMap, the first included.
   rule: yamlElemPair: open: [
     { s: ['#KEY' '#CL'] p: val a: '@elem-key' g: yaml }
   ]
@@ -2915,19 +2912,16 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
     })
   })
 
-  // yamlElemMap rule: init map and store pairs.
+  // yamlElemMap rule: init the map. Its open alternate hands every pair,
+  // the first included, to yamlElemPair (see yaml-grammar.jsonic), so it
+  // never reaches a close phase and stores nothing itself.
   tabnas.rule('yamlElemMap', (rulespec: RuleSpec) => {
     rulespec.bo((rule: Rule) => {
       rule.node = Object.create(null)
     })
-    rulespec.bc((rule: Rule) => {
-      if (rule.u.key != null) {
-        rule.node[rule.u.key] = rule.child.node
-      }
-    })
   })
 
-  // yamlElemPair rule: store pair into shared map node.
+  // yamlElemPair rule: store each pair into the shared map node.
   tabnas.rule('yamlElemPair', (rulespec: RuleSpec) => {
     rulespec.bc((rule: Rule) => {
       if (rule.u.key != null) {

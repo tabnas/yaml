@@ -16,6 +16,7 @@ and this file only covers what is specific to this crate.
 | `tests/parity_test.rs` | every `../test/spec/*.tsv` fixture through `tabnas_support::Runner`, plus a census of the files |
 | `tests/yaml_test_suite_test.rs` | the whole vendored YAML Test Suite, its two ledgers and the bucket census |
 | `tests/yaml_test.rs` | in-language behaviour, mirroring `ts/test/yaml.test.ts` and the two Go unit files |
+| `tests/key_before_value_test.rs` | what a consumer following the rule events is told: each mapping member's key, on the open mapping, before its value's rule opens; mirrors `ts/test/key-before-value.test.ts` and `go/key_before_value_test.go` |
 | `tests/parity_regression_test.rs` | the TypeScript/Go parity regressions captured from real OpenAPI and Swagger files |
 | `tests/column_units_test.rs` | the sixteen error-column cases the other two runtimes assert |
 | `tests/untrusted_test.rs` | deep nesting, long input, unterminated constructs, control characters, odd Unicode |
@@ -167,7 +168,7 @@ parse root, so writing through it is the Rust spelling of the canonical
 
 ## `undefined` in a mapping
 
-`yamlElemMap` assigns `rule.node[key] = rule.child.node` in the canonical
+`yamlElemPair` assigns `rule.node[key] = rule.child.node` in the canonical
 port, and a `child.node` of `undefined` there makes the key present but
 drops it from every serialization. This engine turns `Undefined` into
 null on the way out, so the entry is left out instead (`store_elem_pair`)
