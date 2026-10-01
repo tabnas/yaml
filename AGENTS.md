@@ -226,8 +226,10 @@ CI checks the whole closure out and builds it first.
    from the crate directory (`rs/tests/parity_test.rs`). Line 1 is a
    header naming the columns `input`/`expected`/`opts`; `\n`, `\r`,
    `\t`, `\\` are unescaped in `input` only (`expected` and `opts` are
-   raw JSON). Full format rules — including the `ERROR`, `UNDEFINED` and
-   `@@Infinity`/`@@NaN` spellings — are in
+   raw JSON). The comparison ignores key order unless a row writes
+   `ordered` in an optional `keys` column, as `merge-key.tsv` does. Full
+   format rules — including the `ERROR`, `UNDEFINED` and
+   `@@Infinity`/`@@NaN` spellings, and the `keys` column — are in
    [`test/AGENTS.md`](test/AGENTS.md).
 3. The grammar text in every runtime is byte-identical because it is
    embedded from the same `yaml-grammar.jsonic`. Keep it that way — make

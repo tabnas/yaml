@@ -33,6 +33,7 @@ Blank lines are skipped, and so are comment lines — a line starting with
 | `input` | YAML source. Escapes `\n` `\r` `\t` `\\` are decoded. |
 | `expected` | A JSON value (the parse result), or `ERROR` / `ERROR:<code>` for inputs that must fail. The code is compared **exactly** — it is the error's code, not a substring of its message. |
 | `opts` | Optional JSON object of plugin options (empty means defaults). |
+| `keys` | Optional. `ordered` makes the row pin key order as well as the value (see [Key order](#key-order)); empty leaves key order out of the comparison. |
 
 `expected` and `opts` are **not** escape-decoded — they are raw JSON, so
 JSON's own escape rules apply (`"a\nb"` is a string containing a newline).
@@ -57,7 +58,25 @@ allowance in each runner is deleted too.
 
 Results are compared after a JSON round-trip, so key order and the
 `OrderedMap` / null-prototype-object representations do not affect the
-comparison.
+comparison, unless the row asks for key order.
+
+### Key order
+
+Key order is not part of the parsed-value contract (ADR-15 in
+tabnas/admin). A JavaScript object enumerates an integer-like key first,
+in numeric order, whatever order the source wrote it in, so the shared
+comparison ignores order. But where the order is itself the behaviour
+under test, a row can pin it: it writes `ordered` in a `keys` column.
+Every runner then gives each mapping, on both sides, a `@@keys` member
+listing its keys in order, and the comparison sees that list as an array,
+whose order counts. `spec/merge-key.tsv` pins where a merge key puts the
+keys it brings in this way: after the mapping's own keys, which is where
+the Go port once failed to put them while every row still passed.
+
+A `keys: ordered` row cannot hold an integer-like key, nor a key spelled
+`@@keys`. Every runner refuses such a row rather than compare an order
+JavaScript does not keep. A `keys` cell other than `ordered` or empty is
+refused too, so a misspelling cannot switch the check off unseen.
 
 These fixtures replaced the old `test/*.tsv` files (a `name`/`input`/`expected`
 shape with no header, and a second escape-decoding pass over `expected`) and
@@ -69,9 +88,9 @@ the cases that used to live inline in `ts/test/yaml.test.ts`.
 - Go: `go/parity_test.go` — `support.Runner{...}.Dir(t, dir)`.
 - Rust: `rs/tests/parity_test.rs` — `Runner::new_with_row(...).dir(...)`.
 
-Each is a dozen lines holding only what is specific to yaml: how to build
-the parser for a row's options, and the marker encoding for YAML's
-non-finite numbers. Everything else — finding `test/spec`, reading the
+Each holds only what is specific to yaml: how to build the parser for a
+row's options, the marker encoding for YAML's non-finite numbers, and the
+opt-in key-order check. Everything else — finding `test/spec`, reading the
 file, decoding escapes, the `ERROR:` contract, the comparison, the
 `<file>:<line>` in a failure message — comes from
 [`@tabnas/support`](https://github.com/tabnas/support) and its Go and Rust

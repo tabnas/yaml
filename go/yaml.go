@@ -765,9 +765,10 @@ func asStringMap(v any) (map[string]any, bool) {
 }
 
 // orderedEntries returns the ordered (key, value) entries of a parsed
-// object value. Block maps are *jsonic.OrderedMap (source order); flow /
-// inline element maps built by this plugin are plain map[string]any (whose
-// iteration order is undefined, so keys are visited in Go's map order).
+// object value. Every mapping this plugin builds, block or flow, is a
+// *jsonic.OrderedMap, so its keys come in source order. A plain
+// map[string]any is handled defensively; it has no order, so its keys come
+// in Go's map order.
 func orderedEntries(v any) ([]string, map[string]any) {
 	switch m := v.(type) {
 	case *jsonic.OrderedMap:
@@ -797,15 +798,24 @@ func setNodeKey(node any, key string, val any) {
 }
 
 // applyMergeKeys resolves the YAML `<<` merge key on a parsed mapping node
-// in place, preserving source key order. Explicit keys win over merged
-// keys; the merged (non-duplicate) keys are spliced in at the position the
-// `<<` key occupied. The node may be an insertion-ordered *OrderedMap
-// (block mapping) — the common case — or, defensively, a plain
-// map[string]any (order-free flow mapping).
+// in place, the way the canonical TypeScript does: it deletes the `<<`
+// entry, then appends each key a merge source holds that the mapping does
+// not, source by source and in each source's own order. So the mapping's
+// own keys come first, in source order, wherever the `<<` stood among
+// them, and the merged keys follow:
+//
+//	d:
+//	  <<: *b      # b is {x: 1}
+//	  y: 2        # d is {y: 2, x: 1}, not {x: 1, y: 2}
+//
+// An explicit key always wins over a merged one, and an earlier source
+// over a later one. The node is an insertion-ordered *OrderedMap, block or
+// flow, or, defensively, a plain map[string]any, which has no order to
+// keep.
 func applyMergeKeys(node any) {
 	om, ok := node.(*jsonic.OrderedMap)
 	if !ok {
-		// Plain map (flow mapping): no order to preserve; merge by value.
+		// Plain map: no order to keep; merge by value.
 		m, ok := node.(map[string]any)
 		if !ok {
 			return
@@ -829,41 +839,19 @@ func applyMergeKeys(node any) {
 	if !hasMerge {
 		return
 	}
-	// Rebuild key order, expanding `<<` into its (non-duplicate) merged
-	// keys at its original position. Explicit keys keep their positions.
-	explicit := make(map[string]bool, len(om.Keys))
-	for _, k := range om.Keys {
-		if k != "<<" {
-			explicit[k] = true
-		}
-	}
-	newKeys := make([]string, 0, len(om.Keys))
-	seen := make(map[string]bool, len(om.Keys))
-	for _, k := range om.Keys {
-		if k == "<<" {
-			for _, mm := range mergeSources(mergeVal) {
-				mkeys, mvals := orderedEntries(mm)
-				for _, mk := range mkeys {
-					if explicit[mk] || seen[mk] {
-						continue
-					}
-					if _, present := om.Vals[mk]; !present {
-						om.Vals[mk] = mvals[mk]
-					}
-					newKeys = append(newKeys, mk)
-					seen[mk] = true
-				}
+	// Delete, then append: Set adds a key it has not seen at the END, and
+	// the explicit keys are already in place, so they keep their order and
+	// lead. This port once spliced the merged keys in where the `<<` stood
+	// instead, which gave the same members in a different order.
+	om.Delete("<<")
+	for _, mm := range mergeSources(mergeVal) {
+		mkeys, mvals := orderedEntries(mm)
+		for _, mk := range mkeys {
+			if !om.Has(mk) {
+				om.Set(mk, mvals[mk])
 			}
-			continue
 		}
-		if seen[k] {
-			continue
-		}
-		newKeys = append(newKeys, k)
-		seen[k] = true
 	}
-	delete(om.Vals, "<<")
-	om.Keys = newKeys
 }
 
 // mergeSources normalizes a `<<` merge value into the list of source
