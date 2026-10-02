@@ -52,6 +52,16 @@ fn the_render_the_manifest_names_is_the_one_the_crate_embeds() {
     );
 }
 
+#[test]
+fn the_structural_interface_names_the_render_entry() {
+    let parts = tabnas_yaml::translate().expect("YAML carries translation parts");
+    assert_eq!(parts.manifest, tabnas_yaml::manifest_text());
+    assert_eq!(parts.lift, None);
+    let render = parts.render.expect("YAML carries a render");
+    assert_eq!(render.entry, "yaml-render");
+    assert_eq!(render.source, Some(tabnas_yaml::render_text()));
+}
+
 /// YAML is read as a tree and written from one. Its events carry the
 /// tree already, so there is no lift, and no accessor for one.
 #[test]
