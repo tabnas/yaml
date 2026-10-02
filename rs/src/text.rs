@@ -66,9 +66,7 @@ fn check(src: &str, cursor: (usize, usize, usize), context: &mut Context) -> Opt
 
     // Characters another matcher owns, and the anchor, alias and tag
     // markers the YAML matcher has already had its chance at.
-    for owned in [
-        b'{', b'}', b'[', b']', b',', b'#', b'\n', b'\r', b'"', b'\'', b'*', b'&', b'!',
-    ] {
+    for owned in *b"{}[],#\n\r\"'*&!" {
         if head == i32::from(owned) {
             return None;
         }

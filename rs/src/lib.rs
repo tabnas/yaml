@@ -1655,10 +1655,7 @@ pub fn manifest_text() -> &'static str {
 /// ```
 pub fn render_text() -> &'static str {
     match TRANSLATION.render {
-        Some(part) => match part.source {
-            Some(source) => source,
-            None => "",
-        },
+        Some(part) => part.source.unwrap_or_default(),
         None => "",
     }
 }
