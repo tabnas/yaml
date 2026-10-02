@@ -2952,3 +2952,6 @@ export {
 export type {
   YamlOptions,
 }
+
+export { translate } from './translate'
+export type { TranslationPart, TranslationParts } from './translate'
