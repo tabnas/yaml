@@ -135,28 +135,28 @@ fn a_tag_before_a_directive_line_resolves_the_canonical_way() {
     );
 }
 
-/// **A refusal both runtimes make can be reported at a different place.**
+/// **Shared refusals report the canonical position after the engine repair.**
 ///
-/// Same cause as above: this port refuses at the character its own
-/// matcher cannot claim, and the canonical one carries on to a later
-/// one. Both refuse, with the same code; only the position differs, and
-/// no shared fixture pins a position.
+/// These were the two representatives of the matcher-chain position
+/// divergence. Parser 0.12.9 preserves the deferred bad token, so this
+/// port now reaches the same final point as TypeScript and Go. Keep the
+/// exact positions here because shared fixtures pin codes, not positions.
 ///
 /// Measured:
 ///
 ///  input                            TypeScript   Rust
-///  `[a, b\n{a: 1\n? k\n- x\n`         5:1         3:1
-///  `---\n{a: 1\na: 1\n  t2\n`         5:1         4:3
+///  `[a, b\n{a: 1\n? k\n- x\n`         5:1         5:1
+///  `---\n{a: 1\na: 1\n  t2\n`         5:1         5:1
 #[test]
-fn a_shared_refusal_can_be_reported_at_a_different_place() {
+fn shared_refusals_report_the_canonical_place() {
     let parser = tabnas_yaml::make();
-    for (src, row, col) in [
-        ("[a, b\n{a: 1\n? k\n- x\n", 3, 1),
-        ("---\n{a: 1\na: 1\n  t2\n", 4, 3),
+    for src in [
+        "[a, b\n{a: 1\n? k\n- x\n",
+        "---\n{a: 1\na: 1\n  t2\n",
     ] {
         let error = parser.parse(src).expect_err("both runtimes refuse this");
         assert_eq!(error.code, "unexpected", "{src:?}");
-        assert_eq!((error.row, error.col), (row, col), "{src:?}");
+        assert_eq!((error.row, error.col), (5, 1), "{src:?}");
     }
 }
 

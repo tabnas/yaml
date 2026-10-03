@@ -117,10 +117,12 @@ needed here, and both are deliberate:
   matchers ran). Without it `a: &an 1\n%YAML 1.2` folds the directive
   line into the scalar.
 
-What is left of the difference is fourteen documents out of a 4,348-case
-adversarial corpus: one value, and thirteen places a refusal all three
-runtimes make is reported. They are recorded in `../DIVERGENCE.md` and
-pinned in `tests/divergence_test.rs`.
+The original 4,348-case adversarial comparison found one value difference
+and thirteen places where all runtimes refused at different positions.
+Parser 0.12.9 closed the recorded position class; its two representatives
+now report the canonical 5:1 and remain parity assertions. The one value
+difference is recorded in `../DIVERGENCE.md` and pinned in
+`tests/divergence_test.rs`.
 
 ## Scanning is by byte, columns count characters
 
@@ -221,15 +223,16 @@ Beyond the shared fixtures and the conformance suite, the port was
 compared against the canonical TypeScript by running both over one corpus
 and diffing.
 
-| corpus | inputs | differing |
+| corpus | inputs | differing when measured |
 |---|---|---|
 | fixture rows, suite inputs and every string literal in the Go tests | 822 | 1, the astral column |
 | generated documents of realistic YAML shape | 8,408 | 0 |
 | generated adversarial token soup | 4,348 | 14 |
 
-Of the fourteen, one is a value and thirteen are the place a refusal all
-three runtimes make is reported. All of it is in `../DIVERGENCE.md`,
-pinned by `tests/divergence_test.rs`. A change to the lexer or the
-grammar deserves the same treatment before it is called done: build the
-canonical TypeScript beside a copy of this crate, run both over a
-generated corpus, and diff.
+Of the fourteen originally measured, one is a value and thirteen were the
+place a refusal all three runtimes make was reported. Parser 0.12.9 closed
+the recorded position class; both representatives now agree at 5:1. The
+value difference and the repair are in `../DIVERGENCE.md`, pinned by
+`tests/divergence_test.rs`. A change to the lexer or the grammar deserves
+the same treatment before it is called done: build the canonical TypeScript
+beside a copy of this crate, run both over a generated corpus, and diff.

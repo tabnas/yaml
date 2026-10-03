@@ -117,19 +117,12 @@ character the canonical chain would have left unclaimed
 matcher, which the canonical chain reaches after a move and this one does
 not.
 
-What is left, over a differential run of about 12,700 generated documents
-against the canonical TypeScript, is THIRTEEN documents that all three
-runtimes refuse with the same code at a different place. Two of the
-thirteen are tabled below as the representatives.
-
-**Two of the thirteen position differences, where all three runtimes
-refuse the document with the same code and only the reported place
-differs:**
-
-| input | TypeScript | Go | Rust |
-|---|---|---|---|
-| `[a, b\n{a: 1\n? k\n- x\n` | `unexpected` at 5:1 | 5:1 | 3:1 |
-| `---\n{a: 1\na: 1\n  t2\n` | `unexpected` at 5:1 | 5:1 | 4:3 |
+The original differential run of about 12,700 generated documents found
+thirteen documents that every runtime refused with the same code at a
+different place. Parser 0.12.9's deferred-error repair closed this recorded
+class: both representative documents now report `unexpected` at 5:1 in all
+three runtimes. `rs/tests/divergence_test.rs` keeps those positions as parity
+assertions because a shared fixture pins the code but not the position.
 
 **And ONE document the other two runtimes accept and this one refuses,
 found by a later sweep over tab placement:**
@@ -154,9 +147,8 @@ nothing was consumed is NOT the repair: it was measured, and it makes
 `a: !é` reach the engine with an `internal` error, which
 `rs/tests/untrusted_test.rs` catches.
 
-`rs/tests/divergence_test.rs` pins all five tabled rows. No shared
-fixture pins a diagnostic's position, and none of the first two
-documents is valid YAML. The same differential run over 8,408 generated
+`rs/tests/divergence_test.rs` pins all five tabled rows. The same
+differential run over 8,408 generated
 documents of realistic YAML shape, over the 253 fixture rows, over the
 402 conformance inputs and over every string literal in the Go test
 files found no difference at all beyond the astral column above; the
