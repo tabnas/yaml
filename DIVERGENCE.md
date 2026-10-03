@@ -6,10 +6,10 @@ the same input**, and why the difference is allowed to stand.
 
 None of these can be written as a row of `test/spec/*.tsv`, which is why
 this repository still has no divergence register: one is invisible to the
-value those fixtures compare, two concern a diagnostic's position, which
+value those fixtures compare, one concerns a diagnostic's position, which
 no fixture pins, one needs a nesting depth far past anything a fixture
 cell would hold, two need a lone UTF-16 surrogate in an expected
-cell, which a UTF-8 file cannot carry, and one is an input the runtimes
+cell, which a UTF-8 file cannot carry, and two are inputs the runtimes
 disagree about accepting at all, where a row carries one expected answer
 for all three. A divergence a row could
 express belongs in a register, with a `rust` column, per
@@ -117,22 +117,22 @@ character the canonical chain would have left unclaimed
 matcher, which the canonical chain reaches after a move and this one does
 not.
 
-What is left, over a differential run of about 12,700 generated documents
-against the canonical TypeScript, is THIRTEEN documents that all three
-runtimes refuse with the same code at a different place. Two of the
-thirteen are tabled below as the representatives.
+What was left, over a differential run of about 12,700 generated
+documents against the canonical TypeScript, was THIRTEEN documents that
+all three runtimes refused with the same code at a different place, two
+of them tabled here as the representatives: `[a, b\n{a: 1\n? k\n- x\n`
+and `---\n{a: 1\na: 1\n  t2\n`, `unexpected` at 5:1 in TypeScript and
+in Go, and at 3:1 and 4:3 here. Those two positions were the engine's,
+not the chain's. tabnas/parser#274 changed how the Rust engine handles a
+bad token a custom matcher returns (under "Repaired" in the engine's
+`DIVERGENCE.md`), nothing in this port changed, and all three runtimes
+now refuse both documents at 5:1;
+`rs/tests/divergence_test.rs::a_shared_refusal_is_reported_at_the_canonical_place`
+keeps them as the controls, since no shared fixture pins a position. The
+other eleven were not re-measured: the sweep's documents were not kept.
 
-**Two of the thirteen position differences, where all three runtimes
-refuse the document with the same code and only the reported place
-differs:**
-
-| input | TypeScript | Go | Rust |
-|---|---|---|---|
-| `[a, b\n{a: 1\n? k\n- x\n` | `unexpected` at 5:1 | 5:1 | 3:1 |
-| `---\n{a: 1\na: 1\n  t2\n` | `unexpected` at 5:1 | 5:1 | 4:3 |
-
-**And ONE document the other two runtimes accept and this one refuses,
-found by a later sweep over tab placement:**
+**What remains is ONE document the other two runtimes accept and this
+one refuses, found by a later sweep over tab placement:**
 
 | input | TypeScript | Go | Rust |
 |---|---|---|---|
@@ -154,9 +154,8 @@ nothing was consumed is NOT the repair: it was measured, and it makes
 `a: !é` reach the engine with an `internal` error, which
 `rs/tests/untrusted_test.rs` catches.
 
-`rs/tests/divergence_test.rs` pins all five tabled rows. No shared
-fixture pins a diagnostic's position, and none of the first two
-documents is valid YAML. The same differential run over 8,408 generated
+`rs/tests/divergence_test.rs` pins all five tabled rows. The same
+differential run over 8,408 generated
 documents of realistic YAML shape, over the 253 fixture rows, over the
 402 conformance inputs and over every string literal in the Go test
 files found no difference at all beyond the astral column above; the

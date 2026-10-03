@@ -135,26 +135,31 @@ fn a_tag_before_a_directive_line_resolves_the_canonical_way() {
     );
 }
 
-/// **A refusal both runtimes make can be reported at a different place.**
+/// **Two refusals every runtime makes, once reported at a different place.**
 ///
-/// Same cause as above: this port refuses at the character its own
-/// matcher cannot claim, and the canonical one carries on to a later
-/// one. Both refuse, with the same code; only the position differs, and
-/// no shared fixture pins a position.
+/// All three runtimes refuse both documents with `unexpected`. This port
+/// once named 3:1 and 4:3 where TypeScript and Go name 5:1, and the
+/// positions were the engine's, not this port's matcher chain:
+/// tabnas/parser#274 changed how the Rust engine handles a bad token a
+/// custom matcher returns, nothing here changed, and the three runtimes
+/// now agree. Kept as the control for that repair, since no shared
+/// fixture pins a position.
 ///
 /// Measured:
 ///
-///  input                            TypeScript   Rust
-///  `[a, b\n{a: 1\n? k\n- x\n`         5:1         3:1
-///  `---\n{a: 1\na: 1\n  t2\n`         5:1         4:3
+///  input                            TypeScript   Rust before #274   Rust
+///  `[a, b\n{a: 1\n? k\n- x\n`         5:1         3:1                5:1
+///  `---\n{a: 1\na: 1\n  t2\n`         5:1         4:3                5:1
 #[test]
-fn a_shared_refusal_can_be_reported_at_a_different_place() {
+fn a_shared_refusal_is_reported_at_the_canonical_place() {
     let parser = tabnas_yaml::make();
     for (src, row, col) in [
-        ("[a, b\n{a: 1\n? k\n- x\n", 3, 1),
-        ("---\n{a: 1\na: 1\n  t2\n", 4, 3),
+        ("[a, b\n{a: 1\n? k\n- x\n", 5, 1),
+        ("---\n{a: 1\na: 1\n  t2\n", 5, 1),
     ] {
-        let error = parser.parse(src).expect_err("both runtimes refuse this");
+        let error = parser
+            .parse(src)
+            .expect_err("all three runtimes refuse this");
         assert_eq!(error.code, "unexpected", "{src:?}");
         assert_eq!((error.row, error.col), (row, col), "{src:?}");
     }
