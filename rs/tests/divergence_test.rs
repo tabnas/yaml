@@ -150,10 +150,7 @@ fn a_tag_before_a_directive_line_resolves_the_canonical_way() {
 #[test]
 fn shared_refusals_report_the_canonical_place() {
     let parser = tabnas_yaml::make();
-    for src in [
-        "[a, b\n{a: 1\n? k\n- x\n",
-        "---\n{a: 1\na: 1\n  t2\n",
-    ] {
+    for src in ["[a, b\n{a: 1\n? k\n- x\n", "---\n{a: 1\na: 1\n  t2\n"] {
         let error = parser.parse(src).expect_err("both runtimes refuse this");
         assert_eq!(error.code, "unexpected", "{src:?}");
         assert_eq!((error.row, error.col), (5, 1), "{src:?}");
