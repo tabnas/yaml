@@ -53,8 +53,10 @@ pub const VERSION: &str = "0.5.18";
 /// The plugin name, which is also the key its options sit under.
 const PLUGIN_NAME: &str = "yaml";
 
-/// Set on the instance once the plugin has installed, so a re-application
-/// during option resolution does not install the grammar twice.
+/// Set on the instance once the plugin has installed. The install guard
+/// reads it together with the instance's rules ([`grammar_installed`]):
+/// a derived child inherits this decoration before it has any rule of its
+/// own, and a rule of the grammar's name from elsewhere comes without it.
 const INSTALLED: &str = "yaml-installed";
 
 /// Errors this crate returns are the engine's, re-exported so a caller
@@ -1402,9 +1404,17 @@ fn grammar_document() -> Result<serde_json::Value, PluginError> {
 /// }
 /// ```
 pub fn yaml(parser: &mut Tabnas, options: &YamlOptions) -> Result<(), PluginError> {
-    // Guard against re-entry while options are re-applied, which would
-    // install the grammar twice.
-    if parser.decoration::<bool>(INSTALLED).is_some() {
+    // Guard against a second install on the same instance, which would
+    // install the grammar twice. A derived child must not be caught by
+    // it: `Tabnas::derive` copies the parent's decorations onto the child
+    // before it re-runs the plugins, as the canonical TypeScript does, so
+    // the child carries the mark and none of the grammar
+    // (tabnas/parser#244). The guard therefore asks for both, the mark
+    // this plugin set and a rule only this grammar installs: a child has
+    // the mark alone and installs again, and an instance carrying a rule
+    // of that name from elsewhere has the rule alone and goes on to the
+    // checks below.
+    if parser.decoration::<bool>(INSTALLED).is_some() && grammar_installed(parser) {
         return Ok(());
     }
     // This plugin reshapes jsonic's rules rather than declaring a whole
@@ -1448,6 +1458,18 @@ pub fn yaml(parser: &mut Tabnas, options: &YamlOptions) -> Result<(), PluginErro
     // whatever budget the caller sets.
     parser.parse_guard(DEPTH_GUARD, within_depth_limit);
     Ok(())
+}
+
+/// Whether this grammar's rules are on `parser`, judged by a rule only it
+/// installs: `yamlBlockList`, the block sequence, from the grammar
+/// document. Read with the [`INSTALLED`] mark: a derived child starts
+/// with no rules of its own and earns the grammar again, and a second
+/// `yaml` call on one instance returns early.
+fn grammar_installed(parser: &Tabnas) -> bool {
+    parser
+        .rule_names()
+        .iter()
+        .any(|name| name == "yamlBlockList")
 }
 
 /// How many containers a parse may hold before it is refused, with the
