@@ -135,33 +135,25 @@ fn a_tag_before_a_directive_line_resolves_the_canonical_way() {
     );
 }
 
-/// **Two refusals every runtime makes, once reported at a different place.**
+/// **Shared refusals report the canonical position after the engine repair.**
 ///
-/// All three runtimes refuse both documents with `unexpected`. This port
-/// once named 3:1 and 4:3 where TypeScript and Go name 5:1, and the
-/// positions were the engine's, not this port's matcher chain:
-/// tabnas/parser#274 changed how the Rust engine handles a bad token a
-/// custom matcher returns, nothing here changed, and the three runtimes
-/// now agree. Kept as the control for that repair, since no shared
-/// fixture pins a position.
+/// These were the two representatives of the matcher-chain position
+/// divergence. Parser 0.12.9 preserves the deferred bad token, so this
+/// port now reaches the same final point as TypeScript and Go. Keep the
+/// exact positions here because shared fixtures pin codes, not positions.
 ///
 /// Measured:
 ///
-///  input                            TypeScript   Rust before #274   Rust
-///  `[a, b\n{a: 1\n? k\n- x\n`         5:1         3:1                5:1
-///  `---\n{a: 1\na: 1\n  t2\n`         5:1         4:3                5:1
+///  input                            TypeScript   Rust
+///  `[a, b\n{a: 1\n? k\n- x\n`         5:1         5:1
+///  `---\n{a: 1\na: 1\n  t2\n`         5:1         5:1
 #[test]
-fn a_shared_refusal_is_reported_at_the_canonical_place() {
+fn shared_refusals_report_the_canonical_place() {
     let parser = tabnas_yaml::make();
-    for (src, row, col) in [
-        ("[a, b\n{a: 1\n? k\n- x\n", 5, 1),
-        ("---\n{a: 1\na: 1\n  t2\n", 5, 1),
-    ] {
-        let error = parser
-            .parse(src)
-            .expect_err("all three runtimes refuse this");
+    for src in ["[a, b\n{a: 1\n? k\n- x\n", "---\n{a: 1\na: 1\n  t2\n"] {
+        let error = parser.parse(src).expect_err("both runtimes refuse this");
         assert_eq!(error.code, "unexpected", "{src:?}");
-        assert_eq!((error.row, error.col), (row, col), "{src:?}");
+        assert_eq!((error.row, error.col), (5, 1), "{src:?}");
     }
 }
 

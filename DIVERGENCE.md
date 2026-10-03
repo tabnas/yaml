@@ -117,22 +117,12 @@ character the canonical chain would have left unclaimed
 matcher, which the canonical chain reaches after a move and this one does
 not.
 
-What was left, over a differential run of about 12,700 generated
-documents against the canonical TypeScript, was THIRTEEN documents that
-all three runtimes refused with the same code at a different place, two
-of them tabled here as the representatives: `[a, b\n{a: 1\n? k\n- x\n`
-and `---\n{a: 1\na: 1\n  t2\n`, `unexpected` at 5:1 in TypeScript and
-in Go, and at 3:1 and 4:3 here. Those two positions were the engine's,
-not the chain's. tabnas/parser#274 changed how the Rust engine handles a
-bad token a custom matcher returns (under "Repaired" in the engine's
-`DIVERGENCE.md`), nothing in this port changed, and all three runtimes
-now refuse both documents at 5:1;
-`rs/tests/divergence_test.rs::a_shared_refusal_is_reported_at_the_canonical_place`
-keeps them as the controls, since no shared fixture pins a position. The
-other eleven are UNMEASURED, not repaired: they were never pinned, the
-sweep's documents were not kept, and nothing here shows that #274 reached
-them, so the position class stays open until a differential sweep
-re-measures it; rerunning that sweep is the next step for this entry.
+The original differential run of about 12,700 generated documents found
+thirteen documents that every runtime refused with the same code at a
+different place. Parser 0.12.9's deferred-error repair closed this recorded
+class: both representative documents now report `unexpected` at 5:1 in all
+three runtimes. `rs/tests/divergence_test.rs` keeps those positions as parity
+assertions because a shared fixture pins the code but not the position.
 
 **And ONE document the other two runtimes accept and this one refuses,
 found by a later sweep over tab placement:**
