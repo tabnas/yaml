@@ -6,10 +6,10 @@ the same input**, and why the difference is allowed to stand.
 
 None of these can be written as a row of `test/spec/*.tsv`, which is why
 this repository still has no divergence register: one is invisible to the
-value those fixtures compare, one concerns a diagnostic's position, which
+value those fixtures compare, two concern a diagnostic's position, which
 no fixture pins, one needs a nesting depth far past anything a fixture
 cell would hold, two need a lone UTF-16 surrogate in an expected
-cell, which a UTF-8 file cannot carry, and two are inputs the runtimes
+cell, which a UTF-8 file cannot carry, and one is an input the runtimes
 disagree about accepting at all, where a row carries one expected answer
 for all three. A divergence a row could
 express belongs in a register, with a `rust` column, per
@@ -129,10 +129,13 @@ bad token a custom matcher returns (under "Repaired" in the engine's
 now refuse both documents at 5:1;
 `rs/tests/divergence_test.rs::a_shared_refusal_is_reported_at_the_canonical_place`
 keeps them as the controls, since no shared fixture pins a position. The
-other eleven were not re-measured: the sweep's documents were not kept.
+other eleven are UNMEASURED, not repaired: they were never pinned, the
+sweep's documents were not kept, and nothing here shows that #274 reached
+them, so the position class stays open until a differential sweep
+re-measures it; rerunning that sweep is the next step for this entry.
 
-**What remains is ONE document the other two runtimes accept and this
-one refuses, found by a later sweep over tab placement:**
+**And ONE document the other two runtimes accept and this one refuses,
+found by a later sweep over tab placement:**
 
 | input | TypeScript | Go | Rust |
 |---|---|---|---|

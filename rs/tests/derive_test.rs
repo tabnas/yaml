@@ -6,7 +6,7 @@
 //! This plugin used to guard its install with a decoration, so on the
 //! child it found its own mark already set, returned early, and the
 //! child parsed `a: 1` to null with no error. The guard now reads the
-//! instance's rules.
+//! instance's rules together with the mark.
 
 use tabnas_yaml::YamlOptions;
 
@@ -46,4 +46,21 @@ fn a_second_install_on_one_instance_is_a_no_op() {
         "the second call installs nothing"
     );
     assert_eq!(parser.parse("a: 1").unwrap().to_string(), r#"{"a":1}"#);
+}
+
+#[test]
+fn a_rule_of_the_grammars_name_from_elsewhere_is_not_the_grammar() {
+    // The guard asks for the mark and the rule together: a rule named
+    // `yamlBlockList` on an instance this plugin never installed into
+    // does not stand in for the grammar, so the install goes on to its own
+    // checks, here the refusal of an instance without jsonic.
+    let mut parser = tabnas::Tabnas::new();
+    parser
+        .grammar_json(
+            r##"{"options":{"rule":{"start":"yamlBlockList"}},"rule":{"yamlBlockList":{"open":[{"s":"#ZZ"}]}}}"##,
+        )
+        .unwrap();
+    let error = tabnas_yaml::yaml(&mut parser, &YamlOptions::default())
+        .expect_err("an instance without jsonic is refused");
+    assert!(error.0.contains("jsonic"), "{}", error.0);
 }
