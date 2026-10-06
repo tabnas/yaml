@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	jsonic "github.com/tabnas/jsonic/go"
+	tabnas "github.com/tabnas/parser/go"
 )
 
 // VERSION is this module's version. It MUST equal ts/package.json
@@ -96,7 +97,7 @@ type flowScanState struct {
 // two agree by construction. It also matches the engine on malformed
 // UTF-8, counting each invalid byte as one rune — a local "is this a
 // continuation byte" test does not, and gets a stray 0x80 wrong.
-func advanceCol(pnt *jsonic.Point, fwd string, n int) {
+func advanceCol(pnt *tabnas.Point, fwd string, n int) {
 	pnt.SI += n
 	pnt.CI += utf8.RuneCountInString(fwd[:n])
 }
@@ -549,7 +550,7 @@ func unquoteWholeScalar(text string) string {
 
 // Parse parses a YAML string and returns the resulting Go value.
 // The returned value can be:
-//   - *jsonic.OrderedMap for mappings (insertion-ordered: keys are exposed
+//   - *tabnas.OrderedMap for mappings (insertion-ordered: keys are exposed
 //     in source order; use its Get/Has/Len methods, or its exported Keys /
 //     Vals fields, to read entries — Vals is the underlying map[string]any
 //     when order does not matter)
@@ -566,7 +567,7 @@ func unquoteWholeScalar(text string) string {
 // is safe for concurrent use. Mirrors @tabnas/json's Parse.
 var (
 	defaultOnce   sync.Once
-	defaultParser *jsonic.Jsonic
+	defaultParser *tabnas.Tabnas
 )
 
 func Parse(src string) (any, error) {
@@ -576,16 +577,16 @@ func Parse(src string) (any, error) {
 
 // MakeJsonic creates a jsonic instance configured for YAML parsing.
 // If a YamlOptions is passed, its fields are propagated to the plugin.
-func MakeJsonic(opts ...YamlOptions) *jsonic.Jsonic {
+func MakeJsonic(opts ...YamlOptions) *tabnas.Tabnas {
 	yo := YamlOptions{}
 	if len(opts) > 0 {
 		yo = opts[0]
 	}
-	j := jsonic.Make(jsonic.Options{
-		String: &jsonic.StringOptions{
+	j := jsonic.Make(tabnas.Options{
+		String: &tabnas.StringOptions{
 			Chars: "`", // Remove single quote from string chars; we handle YAML strings in yamlMatcher
 		},
-		Lex: &jsonic.LexOptions{
+		Lex: &tabnas.LexOptions{
 			EmptyResult: nil,
 		},
 	})
@@ -710,21 +711,21 @@ func isJSDecimalLiteral(body string) bool {
 }
 
 // deepCopy performs a structural deep copy of a value, preserving both the
-// concrete container type and, for insertion-ordered *jsonic.OrderedMap
+// concrete container type and, for insertion-ordered *tabnas.OrderedMap
 // objects, their source key order. Anchors deep-copy their value so a later
 // merge or mutation of one alias cannot leak into another. (A JSON
 // round-trip would flatten *OrderedMap back to an alphabetical
 // map[string]any, silently dropping source order — hence the manual walk.)
 func deepCopy(v any) any {
 	switch val := v.(type) {
-	case *jsonic.OrderedMap:
-		out := jsonic.NewOrderedMap()
+	case *tabnas.OrderedMap:
+		out := tabnas.NewOrderedMap()
 		out.Sorted = val.Sorted
 		for _, k := range val.Keys {
 			out.Set(k, deepCopy(val.Vals[k]))
 		}
 		return out
-	case jsonic.OrderedMap:
+	case tabnas.OrderedMap:
 		return deepCopy(&val)
 	case map[string]any:
 		out := make(map[string]any, len(val))
@@ -746,7 +747,7 @@ func deepCopy(v any) any {
 // asStringMap views a parsed object value as a plain map[string]any.
 //
 // The shared jsonic engine now returns parsed JSON objects as an
-// insertion-ordered *jsonic.OrderedMap instead of a bare map[string]any.
+// insertion-ordered *tabnas.OrderedMap instead of a bare map[string]any.
 // Grammar text is parsed with the stock jsonic parser, so the values this
 // module reads back from that parse (the embedded grammar spec) are
 // *OrderedMap. This helper unwraps either shape to the underlying map for
@@ -754,9 +755,9 @@ func deepCopy(v any) any {
 // depend on key order.
 func asStringMap(v any) (map[string]any, bool) {
 	switch m := v.(type) {
-	case *jsonic.OrderedMap:
+	case *tabnas.OrderedMap:
 		return m.Vals, true
-	case jsonic.OrderedMap:
+	case tabnas.OrderedMap:
 		return m.Vals, true
 	case map[string]any:
 		return m, true
@@ -766,14 +767,14 @@ func asStringMap(v any) (map[string]any, bool) {
 
 // orderedEntries returns the ordered (key, value) entries of a parsed
 // object value. Every mapping this plugin builds, block or flow, is a
-// *jsonic.OrderedMap, so its keys come in source order. A plain
+// *tabnas.OrderedMap, so its keys come in source order. A plain
 // map[string]any is handled defensively; it has no order, so its keys come
 // in Go's map order.
 func orderedEntries(v any) ([]string, map[string]any) {
 	switch m := v.(type) {
-	case *jsonic.OrderedMap:
+	case *tabnas.OrderedMap:
 		return m.Keys, m.Vals
-	case jsonic.OrderedMap:
+	case tabnas.OrderedMap:
 		return m.Keys, m.Vals
 	case map[string]any:
 		keys := make([]string, 0, len(m))
@@ -790,7 +791,7 @@ func orderedEntries(v any) ([]string, map[string]any) {
 // map[string]any (defensive fallback).
 func setNodeKey(node any, key string, val any) {
 	switch m := node.(type) {
-	case *jsonic.OrderedMap:
+	case *tabnas.OrderedMap:
 		m.Set(key, val)
 	case map[string]any:
 		m[key] = val
@@ -813,7 +814,7 @@ func setNodeKey(node any, key string, val any) {
 // flow, or, defensively, a plain map[string]any, which has no order to
 // keep.
 func applyMergeKeys(node any) {
-	om, ok := node.(*jsonic.OrderedMap)
+	om, ok := node.(*tabnas.OrderedMap)
 	if !ok {
 		// Plain map: no order to keep; merge by value.
 		m, ok := node.(map[string]any)
@@ -868,8 +869,8 @@ func mergeSources(mergeVal any) []any {
 }
 
 // extractKey extracts a key value from a token, resolving aliases.
-func extractKey(o0 *jsonic.Token, anchors map[string]any) any {
-	if o0.Tin == jsonic.TinVL {
+func extractKey(o0 *tabnas.Token, anchors map[string]any) any {
+	if o0.Tin == tabnas.TinVL {
 		if m, ok := o0.Val.(map[string]any); ok {
 			if alias, ok := m["__yamlAlias"].(string); ok {
 				if val, exists := anchors[alias]; exists {
@@ -879,7 +880,7 @@ func extractKey(o0 *jsonic.Token, anchors map[string]any) any {
 			}
 		}
 	}
-	if o0.Tin == jsonic.TinST || o0.Tin == jsonic.TinTX {
+	if o0.Tin == tabnas.TinST || o0.Tin == tabnas.TinTX {
 		if s, ok := o0.Val.(string); ok {
 			return s
 		}
@@ -1232,12 +1233,12 @@ func jsParseFloat(s string) float64 {
 // promotion gave it, and a reader of `r.Child.Node` sees `["a"]` for
 // `"a" "b"`. Every closure in this plugin that reads a child's node goes
 // through here so it sees the whole value.
-func childNode(r *jsonic.Rule) any {
+func childNode(r *tabnas.Rule) any {
 	child := r.Child
-	if child == nil || child == jsonic.NoRule {
-		return jsonic.Undefined
+	if child == nil || child == tabnas.NoRule {
+		return tabnas.Undefined
 	}
-	if final := chainEnd(child); final != child && !jsonic.IsUndefined(final.Node) {
+	if final := chainEnd(child); final != child && !tabnas.IsUndefined(final.Node) {
 		return final.Node
 	}
 	return child.Node
@@ -1245,9 +1246,9 @@ func childNode(r *jsonic.Rule) any {
 
 // chainEnd is the last rule a rotation chain replaced `rule` with, or
 // `rule` itself when it never rotated.
-func chainEnd(rule *jsonic.Rule) *jsonic.Rule {
+func chainEnd(rule *tabnas.Rule) *tabnas.Rule {
 	final := rule
-	for final.Next != nil && final.Next != jsonic.NoRule && final.Next.Prev == final {
+	for final.Next != nil && final.Next != tabnas.NoRule && final.Next.Prev == final {
 		final = final.Next
 	}
 	return final
@@ -1276,7 +1277,7 @@ func formatKey(v any) string {
 }
 
 // Yaml is a jsonic plugin that adds YAML parsing support.
-func Yaml(j *jsonic.Jsonic, opts map[string]any) error {
+func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 	// Install once per instance: a second Use(Yaml) on the same instance,
 	// or the plugin listed twice (which Derive then re-runs twice), returns
 	// here. Without it the grammar alternates and the val/map/stream state
@@ -1318,13 +1319,13 @@ func Yaml(j *jsonic.Jsonic, opts map[string]any) error {
 	_ = DE
 	_ = DR
 
-	KEY := []jsonic.Tin{TX, NR, ST, VL}
+	KEY := []tabnas.Tin{TX, NR, ST, VL}
 
 	// Shared state for the plugin instance.
 	anchors := make(map[string]any)
 	var pendingAnchors []anchorInfo
 	pendingExplicitCL := false
-	var pendingTokens []*jsonic.Token
+	var pendingTokens []*tabnas.Token
 	tagHandles := make(map[string]string)
 	// Flag to tell the number matcher to skip, so TextCheck handles the value.
 	skipNumberMatch := false
@@ -1338,7 +1339,7 @@ func Yaml(j *jsonic.Jsonic, opts map[string]any) error {
 	cfg := j.Config()
 
 	// ===== TextCheck: handles block scalars, !!tags, and plain scalars =====
-	textCheck := func(lex *jsonic.Lex) *jsonic.LexCheckResult {
+	textCheck := func(lex *tabnas.Lex) *tabnas.LexCheckResult {
 		pnt := lex.Cursor()
 		src := lex.Src
 		fwd := src[pnt.SI:]
@@ -1386,7 +1387,7 @@ func Yaml(j *jsonic.Jsonic, opts map[string]any) error {
 	var lastSeenSrc string
 	srcSeen := false
 
-	yamlMatcher := func(lex *jsonic.Lex, _ *jsonic.Rule) *jsonic.Token {
+	yamlMatcher := func(lex *tabnas.Lex, _ *tabnas.Rule) *tabnas.Token {
 		pnt := lex.Cursor()
 		src := lex.Src
 
@@ -1477,7 +1478,7 @@ func Yaml(j *jsonic.Jsonic, opts map[string]any) error {
 				}
 				aliasName := fwd[1:nameEnd]
 				if val, ok := anchors[aliasName]; ok {
-					var tkn *jsonic.Token
+					var tkn *tabnas.Token
 					switch v := val.(type) {
 					case string:
 						tkn = lex.Token("#TX", TX, v, fwd[:nameEnd])
@@ -1767,7 +1768,7 @@ func Yaml(j *jsonic.Jsonic, opts map[string]any) error {
 			if fwd[0] == '?' && len(fwd) > 1 && (fwd[1] == ' ' || fwd[1] == '\t') {
 				flowState.advance(lex.Src, pnt.SI)
 				if flowState.depth > 0 {
-					tkn := lex.Token("#QM", QM, jsonic.Undefined, "?")
+					tkn := lex.Token("#QM", QM, tabnas.Undefined, "?")
 					pnt.SI++
 					pnt.CI++
 					return tkn
@@ -2052,7 +2053,7 @@ func Yaml(j *jsonic.Jsonic, opts map[string]any) error {
 					pnt.SI += pos
 					pnt.RI += rows
 					pnt.CI = spaces + 1
-					tkn := lex.Token("#ZZ", ZZ, jsonic.Undefined, "")
+					tkn := lex.Token("#ZZ", ZZ, tabnas.Undefined, "")
 					return tkn
 				}
 
@@ -2095,10 +2096,10 @@ func Yaml(j *jsonic.Jsonic, opts map[string]any) error {
 
 	// Skip number matching when the yamlMatcher detected trailing text
 	// after a digit-starting value (e.g. "64 characters, hexadecimal.").
-	numberCheck := func(lex *jsonic.Lex) *jsonic.LexCheckResult {
+	numberCheck := func(lex *tabnas.Lex) *tabnas.LexCheckResult {
 		if skipNumberMatch {
 			skipNumberMatch = false
-			return &jsonic.LexCheckResult{Done: true}
+			return &tabnas.LexCheckResult{Done: true}
 		}
 		return nil
 	}
@@ -2117,16 +2118,16 @@ func Yaml(j *jsonic.Jsonic, opts map[string]any) error {
 	//   in this engine Number options without a Sep switch the `_` digit
 	//   separator off, and `1_000` needs it. A modifier re-runs on every
 	//   rebuild, so it survives a later SetOptions as an option does.
-	j.SetOptions(jsonic.Options{
-		Lex: &jsonic.LexOptions{Match: map[string]*jsonic.MatchSpec{
-			"yaml": {Order: 500000, Make: func(_ *jsonic.LexConfig, _ *jsonic.Options) jsonic.LexMatcher {
+	j.SetOptions(tabnas.Options{
+		Lex: &tabnas.LexOptions{Match: map[string]*tabnas.MatchSpec{
+			"yaml": {Order: 500000, Make: func(_ *tabnas.LexConfig, _ *tabnas.Options) tabnas.LexMatcher {
 				return yamlMatcher
 			}},
 		}},
-		Rule: &jsonic.RuleOptions{Start: "stream"},
-		Text: &jsonic.TextOptions{Check: textCheck},
-		Property: &jsonic.PropertyOptions{ConfigModify: map[string]jsonic.ConfigModifier{
-			"yaml-number-check": func(built *jsonic.LexConfig, _ *jsonic.Options) {
+		Rule: &tabnas.RuleOptions{Start: "stream"},
+		Text: &tabnas.TextOptions{Check: textCheck},
+		Property: &tabnas.PropertyOptions{ConfigModify: map[string]tabnas.ConfigModifier{
+			"yaml-number-check": func(built *tabnas.LexConfig, _ *tabnas.Options) {
 				built.NumberCheck = numberCheck
 			},
 		}},
@@ -2165,21 +2166,21 @@ func Yaml(j *jsonic.Jsonic, opts map[string]any) error {
 	// The document is read through childNode: a top-level implicit list
 	// (`"a" "b"`) rotates the pushed `val` into a `list`, and only the end
 	// of that chain holds every element.
-	pushChildDoc := func(r *jsonic.Rule) {
-		if node := childNode(r); !jsonic.IsUndefined(node) {
+	pushChildDoc := func(r *tabnas.Rule) {
+		if node := childNode(r); !tabnas.IsUndefined(node) {
 			streamDocs = append(streamDocs, node)
 		} else {
 			streamDocs = append(streamDocs, nil)
 		}
 	}
-	accumChildDoc := func(r *jsonic.Rule, _ *jsonic.Context) {
+	accumChildDoc := func(r *tabnas.Rule, _ *tabnas.Context) {
 		pushChildDoc(r)
 		// The matched close-phase token tells us if this doc ended with `...`.
 		ended := r.C0 != nil && r.C0.Tin == DE
 		flushCurMeta(ended)
 	}
-	finalizeStream := func(r *jsonic.Rule, ctx *jsonic.Context) {
-		if node := childNode(r); !jsonic.IsUndefined(node) {
+	finalizeStream := func(r *tabnas.Rule, ctx *tabnas.Context) {
+		if node := childNode(r); !tabnas.IsUndefined(node) {
 			streamDocs = append(streamDocs, node)
 			flushCurMeta(false)
 		} else if streamCurMeta != nil {
@@ -2228,7 +2229,7 @@ func Yaml(j *jsonic.Jsonic, opts map[string]any) error {
 		streamMeta = nil
 		streamCurMeta = nil
 	}
-	applyDirective := func(r *jsonic.Rule, _ *jsonic.Context) {
+	applyDirective := func(r *tabnas.Rule, _ *tabnas.Context) {
 		src := r.O0.Src
 		if src == "" {
 			if s, ok := r.O0.Val.(string); ok {
@@ -2241,41 +2242,41 @@ func Yaml(j *jsonic.Jsonic, opts map[string]any) error {
 		ensureCurMeta()
 		streamCurMeta.Directives = append(streamCurMeta.Directives, src)
 	}
-	markExplicit := func(_ *jsonic.Rule, _ *jsonic.Context) {
+	markExplicit := func(_ *tabnas.Rule, _ *tabnas.Context) {
 		ensureCurMeta()
 		streamCurMeta.Explicit = true
 	}
 
-	j.Rule("stream", func(rs *jsonic.RuleSpec, _ *jsonic.Parser) {
+	j.Rule("stream", func(rs *tabnas.RuleSpec, _ *tabnas.Parser) {
 		rs.AddOpen(
 			// Consume directive line; rotate to stream to look for the next token.
-			&jsonic.AltSpec{S: [][]jsonic.Tin{{DR}}, A: applyDirective, R: "stream", G: "yaml"},
+			&tabnas.AltSpec{S: [][]tabnas.Tin{{DR}}, A: applyDirective, R: "stream", G: "yaml"},
 			// Explicit doc start: push val for the document content.
-			&jsonic.AltSpec{S: [][]jsonic.Tin{{DS}}, A: markExplicit, P: "val", G: "yaml"},
+			&tabnas.AltSpec{S: [][]tabnas.Tin{{DS}}, A: markExplicit, P: "val", G: "yaml"},
 			// `...` with no document open: it terminates nothing, so it does
 			// NOT produce a document. Consume it and look for the next one.
 			// (YAML 1.2 9.1.2; yaml-test-suite HWV9 / QT73 / M7A3, where a
 			// stray or comment-only `...` region yields no document at all.)
-			&jsonic.AltSpec{S: [][]jsonic.Tin{{DE}}, R: "stream", G: "yaml"},
+			&tabnas.AltSpec{S: [][]tabnas.Tin{{DE}}, R: "stream", G: "yaml"},
 			// Empty source: end immediately.
-			&jsonic.AltSpec{S: [][]jsonic.Tin{{ZZ}}, B: 1, G: "yaml"},
+			&tabnas.AltSpec{S: [][]tabnas.Tin{{ZZ}}, B: 1, G: "yaml"},
 			// Implicit first doc.
-			&jsonic.AltSpec{P: "val", G: "yaml"},
+			&tabnas.AltSpec{P: "val", G: "yaml"},
 		)
 		rs.AddClose(
 			// End of input: accumulate last doc, finalize result shape.
-			&jsonic.AltSpec{S: [][]jsonic.Tin{{ZZ}}, A: finalizeStream, G: "yaml"},
+			&tabnas.AltSpec{S: [][]tabnas.Tin{{ZZ}}, A: finalizeStream, G: "yaml"},
 			// Directive between docs.
-			&jsonic.AltSpec{S: [][]jsonic.Tin{{DR}},
-				A: func(r *jsonic.Rule, ctx *jsonic.Context) {
+			&tabnas.AltSpec{S: [][]tabnas.Tin{{DR}},
+				A: func(r *tabnas.Rule, ctx *tabnas.Context) {
 					accumChildDoc(r, ctx)
 					applyDirective(r, ctx)
 				},
 				R: "stream", G: "yaml"},
 			// ... terminator: accumulate, look for next doc.
-			&jsonic.AltSpec{S: [][]jsonic.Tin{{DE}}, A: accumChildDoc, R: "stream", G: "yaml"},
+			&tabnas.AltSpec{S: [][]tabnas.Tin{{DE}}, A: accumChildDoc, R: "stream", G: "yaml"},
 			// --- start of next doc (back up so stream.open consumes it).
-			&jsonic.AltSpec{S: [][]jsonic.Tin{{DS}}, B: 1, A: accumChildDoc, R: "stream", G: "yaml"},
+			&tabnas.AltSpec{S: [][]tabnas.Tin{{DS}}, B: 1, A: accumChildDoc, R: "stream", G: "yaml"},
 		)
 	})
 
@@ -2289,7 +2290,7 @@ func isWordByte(b byte) bool {
 }
 
 // handleBlockScalar processes | and > block scalar indicators.
-func handleBlockScalar(lex *jsonic.Lex, pnt *jsonic.Point, src, fwd string, ch byte) *jsonic.LexCheckResult {
+func handleBlockScalar(lex *tabnas.Lex, pnt *tabnas.Point, src, fwd string, ch byte) *tabnas.LexCheckResult {
 	fold := ch == '>'
 	chomp := "clip"
 	explicitIndent := 0
@@ -2472,11 +2473,11 @@ func handleBlockScalar(lex *jsonic.Lex, pnt *jsonic.Point, src, fwd string, ch b
 		} else {
 			val = ""
 		}
-		tkn := lex.Token("#TX", jsonic.TinTX, val, fwd[:idx])
+		tkn := lex.Token("#TX", tabnas.TinTX, val, fwd[:idx])
 		pnt.SI += idx
 		pnt.RI++
 		pnt.CI = 0
-		return &jsonic.LexCheckResult{Done: true, Token: tkn}
+		return &tabnas.LexCheckResult{Done: true, Token: tkn}
 	}
 
 	// Collect indented lines.
@@ -2571,11 +2572,11 @@ func handleBlockScalar(lex *jsonic.Lex, pnt *jsonic.Point, src, fwd string, ch b
 		}
 	}
 
-	tkn := lex.Token("#TX", jsonic.TinTX, val, fwd[:endPos])
+	tkn := lex.Token("#TX", tabnas.TinTX, val, fwd[:endPos])
 	pnt.SI += endPos
 	pnt.RI += endRows
 	pnt.CI = 0
-	return &jsonic.LexCheckResult{Done: true, Token: tkn}
+	return &tabnas.LexCheckResult{Done: true, Token: tkn}
 }
 
 // foldLines implements YAML folded scalar line joining.
@@ -2638,7 +2639,7 @@ func foldLines(lines []string) string {
 }
 
 // handleTagInTextCheck processes !!type tags encountered in the text check callback.
-func handleTagInTextCheck(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, tagHandles map[string]string) *jsonic.LexCheckResult {
+func handleTagInTextCheck(lex *tabnas.Lex, pnt *tabnas.Point, fwd string, tagHandles map[string]string) *tabnas.LexCheckResult {
 	tagEnd := 2
 	for tagEnd < len(fwd) && fwd[tagEnd] != ' ' && fwd[tagEnd] != '\n' && fwd[tagEnd] != '\r' {
 		tagEnd++
@@ -2686,24 +2687,24 @@ func handleTagInTextCheck(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, tagHan
 	}
 
 	result := applyTagConversion(tag, rawVal, tagHandles)
-	tknTin := jsonic.TinTX
+	tknTin := tabnas.TinTX
 	switch result.(type) {
 	case float64:
-		tknTin = jsonic.TinNR
+		tknTin = tabnas.TinNR
 	case bool, nil:
-		tknTin = jsonic.TinVL
+		tknTin = tabnas.TinVL
 	}
 	if result == nil {
-		tknTin = jsonic.TinVL
+		tknTin = tabnas.TinVL
 	}
 
 	tkn := lex.Token(tinToName(tknTin), tknTin, result, fwd[:valEnd])
 	advanceCol(pnt, fwd, valEnd)
-	return &jsonic.LexCheckResult{Done: true, Token: tkn}
+	return &tabnas.LexCheckResult{Done: true, Token: tkn}
 }
 
 // handlePlainScalar processes YAML plain scalar values with multiline continuation.
-func handlePlainScalar(lex *jsonic.Lex, pnt *jsonic.Point, src, fwd string, flowState *flowScanState) *jsonic.LexCheckResult {
+func handlePlainScalar(lex *tabnas.Lex, pnt *tabnas.Point, src, fwd string, flowState *flowScanState) *tabnas.LexCheckResult {
 	// Detect flow context (incremental scan, see flowScanState).
 	flowState.advance(src, pnt.SI)
 	inFlowCtx := flowState.depth > 0
@@ -2871,23 +2872,23 @@ func handlePlainScalar(lex *jsonic.Lex, pnt *jsonic.Point, src, fwd string, flow
 
 	// Check if this is a YAML value keyword.
 	if val, ok := isYamlValue(text); ok {
-		tkn := lex.Token("#VL", jsonic.TinVL, val, text)
+		tkn := lex.Token("#VL", tabnas.TinVL, val, text)
 		// Correct today by accident of the keyword set — `true`, `null`,
 		// `~` and the rest are ASCII — and written in the unit the column
 		// actually means, so it stays correct if that ever changes.
 		advanceCol(pnt, text, len(text))
-		return &jsonic.LexCheckResult{Done: true, Token: tkn}
+		return &tabnas.LexCheckResult{Done: true, Token: tkn}
 	}
 
 	// Check if it's a number.
 	if num, ok := parseYamlNumber(text); ok {
-		tkn := lex.Token("#NR", jsonic.TinNR, num, text)
+		tkn := lex.Token("#NR", tabnas.TinNR, num, text)
 		// Correct today by accident of the grammar — a YAML number is
 		// ASCII, so bytes and characters coincide — and written in the
 		// unit the column actually means, so it stays correct if that
 		// ever changes.
 		advanceCol(pnt, text, len(text))
-		return &jsonic.LexCheckResult{Done: true, Token: tkn}
+		return &tabnas.LexCheckResult{Done: true, Token: tkn}
 	}
 
 	// Plain text. THE path a non-ASCII scalar takes, and the one the
@@ -2904,16 +2905,16 @@ func handlePlainScalar(lex *jsonic.Lex, pnt *jsonic.Point, src, fwd string, flow
 	// the same unit, which is the parity claim. Making them exact is a
 	// separate question, and one the TypeScript comment has been asking
 	// for longer.
-	tkn := lex.Token("#TX", jsonic.TinTX, text, fwd[:totalConsumed])
+	tkn := lex.Token("#TX", tabnas.TinTX, text, fwd[:totalConsumed])
 	pnt.RI += rows
 	advanceCol(pnt, fwd, totalConsumed)
-	return &jsonic.LexCheckResult{Done: true, Token: tkn}
+	return &tabnas.LexCheckResult{Done: true, Token: tkn}
 }
 
 // handleTypeTag processes !!type tags (!!str, !!int, !!float, etc.).
-func handleTypeTag(lex *jsonic.Lex, pnt *jsonic.Point, fwd string,
+func handleTypeTag(lex *tabnas.Lex, pnt *tabnas.Point, fwd string,
 	tagHandles map[string]string, pendingAnchors *[]anchorInfo,
-	anchors map[string]any, TX, NR, VL, ST jsonic.Tin) *jsonic.Token {
+	anchors map[string]any, TX, NR, VL, ST tabnas.Tin) *tabnas.Token {
 
 	tagEnd := 2
 	for tagEnd < len(fwd) && fwd[tagEnd] != ' ' && fwd[tagEnd] != '\n' &&
@@ -3036,9 +3037,9 @@ func handleTypeTag(lex *jsonic.Lex, pnt *jsonic.Point, fwd string,
 }
 
 // handleExplicitKey processes ? key\n: value patterns.
-func handleExplicitKey(lex *jsonic.Lex, pnt *jsonic.Point, fwd string,
-	pendingExplicitCL *bool, pendingTokens *[]*jsonic.Token,
-	TX, CL, VL, IN jsonic.Tin) *jsonic.Token {
+func handleExplicitKey(lex *tabnas.Lex, pnt *tabnas.Point, fwd string,
+	pendingExplicitCL *bool, pendingTokens *[]*tabnas.Token,
+	TX, CL, VL, IN tabnas.Tin) *tabnas.Token {
 
 	start := 1
 	if len(fwd) > 1 && (fwd[1] == ' ' || fwd[1] == '\t') {
@@ -3301,8 +3302,8 @@ func handleExplicitKey(lex *jsonic.Lex, pnt *jsonic.Point, fwd string,
 // next matcher call lands on the next document's content with no spurious
 // #IN. Inline content on the same line as the marker (--- foo) is left
 // for subsequent matcher calls.
-func handleDocMarker(lex *jsonic.Lex, pnt *jsonic.Point, fwd string,
-	DS, DE jsonic.Tin) *jsonic.Token {
+func handleDocMarker(lex *tabnas.Lex, pnt *tabnas.Point, fwd string,
+	DS, DE tabnas.Tin) *tabnas.Token {
 
 	isEnd := fwd[0] == '.'
 	pos := 3
@@ -3333,18 +3334,18 @@ func handleDocMarker(lex *jsonic.Lex, pnt *jsonic.Point, fwd string,
 		// shows.
 		pnt.CI += utf8.RuneCountInString(fwd[:pos])
 	}
-	var tkn *jsonic.Token
+	var tkn *tabnas.Token
 	if isEnd {
-		tkn = lex.Token("#DE", DE, jsonic.Undefined, "...")
+		tkn = lex.Token("#DE", DE, tabnas.Undefined, "...")
 	} else {
-		tkn = lex.Token("#DS", DS, jsonic.Undefined, "---")
+		tkn = lex.Token("#DS", DS, tabnas.Undefined, "---")
 	}
 	pnt.SI += pos
 	return tkn
 }
 
 // handleDoubleQuotedString processes YAML double-quoted strings.
-func handleDoubleQuotedString(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, ST jsonic.Tin) *jsonic.Token {
+func handleDoubleQuotedString(lex *tabnas.Lex, pnt *tabnas.Point, fwd string, ST tabnas.Tin) *tabnas.Token {
 	i := 1
 	val := ""
 	escapedUpTo := 0
@@ -3593,7 +3594,7 @@ func handleDoubleQuotedString(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, ST
 }
 
 // handleSingleQuotedString processes YAML single-quoted strings.
-func handleSingleQuotedString(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, ST jsonic.Tin) *jsonic.Token {
+func handleSingleQuotedString(lex *tabnas.Lex, pnt *tabnas.Point, fwd string, ST tabnas.Tin) *tabnas.Token {
 	i := 1
 	val := ""
 	rows := 0
@@ -3670,7 +3671,7 @@ func handleSingleQuotedString(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, ST
 // skipNumberMatch is set to true when trailing text is detected so the
 // NumberCheck callback skips the number matcher and lets TextCheck handle
 // the scalar (with multiline continuation support).
-func handleNumericColon(lex *jsonic.Lex, pnt *jsonic.Point, fwd string, TX jsonic.Tin, skipNumberMatch *bool, flowState *flowScanState) *jsonic.Token {
+func handleNumericColon(lex *tabnas.Lex, pnt *tabnas.Point, fwd string, TX tabnas.Tin, skipNumberMatch *bool, flowState *flowScanState) *tabnas.Token {
 	flowState.advance(lex.Src, pnt.SI)
 	inFlow := flowState.depth > 0
 
@@ -3863,29 +3864,29 @@ func yamlTagFloat(raw string) any {
 }
 
 // tinToName converts a Tin to its name string.
-func tinToName(tin jsonic.Tin) string {
+func tinToName(tin tabnas.Tin) string {
 	switch tin {
-	case jsonic.TinTX:
+	case tabnas.TinTX:
 		return "#TX"
-	case jsonic.TinNR:
+	case tabnas.TinNR:
 		return "#NR"
-	case jsonic.TinST:
+	case tabnas.TinST:
 		return "#ST"
-	case jsonic.TinVL:
+	case tabnas.TinVL:
 		return "#VL"
-	case jsonic.TinOB:
+	case tabnas.TinOB:
 		return "#OB"
-	case jsonic.TinCB:
+	case tabnas.TinCB:
 		return "#CB"
-	case jsonic.TinOS:
+	case tabnas.TinOS:
 		return "#OS"
-	case jsonic.TinCS:
+	case tabnas.TinCS:
 		return "#CS"
-	case jsonic.TinCL:
+	case tabnas.TinCL:
 		return "#CL"
-	case jsonic.TinCA:
+	case tabnas.TinCA:
 		return "#CA"
-	case jsonic.TinZZ:
+	case tabnas.TinZZ:
 		return "#ZZ"
 	default:
 		return "#UK"
@@ -4112,8 +4113,8 @@ const grammarText = `
 // configureGrammarRules installs the YAML grammar (alts from the declarative
 // yaml-grammar.jsonic file) and wires state handlers (bo/ao/bc/ac) that need
 // closure access to per-parse state.
-func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin,
-	CL, ZZ, CA, CS, CB, TX, ST, VL, NR jsonic.Tin,
+func configureGrammarRules(j *tabnas.Tabnas, IN, EL tabnas.Tin, KEY []tabnas.Tin,
+	CL, ZZ, CA, CS, CB, TX, ST, VL, NR tabnas.Tin,
 	anchors map[string]any, pendingAnchors *[]anchorInfo) {
 
 	_ = IN
@@ -4128,8 +4129,8 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 	_ = VL
 
 	// Function refs used by the declarative grammar.
-	refs := map[jsonic.FuncRef]any{
-		"@val-indent-deeper": jsonic.AltCond(func(r *jsonic.Rule, ctx *jsonic.Context) bool {
+	refs := map[tabnas.FuncRef]any{
+		"@val-indent-deeper": tabnas.AltCond(func(r *tabnas.Rule, ctx *tabnas.Context) bool {
 			parentIn, hasParentIn := r.K["yamlIn"]
 			listIn, hasListIn := r.K["yamlListIn"]
 			if hasListIn && listIn != nil {
@@ -4151,7 +4152,7 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 			}
 			return true
 		}),
-		"@val-indent-eq-parent": jsonic.AltCond(func(r *jsonic.Rule, ctx *jsonic.Context) bool {
+		"@val-indent-eq-parent": tabnas.AltCond(func(r *tabnas.Rule, ctx *tabnas.Context) bool {
 			parentIn, hasParentIn := r.K["yamlIn"]
 			if !hasParentIn || parentIn == nil {
 				return false
@@ -4163,52 +4164,52 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 			}
 			return false
 		}),
-		"@val-set-in-from-o0": jsonic.AltAction(func(r *jsonic.Rule, ctx *jsonic.Context) {
+		"@val-set-in-from-o0": tabnas.AltAction(func(r *tabnas.Rule, ctx *tabnas.Context) {
 			if v, ok := toInt(r.O0.Val); ok {
 				r.EnsureN()["in"] = v
 			}
 		}),
-		"@val-set-null": jsonic.AltAction(func(r *jsonic.Rule, ctx *jsonic.Context) {
+		"@val-set-null": tabnas.AltAction(func(r *tabnas.Rule, ctx *tabnas.Context) {
 			r.Node = nil
 		}),
-		"@val-set-el-in": jsonic.AltAction(func(r *jsonic.Rule, ctx *jsonic.Context) {
+		"@val-set-el-in": tabnas.AltAction(func(r *tabnas.Rule, ctx *tabnas.Context) {
 			r.EnsureN()["in"] = r.O0.CI - 1
 		}),
-		"@indent-plain-value": jsonic.AltAction(func(r *jsonic.Rule, ctx *jsonic.Context) {
+		"@indent-plain-value": tabnas.AltAction(func(r *tabnas.Rule, ctx *tabnas.Context) {
 			if r.O0.Tin == ST || r.O0.Tin == TX {
 				r.Node = r.O0.Val
 			} else {
 				r.Node = r.O0.Src
 			}
 		}),
-		"@set-map-in": jsonic.AltAction(func(r *jsonic.Rule, ctx *jsonic.Context) {
+		"@set-map-in": tabnas.AltAction(func(r *tabnas.Rule, ctx *tabnas.Context) {
 			r.EnsureK()["yamlMapIn"] = r.N["in"] + 2
 		}),
-		"@t0-eq-in": jsonic.AltCond(func(r *jsonic.Rule, ctx *jsonic.Context) bool {
+		"@t0-eq-in": tabnas.AltCond(func(r *tabnas.Rule, ctx *tabnas.Context) bool {
 			if v, ok := toInt(ctx.T0.Val); ok {
 				return v == r.N["in"]
 			}
 			return false
 		}),
-		"@t0-le-in": jsonic.AltCond(func(r *jsonic.Rule, ctx *jsonic.Context) bool {
+		"@t0-le-in": tabnas.AltCond(func(r *tabnas.Rule, ctx *tabnas.Context) bool {
 			if v, ok := toInt(ctx.T0.Val); ok {
 				return v <= r.N["in"]
 			}
 			return false
 		}),
-		"@t0-lt-in": jsonic.AltCond(func(r *jsonic.Rule, ctx *jsonic.Context) bool {
+		"@t0-lt-in": tabnas.AltCond(func(r *tabnas.Rule, ctx *tabnas.Context) bool {
 			if v, ok := toInt(ctx.T0.Val); ok {
 				return v < r.N["in"]
 			}
 			return false
 		}),
-		"@o0-eq-in": jsonic.AltCond(func(r *jsonic.Rule, ctx *jsonic.Context) bool {
+		"@o0-eq-in": tabnas.AltCond(func(r *tabnas.Rule, ctx *tabnas.Context) bool {
 			if v, ok := toInt(r.O0.Val); ok {
 				return v == r.N["in"]
 			}
 			return false
 		}),
-		"@t0-eq-map-in": jsonic.AltCond(func(r *jsonic.Rule, ctx *jsonic.Context) bool {
+		"@t0-eq-map-in": tabnas.AltCond(func(r *tabnas.Rule, ctx *tabnas.Context) bool {
 			if v, ok := toInt(ctx.T0.Val); ok {
 				if mapIn, ok := toInt(r.K["yamlMapIn"]); ok {
 					return v == mapIn
@@ -4216,18 +4217,18 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 			}
 			return false
 		}),
-		"@elem-key": jsonic.AltAction(func(r *jsonic.Rule, ctx *jsonic.Context) {
+		"@elem-key": tabnas.AltAction(func(r *tabnas.Rule, ctx *tabnas.Context) {
 			r.EnsureU()["key"] = extractKey(r.O0, anchors)
 		}),
-		"@implicit-null-pair": jsonic.AltAction(func(r *jsonic.Rule, _ *jsonic.Context) {
+		"@implicit-null-pair": tabnas.AltAction(func(r *tabnas.Rule, _ *tabnas.Context) {
 			key := extractKey(r.O0, anchors)
 			r.EnsureU()["key"] = key
 			setNodeKey(r.Node, formatKey(key), nil)
 		}),
-		"@qm-pairkey": jsonic.AltAction(func(r *jsonic.Rule, _ *jsonic.Context) {
+		"@qm-pairkey": tabnas.AltAction(func(r *tabnas.Rule, _ *tabnas.Context) {
 			r.EnsureU()["key"] = extractKey(r.O1, anchors)
 		}),
-		"@qm-implicit-null-pair": jsonic.AltAction(func(r *jsonic.Rule, _ *jsonic.Context) {
+		"@qm-implicit-null-pair": tabnas.AltAction(func(r *tabnas.Rule, _ *tabnas.Context) {
 			key := extractKey(r.O1, anchors)
 			r.EnsureU()["key"] = key
 			setNodeKey(r.Node, formatKey(key), nil)
@@ -4244,7 +4245,7 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 	if !ok {
 		panic(fmt.Sprintf("yaml: grammar text did not parse to a map: %T", parsed))
 	}
-	gs := &jsonic.GrammarSpec{Ref: refs}
+	gs := &tabnas.GrammarSpec{Ref: refs}
 	if ruleMap, ok := asStringMap(parsedMap["rule"]); ok {
 		gs.Rule = mapToGrammarRules(ruleMap)
 	}
@@ -4256,8 +4257,8 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 
 	// val rule: claim pending anchors (ao), handle empty (bc), resolve
 	// aliases and record anchors (ac), follow replacement chain (bc).
-	j.Rule("val", func(rs *jsonic.RuleSpec, _ *jsonic.Parser) {
-		rs.AddAO(func(r *jsonic.Rule, ctx *jsonic.Context) {
+	j.Rule("val", func(rs *tabnas.RuleSpec, _ *tabnas.Parser) {
+		rs.AddAO(func(r *tabnas.Rule, ctx *tabnas.Context) {
 			if len(*pendingAnchors) > 0 {
 				anchorsCopy := make([]anchorInfo, len(*pendingAnchors))
 				copy(anchorsCopy, *pendingAnchors)
@@ -4266,21 +4267,21 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 				*pendingAnchors = (*pendingAnchors)[:0]
 			}
 		})
-		rs.AddBC(func(r *jsonic.Rule, ctx *jsonic.Context) {
+		rs.AddBC(func(r *tabnas.Rule, ctx *tabnas.Context) {
 			// A child that rotated (an implicit list) left its value at
 			// the end of the chain; see childNode.
-			if child := r.Child; child != nil && child != jsonic.NoRule {
-				if final := chainEnd(child); final != child && !jsonic.IsUndefined(final.Node) {
+			if child := r.Child; child != nil && child != tabnas.NoRule {
+				if final := chainEnd(child); final != child && !tabnas.IsUndefined(final.Node) {
 					r.Node = final.Node
 				}
 			}
 		})
-		rs.AddBC(func(r *jsonic.Rule, ctx *jsonic.Context) {
+		rs.AddBC(func(r *tabnas.Rule, ctx *tabnas.Context) {
 			if _, ok := r.U["yamlEmpty"]; ok {
-				r.Node = jsonic.Undefined
+				r.Node = tabnas.Undefined
 			}
 		})
-		rs.AddAC(func(r *jsonic.Rule, ctx *jsonic.Context) {
+		rs.AddAC(func(r *tabnas.Rule, ctx *tabnas.Context) {
 			if m, ok := r.Node.(map[string]any); ok {
 				if alias, ok := m["__yamlAlias"].(string); ok {
 					// `rule.node = anchors[name]`, with no test that
@@ -4293,7 +4294,7 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 					// not contain and no other runtime produces.
 					val, exists := anchors[alias]
 					switch v := val.(type) {
-					case *jsonic.OrderedMap, jsonic.OrderedMap, map[string]any, []any:
+					case *tabnas.OrderedMap, tabnas.OrderedMap, map[string]any, []any:
 						r.Node = deepCopy(v)
 					default:
 						if exists {
@@ -4302,7 +4303,7 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 							// `undefined`, which the engine drops from a
 							// list and reads as null in a map, rather
 							// than a Go nil, which a list would keep.
-							r.Node = jsonic.Undefined
+							r.Node = tabnas.Undefined
 						}
 					}
 				}
@@ -4315,14 +4316,14 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 							openNode := r.U["yamlAnchorOpenNode"]
 							if openNode != nil {
 								switch openNode.(type) {
-								case *jsonic.OrderedMap, jsonic.OrderedMap, map[string]any, []any:
+								case *tabnas.OrderedMap, tabnas.OrderedMap, map[string]any, []any:
 									continue
 								}
 							}
 						}
 						val := r.Node
 						switch v := val.(type) {
-						case *jsonic.OrderedMap, jsonic.OrderedMap, map[string]any, []any:
+						case *tabnas.OrderedMap, tabnas.OrderedMap, map[string]any, []any:
 							val = deepCopy(v)
 						}
 						anchors[anchor.name] = val
@@ -4332,9 +4333,9 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 		})
 	})
 
-	j.Rule("indent", func(rs *jsonic.RuleSpec, _ *jsonic.Parser) {
-		rs.AddBC(func(r *jsonic.Rule, ctx *jsonic.Context) {
-			if node := childNode(r); !jsonic.IsUndefined(node) {
+	j.Rule("indent", func(rs *tabnas.RuleSpec, _ *tabnas.Parser) {
+		rs.AddBC(func(r *tabnas.Rule, ctx *tabnas.Context) {
+			if node := childNode(r); !tabnas.IsUndefined(node) {
 				r.Node = node
 			}
 		})
@@ -4348,22 +4349,22 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 	// stale — only the first element would survive. Unlike JS arrays, which
 	// alias by reference, Go needs this explicit write-back. Mirrors the
 	// jsonic Go grammar's CSV pushBack.
-	pushBack := func(r *jsonic.Rule) {
-		if r.Parent != nil && r.Parent != jsonic.NoRule &&
-			r.Parent.Child != nil && r.Parent.Child != jsonic.NoRule {
+	pushBack := func(r *tabnas.Rule) {
+		if r.Parent != nil && r.Parent != tabnas.NoRule &&
+			r.Parent.Child != nil && r.Parent.Child != tabnas.NoRule {
 			r.Parent.Child.Node = r.Node
 		}
 	}
 
-	j.Rule("yamlBlockList", func(rs *jsonic.RuleSpec, _ *jsonic.Parser) {
-		rs.AddBO(func(r *jsonic.Rule, ctx *jsonic.Context) {
+	j.Rule("yamlBlockList", func(rs *tabnas.RuleSpec, _ *tabnas.Parser) {
+		rs.AddBO(func(r *tabnas.Rule, ctx *tabnas.Context) {
 			r.Node = make([]any, 0)
 			r.EnsureK()["yamlBlockArr"] = r.Node
 			r.EnsureK()["yamlListIn"] = r.N["in"]
 		})
-		rs.AddBC(func(r *jsonic.Rule, ctx *jsonic.Context) {
+		rs.AddBC(func(r *tabnas.Rule, ctx *tabnas.Context) {
 			val := childNode(r)
-			if jsonic.IsUndefined(val) {
+			if tabnas.IsUndefined(val) {
 				val = nil
 			}
 			if arr, ok := r.K["yamlBlockArr"].([]any); ok {
@@ -4375,13 +4376,13 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 		})
 	})
 
-	j.Rule("yamlBlockElem", func(rs *jsonic.RuleSpec, _ *jsonic.Parser) {
-		rs.AddBO(func(r *jsonic.Rule, ctx *jsonic.Context) {
+	j.Rule("yamlBlockElem", func(rs *tabnas.RuleSpec, _ *tabnas.Parser) {
+		rs.AddBO(func(r *tabnas.Rule, ctx *tabnas.Context) {
 			r.Node = r.K["yamlBlockArr"]
 		})
-		rs.AddBC(func(r *jsonic.Rule, ctx *jsonic.Context) {
+		rs.AddBC(func(r *tabnas.Rule, ctx *tabnas.Context) {
 			val := childNode(r)
-			if jsonic.IsUndefined(val) {
+			if tabnas.IsUndefined(val) {
 				val = nil
 			}
 			if arr, ok := r.K["yamlBlockArr"].([]any); ok {
@@ -4393,8 +4394,8 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 		})
 	})
 
-	j.Rule("list", func(rs *jsonic.RuleSpec, _ *jsonic.Parser) {
-		rs.AddBO(func(r *jsonic.Rule, ctx *jsonic.Context) {
+	j.Rule("list", func(rs *tabnas.RuleSpec, _ *tabnas.Parser) {
+		rs.AddBO(func(r *tabnas.Rule, ctx *tabnas.Context) {
 			r.EnsureK()["yamlListIn"] = r.N["in"]
 			// OWN the node-append phase for an indented YAML block sequence.
 			//
@@ -4410,21 +4411,21 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 			// a real list. Only the indent path needs this: a flow `[...]`
 			// list is pushed by `val` (parent=val) and gets its array from
 			// @array$, so it is left untouched.
-			if r.Parent != nil && r.Parent != jsonic.NoRule &&
+			if r.Parent != nil && r.Parent != tabnas.NoRule &&
 				r.Parent.Name == "indent" {
 				r.Node = []any{}
 			}
 		})
 	})
 
-	j.Rule("map", func(rs *jsonic.RuleSpec, _ *jsonic.Parser) {
-		rs.AddBO(func(r *jsonic.Rule, ctx *jsonic.Context) {
+	j.Rule("map", func(rs *tabnas.RuleSpec, _ *tabnas.Parser) {
+		rs.AddBO(func(r *tabnas.Rule, ctx *tabnas.Context) {
 			if _, ok := r.N["in"]; !ok {
 				r.EnsureN()["in"] = 0
 			}
 			r.EnsureK()["yamlIn"] = r.N["in"]
 		})
-		rs.AddAC(func(r *jsonic.Rule, ctx *jsonic.Context) {
+		rs.AddAC(func(r *tabnas.Rule, ctx *tabnas.Context) {
 			applyMergeKeys(r.Node)
 		})
 	})
@@ -4432,22 +4433,22 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 	// yamlElemMap only makes the map: its open alternate hands every pair,
 	// the first included, to yamlElemPair (see yaml-grammar.jsonic), so it
 	// never reaches a close phase and stores nothing itself.
-	j.Rule("yamlElemMap", func(rs *jsonic.RuleSpec, _ *jsonic.Parser) {
-		rs.AddBO(func(r *jsonic.Rule, ctx *jsonic.Context) {
+	j.Rule("yamlElemMap", func(rs *tabnas.RuleSpec, _ *tabnas.Parser) {
+		rs.AddBO(func(r *tabnas.Rule, ctx *tabnas.Context) {
 			// Build inline/flow element mappings as insertion-ordered maps
 			// so they preserve source key order, matching the block-mapping
 			// path (jsonic core now yields *OrderedMap) and the TS engine.
-			r.Node = jsonic.NewOrderedMap()
+			r.Node = tabnas.NewOrderedMap()
 		})
 	})
 
 	// yamlElemPair stores each pair into the shared map.
-	j.Rule("yamlElemPair", func(rs *jsonic.RuleSpec, _ *jsonic.Parser) {
-		rs.AddBC(func(r *jsonic.Rule, ctx *jsonic.Context) {
+	j.Rule("yamlElemPair", func(rs *tabnas.RuleSpec, _ *tabnas.Parser) {
+		rs.AddBC(func(r *tabnas.Rule, ctx *tabnas.Context) {
 			if key := r.U["key"]; key != nil {
-				if m, ok := r.Node.(*jsonic.OrderedMap); ok {
+				if m, ok := r.Node.(*tabnas.OrderedMap); ok {
 					val := childNode(r)
-					if jsonic.IsUndefined(val) {
+					if tabnas.IsUndefined(val) {
 						val = nil
 					}
 					m.Set(formatKey(key), val)
@@ -4458,14 +4459,14 @@ func configureGrammarRules(j *jsonic.Jsonic, IN, EL jsonic.Tin, KEY []jsonic.Tin
 }
 
 // mapToGrammarRules converts a parsed rule map into typed GrammarRuleSpec map.
-func mapToGrammarRules(ruleMap map[string]any) map[string]*jsonic.GrammarRuleSpec {
-	rules := make(map[string]*jsonic.GrammarRuleSpec, len(ruleMap))
+func mapToGrammarRules(ruleMap map[string]any) map[string]*tabnas.GrammarRuleSpec {
+	rules := make(map[string]*tabnas.GrammarRuleSpec, len(ruleMap))
 	for name, v := range ruleMap {
 		rm, ok := asStringMap(v)
 		if !ok {
 			continue
 		}
-		spec := &jsonic.GrammarRuleSpec{}
+		spec := &tabnas.GrammarRuleSpec{}
 		if open, ok := rm["open"]; ok {
 			spec.Open = parseGrammarAltsOrSpec(open)
 		}
@@ -4489,9 +4490,9 @@ func parseGrammarAltsOrSpec(v any) any {
 		return nil
 	}
 	alts, _ := val["alts"].([]any)
-	spec := &jsonic.GrammarAltListSpec{Alts: mapsToAlts(alts)}
+	spec := &tabnas.GrammarAltListSpec{Alts: mapsToAlts(alts)}
 	if inj, ok := asStringMap(val["inject"]); ok {
-		spec.Inject = &jsonic.GrammarInjectSpec{}
+		spec.Inject = &tabnas.GrammarInjectSpec{}
 		if app, ok := inj["append"].(bool); ok {
 			spec.Inject.Append = app
 		}
@@ -4514,14 +4515,14 @@ func parseGrammarAltsOrSpec(v any) any {
 }
 
 // mapsToAlts converts an []any of parsed alt maps into []*GrammarAltSpec.
-func mapsToAlts(list []any) []*jsonic.GrammarAltSpec {
-	out := make([]*jsonic.GrammarAltSpec, 0, len(list))
+func mapsToAlts(list []any) []*tabnas.GrammarAltSpec {
+	out := make([]*tabnas.GrammarAltSpec, 0, len(list))
 	for _, item := range list {
 		m, ok := asStringMap(item)
 		if !ok {
 			continue
 		}
-		a := &jsonic.GrammarAltSpec{}
+		a := &tabnas.GrammarAltSpec{}
 		if s, ok := m["s"]; ok {
 			a.S = normalizeS(s)
 		}
