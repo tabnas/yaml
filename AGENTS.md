@@ -196,11 +196,11 @@ says how each resolves them, and does not restate the versions.
   it resolves its tabnas modules from the Go module proxy at the versions
   [`go/go.mod`](go/go.mod) requires. Read the manifest rather than a list
   here: at the time of writing it requires jsonic, the parser engine and
-  support directly (the plugin imports jsonic; `parity_regression_test.go`
-  imports the parser and `parity_test.go` imports support), with json
-  indirect. It carries **no `replace`**, and a committed one is a bug:
-  pointing a module at a sibling checkout is local wiring (see "Never
-  commit the local wiring" below).
+  support directly (the plugin imports the parser, as `tabnas`, for the
+  engine's types, and jsonic for jsonic's own `Make`; `parity_test.go`
+  imports support), with json indirect. It carries **no `replace`**,
+  and a committed one is a bug: pointing a module at a sibling checkout
+  is local wiring (see "Never commit the local wiring" below).
 - **Rust** (`rs/Cargo.toml`): `tabnas = { package = "tabnas-parser", path = "../../parser/rs" }` and
   `tabnas-jsonic = { path = "../../jsonic/rs" }`, with
   `tabnas-support = { path = "../../support/rs" }` as a dev-dependency.
@@ -263,7 +263,7 @@ exposes convenience entry points):
   `new Tabnas().use(jsonic).use(Yaml).parse(src)`. There is **no**
   exported `parse`/`make` on the TS side.
 - **Go** (`go/yaml.go`) exports `Parse(src) (any, error)` (lazy default
-  instance), `MakeJsonic(opts ...YamlOptions) *jsonic.Jsonic` (build a
+  instance), `MakeJsonic(opts ...YamlOptions) *tabnas.Tabnas` (build a
   configured instance), the `Yaml` plugin (`j.Use(Yaml, opts)`), and
   `const VERSION`.
 - **Rust** (`rs/src/lib.rs`) exports `parse(src) -> Result<Value,
@@ -338,7 +338,7 @@ there first, and keep the naming rule.
   and run `npm run embed` in `ts/` (or `make -C ts embed`).
 - **The start rule is `stream`, not jsonic's `val`.** The plugin sets
   it via `tabnas.options({ rule: { start: 'stream' } })` in `src/yaml.ts`
-  (Go: `Rule: &jsonic.RuleOptions{Start: "stream"}` in `MakeJsonic`);
+  (Go: `Rule: &tabnas.RuleOptions{Start: "stream"}` in `Yaml`);
   a YAML document stream is the entry point and
   it opens into the shared `val` rule. The `debug.model()` test asserts
   `m.config.start === 'stream'` (note `config.start`, not `m.start`).
