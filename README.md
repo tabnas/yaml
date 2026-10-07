@@ -31,9 +31,9 @@ npm install @tabnas/yaml @tabnas/jsonic @tabnas/parser
 go get github.com/tabnas/yaml/go
 ```
 
-Rust is not published to a registry. Clone this repository beside
-checkouts of `parser`, `jsonic`, `json` and `support`, and take it as a
-path dependency; see [`rs/README.md`](rs/README.md).
+Rust does not need a checkout either: `cargo add tabnas-yaml tabnas-jsonic
+tabnas-parser`, all three on crates.io; [`rs/README.md`](rs/README.md) also
+shows how to build them from sibling checkouts.
 
 
 ## One tiny example

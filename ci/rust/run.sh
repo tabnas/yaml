@@ -8,9 +8,10 @@
 # DEPENDENCIES on sibling checkouts (rs/Cargo.toml: `tabnas = { path =
 # "../../parser/rs" }`, `tabnas-jsonic = { path = "../../jsonic/rs" }`,
 # and the dev-dependency `tabnas-support = { path = "../../support/rs" }`;
-# jsonic in turn takes `tabnas-json = { path = "../../json/rs" }`). None
-# of the four crates is published, so there is no registry version to
-# fall back on. Clone https://github.com/tabnas/parser,
+# jsonic in turn takes `tabnas-json = { path = "../../json/rs" }`). The
+# four crates are on crates.io, but the committed manifest names them by
+# path alone, so there is no registry version to fall back on. Clone
+# https://github.com/tabnas/parser,
 # https://github.com/tabnas/jsonic, https://github.com/tabnas/json and
 # https://github.com/tabnas/support next to this repo before running.
 set -euo pipefail

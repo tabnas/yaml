@@ -81,10 +81,12 @@ jobs:
         with:
           path: yaml
 
-      # Sibling main, not a release: the crates are unpublished, so this
-      # is the only resolution there is. It is also the one CI already
-      # uses for Go (`deps: "parser support debug json jsonic"` in
-      # ci.yml), so both ports are measured against the same siblings.
+      # Sibling main, not a release: rs/Cargo.toml names these crates by
+      # path (they are on crates.io, but the committed manifest stays
+      # path-only), so this is the only resolution there is. It is also
+      # the one CI already uses for Go (`deps: "parser support debug json
+      # jsonic"` in ci.yml), so both ports are measured against the same
+      # siblings.
       - name: Clone the sibling engine, grammars and fixture runner
         run: |
           git clone --depth 1 https://github.com/tabnas/parser.git parser

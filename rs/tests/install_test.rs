@@ -1,9 +1,10 @@
 // The install section of `README.md` names every sibling checkout the
 // crate's dependency closure needs.
 //
-// None of the tabnas crates is published, so a reader of that page
-// clones checkouts by hand and cargo resolves the path dependencies from
-// them. The page has twice advertised a manifest that did not resolve:
+// The crates are on crates.io, and the page also shows how to build them
+// from sibling checkouts: a reader who does clones the checkouts by hand,
+// and cargo resolves the path dependencies from them. The page has twice
+// advertised a manifest that did not resolve:
 // once the `tabnas-jsonic` entry was missing, once the transitive `json`
 // checkout that `tabnas-jsonic` takes by `../../json/rs`. Both were read
 // and not run, because the `toml` fence is not a doctest. This test runs
