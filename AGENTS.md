@@ -385,7 +385,7 @@ there first, and keep the naming rule.
 TypeScript (from `ts/`):
 
 ```bash
-npm install            # auto-installs the jsonic/parser peers; resolves file: siblings
+npm install            # auto-installs the jsonic/parser peers; resolves the @tabnas devDependencies from the registry
 npm run build          # node embed-grammar.js && tsc --build src && tsc --build test
 npm test               # node --enable-source-maps --test "dist-test/*.test.js"
 ```
@@ -780,7 +780,7 @@ style `m.config.start === 'stream'`, that `Yaml` is in `m.plugins`, and
 push edges (`stream` opens `val`; `yamlBlockList` pushes `yamlElemMap`).
 `@tabnas/debug` is resolved dynamically and the test **skips** when it is
 absent (set `TABNAS_DEBUG_PATH` to a built sibling to force it). Because
-debug is a `file:` devDependency, plain `npm test` runs it.
+debug is a `"*"` devDependency, plain `npm test` runs it.
 
 ## CI
 
