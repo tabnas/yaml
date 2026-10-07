@@ -34,8 +34,8 @@ Both of these were staged here and now run from `.github/workflows/`:
   calls the org-shared polyglot workflow, which takes no Rust input, so
   the Rust port is gated without changing `tabnas/.github`. The job
   clones `parser`, `jsonic`, `json` and `support` beside the checkout:
-  `rs/Cargo.toml` resolves all four as path dependencies on siblings,
-  and none of them is published.
+  `rs/Cargo.toml` resolves all four as path dependencies on siblings.
+  All four are on crates.io, but the committed manifest stays path-only.
 
   Its `paths` lists name the grammar and its embedder as well as `rs/`,
   because `rs/src/lib.rs` carries a generated copy of

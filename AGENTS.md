@@ -75,7 +75,7 @@ It is **not** a full YAML 1.2 parser. The bar is the documented feature
 set above, verified against the **complete** official
 [YAML Test Suite](https://github.com/yaml/yaml-test-suite) (`data`
 branch) — vendored byte-identical at
-[`test/yaml-test-suite/`](test/yaml-test-suite/) and run by **both**
+[`test/yaml-test-suite/`](test/yaml-test-suite/) and run by **all three**
 runtimes. Exactly what that suite measures here:
 
 | Suite bucket | Cases | Result |
@@ -85,7 +85,7 @@ runtimes. Exactly what that suite measures here:
 | No expected output (neither file) | 29 | No value is published, so only "a valid document parses" can be checked: **8 parse**, the other **21 are rejected** and listed in [`test/yaml-test-suite-unparsed.tsv`](test/yaml-test-suite-unparsed.tsv) |
 | **Total** | **402** | |
 
-Every one of the 402 is asserted. There is no skip list in either runner,
+Every one of the 402 is asserted. There is no skip list in any runner,
 and no group is merely gathered — a conformance suite that quietly does not
 run reports green while measuring nothing. A `suite-census` test pins the
 four counts above, so a truncated corpus cannot shrink the denominator and
@@ -205,8 +205,9 @@ says how each resolves them, and does not restate the versions.
   `tabnas-jsonic = { path = "../../jsonic/rs" }`, with
   `tabnas-support = { path = "../../support/rs" }` as a dev-dependency.
   jsonic takes `tabnas-json = { path = "../../json/rs" }` in turn, so
-  four sibling checkouts have to be present. None of the crates is
-  published, so there is no registry version to fall back on.
+  four sibling checkouts have to be present. The crates are on
+  crates.io, but the committed manifest names them by path alone, so
+  there is no registry version to fall back on.
   `ci/rust/run.sh` checks for all four before it runs anything.
 
 So only the Rust side needs sibling checkouts: clone `parser`, `jsonic`,
@@ -543,12 +544,14 @@ The steps, in order:
    suite then passes against unreleased code while appearing to verify the
    published one. Reinstalling is the part that matters.
 
-   One thing a clean install does **not** isolate:
-   `ts/test/doc-examples.test.*` resolves `@tabnas/*` by filesystem path
-   (`const TABNAS = path.join(REPO, '..')`), not through `node_modules`. If
-   unbuilt sibling checkouts sit beside this repo, those blocks fail with
-   `MODULE_NOT_FOUND` no matter what you installed — build the siblings, or
-   verify somewhere they are absent.
+   The clean install covers the doc examples too:
+   `ts/test/doc-examples.test.*` resolves a doc example's `require`
+   through `node_modules` first, and only a `@tabnas/*` package that is
+   not installed falls back to the sibling checkout `../<x>/ts`
+   (`const TABNAS = path.join(REPO, '..')`), with `@tabnas/yaml` itself
+   served from this repository's `ts/`. The tested examples name only
+   `@tabnas/jsonic` and `@tabnas/parser`, installed devDependencies, and
+   `@tabnas/yaml`, so none of them reaches a sibling checkout.
 
    `npm test` already compiles here: `ts/package.json` sets `pretest` to
    `npm run build`, which npm runs automatically. No separate build step is
@@ -562,13 +565,17 @@ The steps, in order:
    ```bash
    (
      cd go
-     go mod edit -json | grep -q '"Replace": null' || { echo 'go.mod has a replace'; exit 1; }
+     go mod edit -json | jq -e '.Replace == null' >/dev/null || { echo 'go.mod has a replace'; exit 1; }
      GOWORK=off go test -count=1 ./...
    )
    ```
 
    `-count=1` because shared fixtures live outside the Go module, so a
-   changed corpus does not invalidate the test cache.
+   changed corpus does not invalidate the test cache. The check asks `jq`,
+   not `grep`: current Go leaves the `Replace` key out when there is no
+   replace, where older Go printed `"Replace": null`, and `jq` reads a
+   missing key as null, so the check passes on a clean `go.mod` and fails
+   on a replace either way.
 3. **Merge the bump through a reviewed PR.** That is the house convention —
    `CONTRIBUTING.md` squash-merges PRs and takes the title as the commit
    message — and what `release.yml`'s own header describes. A direct push to

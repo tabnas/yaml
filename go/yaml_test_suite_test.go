@@ -45,8 +45,9 @@ var suiteDir = filepath.Join("..", "test", "yaml-test-suite")
 
 // lenientFile is the shared ledger of suite `error` cases this parser accepts.
 // unparsedFile is the shared ledger of parse-only cases it still rejects.
-// The TS runner (ts/test/yaml-test-suite.test.ts) reads the same two files, so
-// the two runtimes cannot drift. See each file's own header.
+// The TS and Rust runners (ts/test/yaml-test-suite.test.ts and
+// rs/tests/yaml_test_suite_test.rs) read the same two files, so the
+// runtimes cannot drift. See each file's own header.
 var (
 	lenientFile  = filepath.Join("..", "test", "yaml-test-suite-lenient.tsv")
 	unparsedFile = filepath.Join("..", "test", "yaml-test-suite-unparsed.tsv")

@@ -136,9 +136,9 @@ tag restriction; review parsed output before trusting untrusted input.
 
 The structural grammar alternates live in a declarative `.jsonic` file
 at the repo root ([`yaml-grammar.jsonic`](../../yaml-grammar.jsonic)) and
-are embedded into `ts/src/yaml.ts` (and `go/yaml.go`) between
-`BEGIN`/`END` markers by `embed-grammar.js`. One source of truth keeps
-the TypeScript and Go ports in lockstep, and lets the grammar be
+are embedded into `ts/src/yaml.ts` (and `go/yaml.go` and `rs/src/lib.rs`)
+between `BEGIN`/`END` markers by `embed-grammar.js`. One source of truth
+keeps the three ports in lockstep, and lets the grammar be
 rendered directly as a railroad diagram. Every added alternate is tagged
 with the rule group `yaml`, so the whole extension can be excluded
 (`j.options({ rule: { exclude: 'yaml' } })`) to fall back to plain

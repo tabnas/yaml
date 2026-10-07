@@ -33,8 +33,9 @@
  * multi-document case was scored on a fraction of its expected output. Both
  * of those hid real conformance failures and are gone.
  *
- * Both ledger files are read by the Go runner (go/yaml_test_suite_test.go)
- * too, so the two runtimes are scored identically and cannot drift.
+ * Both ledger files are read by the Go and Rust runners
+ * (go/yaml_test_suite_test.go and rs/tests/yaml_test_suite_test.rs) too, so
+ * the three runtimes are scored identically and cannot drift.
  */
 
 import { test, describe } from 'node:test'

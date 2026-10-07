@@ -148,9 +148,17 @@ grammar, which does not reject every construct YAML 1.2 forbids.
 
 ## Install
 
-None of the tabnas crates is published to a registry, so they are
-consumed as **sibling checkouts**, the standard tabnas development
-model. Three of them have to be cloned next to this repository:
+The crate, the jsonic grammar and the engine are published on
+crates.io. The engine's package is `tabnas-parser`, imported in code as
+`tabnas`:
+
+```bash
+cargo add tabnas-yaml tabnas-jsonic tabnas-parser
+```
+
+To build from source instead, as this repository's own `Cargo.toml`
+does, they are consumed as **sibling checkouts**, the standard tabnas
+development model. Three of them have to be cloned next to this repository:
 `https://github.com/tabnas/parser`, `https://github.com/tabnas/jsonic`
 and `https://github.com/tabnas/json`. Two of them are pointed at
 directly:
