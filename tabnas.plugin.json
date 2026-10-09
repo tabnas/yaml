@@ -43,6 +43,7 @@
   "translate": {
     "reads": "tree",
     "writes": "tree",
+    "root": "any",
     "render": "alchemy/render.alc",
     "loss": [
       "Comments are not kept.",

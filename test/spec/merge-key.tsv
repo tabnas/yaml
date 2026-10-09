@@ -13,3 +13,17 @@ base: &b\n  x: 1\nd:\n  <<: *b\n  y: 2	{"base":{"x":1},"d":{"y":2,"x":1}}		order
 base: &b\n  x: 1\n  z: 3\nd:\n  w: 0\n  <<: *b\n  y: 2	{"base":{"x":1,"z":3},"d":{"w":0,"y":2,"x":1,"z":3}}		ordered
 a: &a\n  p: 1\n  q: 2\nb: &b\n  q: 9\n  r: 3\nd:\n  s: 0\n  <<: [*a, *b]\n  t: 4	{"a":{"p":1,"q":2},"b":{"q":9,"r":3},"d":{"s":0,"t":4,"p":1,"q":2,"r":3}}		ordered
 base: &b {x: 1}\nd: {<<: *b, y: 2}	{"base":{"x":1},"d":{"y":2,"x":1}}		ordered
+# A QUOTED `<<` is an ordinary key, not the merge key: YAML resolves only
+# a plain `<<` to the merge type (YAML 1.1's), and a quoted scalar is
+# always a string. So a mapping that holds the key `<<` and is written
+# with every key quoted, as the translation render writes it, reads back
+# as written. A plain `<<`, explicit (`? <<`) included, still merges.
+"<<": 1	{"<<":1}	
+'<<': 1	{"<<":1}	
+"<<": {a: 1}\nb: 2	{"<<":{"a":1},"b":2}		ordered
+x:\n  "<<": {a: 1}\n  b: 2	{"x":{"<<":{"a":1},"b":2}}		ordered
+base: &b {x: 1}\nd:\n  "<<": *b\n  y: 2	{"base":{"x":1},"d":{"<<":{"x":1},"y":2}}		ordered
+{"<<": {a: 1}, b: 2}	{"<<":{"a":1},"b":2}		ordered
+{? "<<" : {a: 1}, b: 2}	{"<<":{"a":1},"b":2}		ordered
+? "<<"\n: {a: 1}\nb: 2	{"<<":{"a":1},"b":2}		ordered
+? <<\n: {a: 1}\nb: 2	{"b":2,"a":1}		ordered

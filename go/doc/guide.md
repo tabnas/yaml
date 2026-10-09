@@ -99,6 +99,9 @@ prod:
 `prod` keeps its own `timeout: 60` and inherits `retries: 3` from
 `base`.
 
+Only a plain `<<` merges. A quoted `"<<"` or `'<<'` is a string, like
+any quoted scalar, and so an ordinary key.
+
 
 ## Coerce types with tags
 

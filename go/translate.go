@@ -13,6 +13,7 @@ type TranslationPart struct {
 type TranslationParts struct {
 	Manifest string
 	Lift     *TranslationPart
+	Embed    *TranslationPart
 	Render   *TranslationPart
 }
 

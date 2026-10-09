@@ -438,33 +438,69 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
     return src[j] === ':' && (j + 1 >= src.length || isYamlSpace(src[j + 1]))
   }
 
+  // The single-character escapes of a double-quoted scalar, YAML 1.2's
+  // c-ns-esc-char less `x`, `u` and `U`, which take hexadecimal digits.
+  const DQ_ESCAPES: Record<string, string> = {
+    '0': '\0', a: '\x07', b: '\b', t: '\t', '\t': '\t', n: '\n',
+    v: '\v', f: '\f', r: '\r', e: '\x1b', ' ': ' ', '"': '"', '/': '/',
+    '\\': '\\', N: '\u0085', _: '\u00a0', L: '\u2028', P: '\u2029',
+  }
+
   // `text` with its quotes removed when the whole of it is one quoted
-  // scalar on one line; otherwise `text` unchanged. Double quotes take the
-  // common escapes; single quotes take '' for a quote.
+  // scalar on one line; otherwise `text` unchanged. Single quotes take ''
+  // for a quote. Double quotes take every escape YAML 1.2 defines: the
+  // single characters of DQ_ESCAPES, and `\x`, `\u` and `\U` with exactly
+  // two, four and eight hexadecimal digits, a `\u` high surrogate
+  // followed by a `\u` low one read as the one character they name. A
+  // malformed or unknown escape, a lone surrogate or a quote inside leaves
+  // the text as it is.
   function unquoteWholeScalar(text: string): string {
     let q = text[0]
     if ((q !== '"' && q !== "'") || text.length < 2 || text[text.length - 1] !== q) {
       return text
     }
+    let last = text.length - 1
     let out = ''
-    for (let j = 1; j < text.length - 1; j++) {
+    for (let j = 1; j < last; j++) {
       let c = text[j]
       if (q === "'" && c === "'") {
-        if (text[j + 1] !== "'" || j + 1 === text.length - 1) return text
+        if (text[j + 1] !== "'" || j + 1 === last) return text
         out += "'"; j++
       } else if (q === '"' && c === '"') {
         return text
       } else if (q === '"' && c === '\\') {
         let e = text[++j]
-        let m: Record<string, string> =
-          { n: '\n', t: '\t', r: '\r', '0': '\0', '"': '"', '\\': '\\', '/': '/', ' ': ' ' }
-        if (j >= text.length - 1 || !(e in m)) return text
-        out += m[e]
+        if (j >= last) return text
+        if (Object.prototype.hasOwnProperty.call(DQ_ESCAPES, e)) {
+          out += DQ_ESCAPES[e]
+          continue
+        }
+        let width = 'x' === e ? 2 : 'u' === e ? 4 : 'U' === e ? 8 : 0
+        let cp = hexAt(text, j + 1, width, last)
+        if (cp < 0) return text
+        j += width
+        if ('u' === e && cp >= 0xd800 && cp <= 0xdbff && '\\' === text[j + 1] && 'u' === text[j + 2]) {
+          let low = hexAt(text, j + 3, 4, last)
+          if (low >= 0xdc00 && low <= 0xdfff) {
+            cp = 0x10000 + ((cp - 0xd800) << 10) + (low - 0xdc00)
+            j += 6
+          }
+        }
+        if ((cp >= 0xd800 && cp <= 0xdfff) || cp > 0x10ffff) return text
+        out += String.fromCodePoint(cp)
       } else {
         out += c
       }
     }
     return out
+  }
+
+  // The number the `width` hexadecimal digits at `at` spell, all of them
+  // before `end`; -1 when they are not that many, or a width of 0.
+  function hexAt(text: string, at: number, width: number, end: number): number {
+    if (0 === width || at + width > end) return -1
+    let digits = text.substring(at, at + width)
+    return /^[0-9a-fA-F]+$/.test(digits) ? parseInt(digits, 16) : -1
   }
 
   // Whether offset `i` begins a line: the source start, just after a line
@@ -1815,8 +1851,12 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
                   key = tagMatch[2]
                 }
                 // A quoted explicit key is the scalar inside the quotes, not
-                // the quoted text (`? "k"` is the key k).
+                // the quoted text (`? "k"` is the key k), and its token is a
+                // string's, as a quoted implicit key's is, so that a quoted
+                // `<<` is no merge key here either.
+                let rawKey = key
                 key = unquoteWholeScalar(key)
+                let quotedKey = key !== rawKey
                 let consumed = keyEnd
                 // Track position before consuming newline (for !hasValue case).
                 let beforeNewline = consumed
@@ -1999,7 +2039,7 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
                   let vlTkn = lex.token('#VL', null, '', lex.pnt)
                   pendingTokens.push(clTkn, vlTkn)
                 }
-                let tkn = lex.token('#TX', key, src, lex.pnt)
+                let tkn = lex.token(quotedKey ? '#ST' : '#TX', key, src, lex.pnt)
                 return tkn
               }
 
@@ -2883,6 +2923,26 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
   // Configure jsonic to start parsing with `stream` instead of `val`.
   tabnas.options({ rule: { start: 'stream' } })
 
+  // The mapping nodes whose `<<` key was quoted. YAML resolves only a
+  // plain `<<` to the merge key (the merge type is YAML 1.1's, and a
+  // quoted scalar is always a string), so a quoted one is an ordinary key
+  // and its mapping is not merged. A node is a fresh object per parse, so
+  // the set needs no reset.
+  const literalMergeKey: WeakSet<object> = new WeakSet()
+
+  // pair rule: note a quoted `<<` key, a string token (after the `?` of
+  // an explicit key in a flow mapping), on the mapping's node, which every
+  // pair of a mapping shares.
+  tabnas.rule('pair', (rulespec: RuleSpec) => {
+    rulespec.bc((rule: Rule) => {
+      let keyToken = QM === rule.o0.tin ? rule.o1 : rule.o0
+      if ('<<' === rule.u.key && ST === keyToken.tin &&
+          null != rule.node && 'object' === typeof rule.node) {
+        literalMergeKey.add(rule.node)
+      }
+    })
+  })
+
   // map rule: default indent and merge-key handling.
   tabnas.rule('map', (rulespec: RuleSpec) => {
     rulespec.bo((rule: Rule) => {
@@ -2892,7 +2952,8 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
       rule.k.yamlIn = rule.n.in
     })
     rulespec.ac((rule: Rule) => {
-      if (rule.node && typeof rule.node === 'object' && '<<' in rule.node) {
+      if (rule.node && typeof rule.node === 'object' && '<<' in rule.node &&
+          !literalMergeKey.has(rule.node)) {
         let mergeVal = rule.node['<<']
         delete rule.node['<<']
         if (Array.isArray(mergeVal)) {

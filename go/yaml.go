@@ -497,10 +497,23 @@ func quotedKeyAt(src string, i int) bool {
 	return j < len(src) && src[j] == ':' && (j+1 >= len(src) || isYamlSpaceByte(src[j+1]))
 }
 
+// dqEscapes are the single-character escapes of a double-quoted scalar,
+// YAML 1.2's c-ns-esc-char less `x`, `u` and `U`, which take hexadecimal
+// digits. Mirrors DQ_ESCAPES in src/yaml.ts.
+var dqEscapes = map[byte]string{
+	'0': "\x00", 'a': "\x07", 'b': "\b", 't': "\t", '\t': "\t", 'n': "\n",
+	'v': "\v", 'f': "\f", 'r': "\r", 'e': "\x1b", ' ': " ", '"': "\"", '/': "/",
+	'\\': "\\", 'N': "\u0085", '_': "\u00a0", 'L': "\u2028", 'P': "\u2029",
+}
+
 // unquoteWholeScalar returns text with its quotes removed when the whole of
-// it is one quoted scalar on one line; otherwise text unchanged. Double
-// quotes take the common escapes; single quotes take a doubled quote.
-// Mirrors unquoteWholeScalar in src/yaml.ts.
+// it is one quoted scalar on one line; otherwise text unchanged. Single
+// quotes take a doubled quote. Double quotes take every escape YAML 1.2
+// defines: the single characters of dqEscapes, and `\x`, `\u` and `\U`
+// with exactly two, four and eight hexadecimal digits, a `\u` high
+// surrogate followed by a `\u` low one read as the one character they
+// name. A malformed or unknown escape, a lone surrogate or a quote inside
+// leaves the text as it is. Mirrors unquoteWholeScalar in src/yaml.ts.
 func unquoteWholeScalar(text string) string {
 	if len(text) < 2 {
 		return text
@@ -527,25 +540,64 @@ func unquoteWholeScalar(text string) string {
 			if j >= last {
 				return text
 			}
-			switch text[j] {
-			case 'n':
-				b.WriteByte('\n')
-			case 't':
-				b.WriteByte('\t')
-			case 'r':
-				b.WriteByte('\r')
-			case '0':
-				b.WriteByte(0)
-			case '"', '\\', '/', ' ':
-				b.WriteByte(text[j])
-			default:
+			e := text[j]
+			if s, ok := dqEscapes[e]; ok {
+				b.WriteString(s)
+				continue
+			}
+			width := 0
+			switch e {
+			case 'x':
+				width = 2
+			case 'u':
+				width = 4
+			case 'U':
+				width = 8
+			}
+			cp := dqHexAt(text, j+1, width, last)
+			if cp < 0 {
 				return text
 			}
+			j += width
+			if e == 'u' && cp >= 0xd800 && cp <= 0xdbff && j+2 < last && text[j+1] == '\\' && text[j+2] == 'u' {
+				if low := dqHexAt(text, j+3, 4, last); low >= 0xdc00 && low <= 0xdfff {
+					cp = 0x10000 + ((cp - 0xd800) << 10) + (low - 0xdc00)
+					j += 6
+				}
+			}
+			if (cp >= 0xd800 && cp <= 0xdfff) || cp > 0x10ffff {
+				return text
+			}
+			b.WriteRune(rune(cp))
 		default:
 			b.WriteByte(c)
 		}
 	}
 	return b.String()
+}
+
+// dqHexAt returns the number the width hexadecimal digits at text[at:]
+// spell, all of them before end; -1 when they are not that many, or a
+// width of 0. Mirrors hexAt in src/yaml.ts.
+func dqHexAt(text string, at, width, end int) int {
+	if width == 0 || at+width > end {
+		return -1
+	}
+	n := 0
+	for k := at; k < at+width; k++ {
+		d := text[k]
+		switch {
+		case d >= '0' && d <= '9':
+			n = n*16 + int(d-'0')
+		case d >= 'a' && d <= 'f':
+			n = n*16 + int(d-'a') + 10
+		case d >= 'A' && d <= 'F':
+			n = n*16 + int(d-'A') + 10
+		default:
+			return -1
+		}
+	}
+	return n
 }
 
 // Parse parses a YAML string and returns the resulting Go value.
@@ -1335,6 +1387,10 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 	var streamDocs []any
 	var streamMeta []*DocMeta
 	var streamCurMeta *DocMeta
+	// The mapping nodes whose `<<` key was quoted, which is then an
+	// ordinary key and not the merge key (mirrors literalMergeKey in
+	// src/yaml.ts).
+	literalMergeKey := make(map[*tabnas.OrderedMap]bool)
 
 	cfg := j.Config()
 
@@ -1412,6 +1468,9 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 			streamDocs = nil
 			streamMeta = nil
 			streamCurMeta = nil
+			for k := range literalMergeKey {
+				delete(literalMergeKey, k)
+			}
 
 			// Empty / whitespace-only / comments-only source: emit one #VL
 			// null so the parser yields nil rather than a parse error.
@@ -2139,8 +2198,8 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 	cfg.SortFixedTokens()
 
 	// ===== Grammar rules =====
-	configureGrammarRules(j, IN, EL, KEY, CL, ZZ, CA, CS, CB, TX, ST, VL, NR,
-		anchors, &pendingAnchors)
+	configureGrammarRules(j, IN, EL, KEY, CL, ZZ, CA, CS, CB, TX, ST, VL, NR, QM,
+		anchors, &pendingAnchors, literalMergeKey)
 
 	// ===== Stream rule: top-level YAML document collector =====
 	// Replaces `val` as the parser's start rule. Consumes #DS / #DE / #DR
@@ -3059,8 +3118,12 @@ func handleExplicitKey(lex *tabnas.Lex, pnt *tabnas.Point, fwd string,
 	if m := explicitKeyTagRe.FindStringSubmatch(key); m != nil {
 		key = m[2]
 	}
-	// A quoted explicit key is the scalar inside the quotes (`? "k"` is k).
+	// A quoted explicit key is the scalar inside the quotes (`? "k"` is k),
+	// and its token is a string's, as a quoted implicit key's is, so that a
+	// quoted `<<` is no merge key here either (mirrors src/yaml.ts).
+	rawKey := key
 	key = unquoteWholeScalar(key)
+	quotedKey := key != rawKey
 	consumed := keyEnd
 
 	// Skip comment at end of key line.
@@ -3291,6 +3354,9 @@ func handleExplicitKey(lex *tabnas.Lex, pnt *tabnas.Point, fwd string,
 	srcEnd := keyEnd
 	if hasValue {
 		srcEnd = consumed
+	}
+	if quotedKey {
+		return lex.Token("#ST", tabnas.TinST, key, fwd[:srcEnd])
 	}
 	tkn := lex.Token("#TX", TX, key, fwd[:srcEnd])
 	return tkn
@@ -4114,8 +4180,9 @@ const grammarText = `
 // yaml-grammar.jsonic file) and wires state handlers (bo/ao/bc/ac) that need
 // closure access to per-parse state.
 func configureGrammarRules(j *tabnas.Tabnas, IN, EL tabnas.Tin, KEY []tabnas.Tin,
-	CL, ZZ, CA, CS, CB, TX, ST, VL, NR tabnas.Tin,
-	anchors map[string]any, pendingAnchors *[]anchorInfo) {
+	CL, ZZ, CA, CS, CB, TX, ST, VL, NR, QM tabnas.Tin,
+	anchors map[string]any, pendingAnchors *[]anchorInfo,
+	literalMergeKey map[*tabnas.OrderedMap]bool) {
 
 	_ = IN
 	_ = EL
@@ -4418,6 +4485,27 @@ func configureGrammarRules(j *tabnas.Tabnas, IN, EL tabnas.Tin, KEY []tabnas.Tin
 		})
 	})
 
+	// A quoted `<<` key is an ordinary key: YAML resolves only a plain
+	// `<<` to the merge key (the merge type is YAML 1.1's, and a quoted
+	// scalar is always a string). The pair notes a quoted one, a string
+	// token (after the `?` of an explicit key in a flow mapping), on the
+	// mapping's node, which every pair of a mapping shares, and the map
+	// leaves that node unmerged. Mirrors the pair rule in src/yaml.ts.
+	j.Rule("pair", func(rs *tabnas.RuleSpec, _ *tabnas.Parser) {
+		rs.AddBC(func(r *tabnas.Rule, ctx *tabnas.Context) {
+			keyTkn := r.O0
+			if keyTkn.Tin == QM {
+				keyTkn = r.O1
+			}
+			if keyTkn.Tin != ST || r.U["key"] != "<<" {
+				return
+			}
+			if om, ok := r.Node.(*tabnas.OrderedMap); ok {
+				literalMergeKey[om] = true
+			}
+		})
+	})
+
 	j.Rule("map", func(rs *tabnas.RuleSpec, _ *tabnas.Parser) {
 		rs.AddBO(func(r *tabnas.Rule, ctx *tabnas.Context) {
 			if _, ok := r.N["in"]; !ok {
@@ -4426,6 +4514,10 @@ func configureGrammarRules(j *tabnas.Tabnas, IN, EL tabnas.Tin, KEY []tabnas.Tin
 			r.EnsureK()["yamlIn"] = r.N["in"]
 		})
 		rs.AddAC(func(r *tabnas.Rule, ctx *tabnas.Context) {
+			if om, ok := r.Node.(*tabnas.OrderedMap); ok && literalMergeKey[om] {
+				delete(literalMergeKey, om)
+				return
+			}
 			applyMergeKeys(r.Node)
 		})
 	})

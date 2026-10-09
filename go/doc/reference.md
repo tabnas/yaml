@@ -172,6 +172,7 @@ All numbers (including hex/octal/binary integers) come back as
 | Block-scalar indent    | <code>&#124;2</code>          | explicit content indent |
 | Anchor / alias         | `&x 1`, `*x`                  | aliased value copied in |
 | Merge key              | `<<: *x`                      | keys merged, local keys win |
+| Quoted merge key       | `"<<": 1`                     | `map[<<:1]`, an ordinary key |
 | Type tag               | `!!int "42"`                  | `float64(42)` (coerced) |
 | `%TAG` directive       | `%TAG !e! tag:example.com/`   | captured (see `Meta.Directives`) |
 | Explicit flow key      | `{? k : v}`                   | `map[k:v]` |

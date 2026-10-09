@@ -143,7 +143,7 @@ j.parse('name: Alice\nitems:\n  - one\n  - two\n')
 | [`ts/`](ts/) | **Canonical** TypeScript implementation — the `@tabnas/yaml` package. The entire plugin (lexer matcher + grammar wiring + scalar/anchor/tag handling) lives in the single large [`ts/src/yaml.ts`](ts/src/yaml.ts). Depends on `@tabnas/jsonic` and `@tabnas/parser`. |
 | [`go/`](go/) | Go port — `github.com/tabnas/yaml/go`. The whole plugin is in [`go/yaml.go`](go/yaml.go); the package's `const VERSION` lives there too. Module path is `github.com/tabnas/yaml/go`; its dependencies are whatever [`go/go.mod`](go/go.mod) requires (see below). |
 | [`rs/`](rs/) | Rust port — crate `tabnas-yaml`, library `tabnas_yaml`. The plugin is [`rs/src/lib.rs`](rs/src/lib.rs) (options, grammar, rule wiring, entry points) with the lexer in `rs/src/lex.rs`, the scalar handlers in `rs/src/text.rs` and the per-parse state in `rs/src/state.rs`; `pub const VERSION` lives in `lib.rs`. Path dependencies on sibling checkouts of **parser**, **jsonic** (and **json** beneath it) and, for tests, **support**. |
-| [`alchemy/render.alc`](alchemy/render.alc) | **YAML's render**, an [alchemy](https://github.com/tabnas/alchemy) library whose entry point `yaml-render` writes a tree's events as one YAML document. The manifest's `translate` object names it and the Rust crate embeds it (`render_text()`); see [The translation parts](#the-translation-parts). |
+| [`alchemy/render.alc`](alchemy/render.alc) | **YAML's render**, an [alchemy](https://github.com/tabnas/alchemy) library whose entry point `yaml-render` writes a tree's events as one YAML document. The manifest's `translate` object names it and every runtime embeds it (`npm run embed` in `ts/` writes the copies); see [The translation parts](#the-translation-parts). |
 | [`yaml-grammar.jsonic`](yaml-grammar.jsonic) | **Single source of truth for the grammar**, written in jsonic syntax. Lives at the **repo root** and is embedded verbatim into `ts/src/yaml.ts`, `go/yaml.go` and `rs/src/lib.rs` by [`ts/embed-grammar.js`](ts/embed-grammar.js). Do not edit the embedded copies by hand — edit the `.jsonic` and re-run the embed. |
 | [`test/spec/`](test/spec/) | **Repo-root shared fixtures**, auto-discovered and run by all three runtimes: `*.tsv` files with an `input`/`expected`/`opts` header row. See [`test/AGENTS.md`](test/AGENTS.md) for the exact format. |
 | [`test/yaml-test-suite/`](test/yaml-test-suite/) | The upstream YAML Test Suite corpus, vendored verbatim and run by **all three** runtimes, plus the two shared ledgers every runner reads: [`test/yaml-test-suite-lenient.tsv`](test/yaml-test-suite-lenient.tsv) (`error` cases this parser accepts) and [`test/yaml-test-suite-unparsed.tsv`](test/yaml-test-suite-unparsed.tsv) (parse-only cases it still rejects). |
@@ -272,8 +272,8 @@ exposes convenience entry points):
   `make_with(YamlOptions)`, the plugin as both `plugin() -> Plugin` and
   `yaml(&mut Tabnas, &YamlOptions)`, the `YamlOptions` struct, the
   `YamlError` re-export, `pub const VERSION`, and the translation parts,
-  `render_text()` and `manifest_text()` (below), which TS and Go have no
-  counterpart for yet.
+  `translate()`, `render_text()` and `manifest_text()` (below). TS
+  exports the same parts as `translate()` and Go as `Translate()`.
 - **`VERSION` must always equal `ts/package.json` "version"**, in all
   three runtimes. `go/version_test.go`, `ts/test/version.test.ts` and
   `rs/tests/version_test.rs` are the CI checks: they read
@@ -288,49 +288,68 @@ exposes convenience entry points):
 
 A host that translates between formats (aless's `--render yaml`, the
 design in tabnas/transduce's
-[`docs/translation.md`](https://github.com/tabnas/transduce/blob/main/docs/translation.md))
-reads two things from this repository, both through the Rust crate:
+[`docs/translation.md`](https://github.com/tabnas/transduce/blob/main/docs/translation.md),
+composed by alchemy's `translate` module) reads two things from this
+repository, through any runtime's `translate()`:
 
 - **The render**, [`alchemy/render.alc`](alchemy/render.alc): a library
   of alchemy definitions with no `export`, which the host links with its
   own program. Every definition is named `yaml-...`, so that no two
   formats' helpers collide in one program, and the entry point is
   `yaml-render`: a tree's events in, one YAML document out, in block
-  style with every string and key double-quoted. The events must be a
-  tree's, each key once per mapping: a walked value is one by
-  construction, and a host that streams a parse refuses a member the
-  parse repeats, since YAML forbids a repeated key and the render writes
-  what it is given. Its state is the stack of open containers, so it
-  grows with a document's nesting, never with its width.
+  style with every string and key double-quoted (the line separators
+  U+2028 and U+2029 escaped too, which YAML 1.1 reads as line breaks).
+  The events must be a tree's, each key once per mapping: a walked value
+  is one by construction, and a host that streams a parse refuses a
+  member the parse repeats, since YAML forbids a repeated key and the
+  render writes what it is given. Events no tree has fail with
+  `PROTOCOL_ORDER_ERROR` (`fail :protocol-order`); nothing else is
+  refused. Its state is the stack of open containers, so it grows with a
+  document's nesting, never with its width.
 - **The manifest's `translate` object**, in
   [`tabnas.plugin.json`](tabnas.plugin.json): YAML reads as a tree and
-  writes from one (`reads`, `writes`), the render is that file
-  (`render`), and `loss` is the sentences the host prints about what a
-  written document does not keep (comments, anchors and aliases, tags,
-  styles, a stream of several documents). There is no `lift`: YAML's
-  events carry the tree already. Admin's descriptor task keeps the
-  object and checks its shape.
+  writes from one (`reads`, `writes`), its render takes any root
+  (`root`: `any`), the render is that file (`render`), and `loss` is the
+  sentences the host prints about what a written document does not keep
+  (comments, anchors and aliases, tags, styles, a stream of several
+  documents). There is no `lift`, since YAML's events carry the tree
+  already, and no `embed` or `schema`, since that tree is a plain one.
+  Admin's descriptor task keeps the object and checks its shape.
 
-The Rust crate hands both over as `manifest_text()` and `render_text()`.
-A crate packaged for crates.io holds nothing outside `rs/`, so it embeds
-its own copies, `rs/translate/manifest.json` and
-`rs/translate/render.alc`: **change the file at the root, then copy it
-there.** `rs/tests/translate_test.rs` holds the two together: the
-embedded manifest is `tabnas.plugin.json`, the file it names is the
-embedded render, the shapes and the loss are well formed, and every
-definition is named for YAML. What it cannot
-check is the render itself, since this repository does not depend on
-alchemy (that is the maintainer's call, like any dependency). The round
-trip that does, every YAML fixture read, written through the render and
-read back to the same value, runs in aless's suite, which has both
-crates. The reader defects that round trip used to meet, a quoted key at
-the start of a line after a block sequence
-([tabnas/yaml#86](https://github.com/tabnas/yaml/issues/86)) and a flow
-sequence first in an indented block sequence
-([tabnas/yaml#88](https://github.com/tabnas/yaml/issues/88)), are fixed,
-and `test/spec/issue-regressions.tsv` holds them; the round trip's ledger
-of those cases empties once aless takes this release. Change the render
-there first, and keep the naming rule.
+Every runtime hands both over: `translate()` in TypeScript
+(`ts/src/translate.ts`), `Translate()` in Go (`go/translate.go`, with the
+copies in `go/translate/`), and `translate()`, `manifest_text()` and
+`render_text()` in Rust (the copies in `rs/translate/`, since a crate
+packaged for crates.io holds nothing outside `rs/`). Each part's `embed`
+field is absent, as the manifest names none. **Change the file at the
+root, then run `npm run embed` in `ts/`**, which writes all three copies
+(`ts/embed-translate.js`); never edit a copy. Each runtime's translation
+test (`ts/test/translate.test.ts`, `go/translate_test.go`,
+`rs/tests/translate_test.rs`) holds the copies to the files, checks the
+embed absent, and the Rust one checks the shapes and the loss are well
+formed and every definition is named for YAML. What they cannot check is
+the render itself, since this repository does not depend on alchemy
+(that is the maintainer's call, like any dependency). The round trip
+that does, every YAML fixture read, written through the render and read
+back to the same value, runs in aless's suite, which has both crates.
+
+The reader defects that round trip has met are fixed, and
+`test/spec` holds each in every runtime:
+
+- a quoted key at the start of a line after a block sequence
+  ([tabnas/yaml#86](https://github.com/tabnas/yaml/issues/86)) and a flow
+  sequence first in an indented block sequence
+  ([tabnas/yaml#88](https://github.com/tabnas/yaml/issues/88)), in
+  `issue-regressions.tsv`;
+- a quoted `<<` key read as the merge key, which dropped the key the
+  render writes for a JSON member named `<<`: only a plain `<<` merges
+  now, since a quoted scalar is always a string (`merge-key.tsv`);
+- a quoted explicit key (`? "k"`, which the render writes for a key past
+  1024 characters) that took only some of the double-quoted escapes and
+  was read with its quotes otherwise: it takes every escape now, `\b`,
+  `\f`, `\x`, `\u`, `\U` and the rest (`complex-keys.tsv`).
+
+Keep the naming rule when you change the render.
 
 ## Repo-specific gotchas
 
@@ -367,6 +386,16 @@ there first, and keep the naming rule.
   there, because the canonical matcher assigns columns the engine's own
   advancement would not produce and `@val-set-el-in` reads one. See the
   module note at the top of `rs/src/lex.rs`.
+- **Only a plain `<<` is the merge key.** A quoted `"<<"` or `'<<'` is a
+  string, so an ordinary key: the `pair` rule notes a `<<` whose key token
+  is a quoted scalar's (`#ST`, or the token after a flow `?`) on the
+  mapping's node, and the `map` rule's after-close leaves that mapping
+  unmerged. The node is the mark because every pair of a mapping shares
+  it: a WeakSet of nodes in TypeScript, which needs no reset since every
+  parse builds fresh ones; a map of nodes in Go, reset with the thirteen
+  variables above; an entry in `Context::u` in Rust, named by the node
+  cell's address. A quoted explicit key (`? "<<"`) is a `#ST` token too,
+  as an implicit one is.
 - **A block scalar indicator followed by text on the same line
   (`a: > x`) is NOT a block scalar.** YAML calls that an error; this
   plugin falls through to plain-scalar handling and yields
