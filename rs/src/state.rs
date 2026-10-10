@@ -69,6 +69,11 @@ pub(crate) const V_POS: &str = "yamlVirtualPos";
 /// produced no token. See [`crate::text::check`].
 pub(crate) const MOVED: &str = "yamlMoved";
 
+/// `literalMergeKey`: the mappings whose `<<` key was quoted, each named
+/// by the address of the node cell its pairs share, so that the map rule
+/// leaves them unmerged.
+pub(crate) const LITERAL_MERGE: &str = "yamlLiteralMerge";
+
 pub(crate) fn flag(context: &Context, key: &str) -> bool {
     matches!(context.u.get(key), Some(Value::Bool(true)))
 }
@@ -117,6 +122,17 @@ pub(crate) fn map_set(context: &mut Context, key: &str, entry: String, value: Va
         let mut map = IndexMap::new();
         map.insert(entry, value);
         *slot = Value::object(map);
+    }
+}
+
+/// Remove one entry of an object-valued slot, saying whether it was there.
+pub(crate) fn map_take(context: &mut Context, key: &str, entry: &str) -> bool {
+    match context.u.get_mut(key) {
+        Some(Value::Object(map)) if map.contains_key(entry) => {
+            Arc::make_mut(map).shift_remove(entry);
+            true
+        }
+        _ => false,
     }
 }
 

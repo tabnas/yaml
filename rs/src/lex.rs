@@ -1972,10 +1972,40 @@ fn quoted_key_at(src: &str, index: usize) -> bool {
         && matches!(bytes.get(j + 1), None | Some(b' ' | b'\t' | b'\n' | b'\r'))
 }
 
+/// The single-character escapes of a double-quoted scalar, YAML 1.2's
+/// c-ns-esc-char less `x`, `u` and `U`, which take hexadecimal digits.
+/// Mirrors the canonical `DQ_ESCAPES`.
+fn dq_escape(e: char) -> Option<char> {
+    Some(match e {
+        '0' => '\u{0}',
+        'a' => '\u{7}',
+        'b' => '\u{8}',
+        't' | '\t' => '\t',
+        'n' => '\n',
+        'v' => '\u{b}',
+        'f' => '\u{c}',
+        'r' => '\r',
+        'e' => '\u{1b}',
+        ' ' => ' ',
+        '"' => '"',
+        '/' => '/',
+        '\\' => '\\',
+        'N' => '\u{85}',
+        '_' => '\u{a0}',
+        'L' => '\u{2028}',
+        'P' => '\u{2029}',
+        _ => return None,
+    })
+}
+
 /// `text` with its quotes removed when the whole of it is one quoted
-/// scalar on one line; otherwise `text` unchanged. Double quotes take the
-/// common escapes; single quotes take a doubled quote. Mirrors the
-/// canonical `unquoteWholeScalar`.
+/// scalar on one line; otherwise `text` unchanged. Single quotes take a
+/// doubled quote. Double quotes take every escape YAML 1.2 defines: the
+/// single characters of [`dq_escape`], and `\x`, `\u` and `\U` with
+/// exactly two, four and eight hexadecimal digits, a `\u` high surrogate
+/// followed by a `\u` low one read as the one character they name. A
+/// malformed or unknown escape, a lone surrogate or a quote inside leaves
+/// the text as it is. Mirrors the canonical `unquoteWholeScalar`.
 fn unquote_whole_scalar(text: &str) -> String {
     let chars: Vec<char> = text.chars().collect();
     let Some(&quote) = chars.first() else {
@@ -2002,20 +2032,56 @@ fn unquote_whole_scalar(text: &str) -> String {
             if j >= last {
                 return text.to_string();
             }
-            match chars[j] {
-                'n' => out.push('\n'),
-                't' => out.push('\t'),
-                'r' => out.push('\r'),
-                '0' => out.push('\0'),
-                e @ ('"' | '\\' | '/' | ' ') => out.push(e),
-                _ => return text.to_string(),
+            let e = chars[j];
+            if let Some(simple) = dq_escape(e) {
+                out.push(simple);
+                j += 1;
+                continue;
             }
+            let width = match e {
+                'x' => 2,
+                'u' => 4,
+                'U' => 8,
+                _ => return text.to_string(),
+            };
+            let Some(mut code) = hex_at(&chars, j + 1, width, last) else {
+                return text.to_string();
+            };
+            j += width;
+            if e == 'u'
+                && (0xd800..=0xdbff).contains(&code)
+                && chars.get(j + 1) == Some(&'\\')
+                && chars.get(j + 2) == Some(&'u')
+            {
+                if let Some(low) =
+                    hex_at(&chars, j + 3, 4, last).filter(|low| (0xdc00..=0xdfff).contains(low))
+                {
+                    code = 0x10000 + ((code - 0xd800) << 10) + (low - 0xdc00);
+                    j += 6;
+                }
+            }
+            let Some(decoded) = char::from_u32(code) else {
+                return text.to_string();
+            };
+            out.push(decoded);
         } else {
             out.push(c);
         }
         j += 1;
     }
     out
+}
+
+/// The number the `width` hexadecimal digits at `at` spell, all of them
+/// before `end`, or `None` when they are not that many. Mirrors the
+/// canonical `hexAt`.
+fn hex_at(chars: &[char], at: usize, width: usize, end: usize) -> Option<u32> {
+    if at + width > end {
+        return None;
+    }
+    chars[at..at + width]
+        .iter()
+        .try_fold(0u32, |n, c| c.to_digit(16).map(|d| n * 16 + d))
 }
 
 fn explicit_key(src: &str, fwd: &str, cursor: (usize, usize, usize), context: &mut Context) -> Act {
@@ -2033,8 +2099,12 @@ fn explicit_key(src: &str, fwd: &str, cursor: (usize, usize, usize), context: &m
     if let Some(stripped) = strip_key_tag(&key) {
         key = stripped;
     }
-    // A quoted explicit key is the scalar inside the quotes (`? "k"` is k).
-    key = unquote_whole_scalar(&key);
+    // A quoted explicit key is the scalar inside the quotes (`? "k"` is k),
+    // and its token is a string's, as a quoted implicit key's is, so that a
+    // quoted `<<` is no merge key here either (as the canonical port).
+    let raw_key = key;
+    key = unquote_whole_scalar(&raw_key);
+    let key_token = if key == raw_key { "#TX" } else { "#ST" };
 
     let mut consumed = key_end;
     while consumed < fwd.len() && !line_end(at(fwd, consumed)) {
@@ -2251,7 +2321,7 @@ fn explicit_key(src: &str, fwd: &str, cursor: (usize, usize, usize), context: &m
         }
         return Act::moved(
             next,
-            Some(Tok::new("#TX", Value::String(key), source, next)),
+            Some(Tok::new(key_token, Value::String(key), source, next)),
         );
     }
 
@@ -2270,7 +2340,7 @@ fn explicit_key(src: &str, fwd: &str, cursor: (usize, usize, usize), context: &m
     );
     Act::moved(
         next,
-        Some(Tok::new("#TX", Value::String(key), source, next)),
+        Some(Tok::new(key_token, Value::String(key), source, next)),
     )
 }
 

@@ -1197,6 +1197,17 @@ fn wire_rules(parser: &mut Tabnas) {
         });
     });
 
+    // A quoted `<<` key is an ordinary key: YAML resolves only a plain
+    // `<<` to the merge key (the merge type is YAML 1.1's, and a quoted
+    // scalar is always a string). The pair notes a quoted one on the
+    // mapping's node cell, which every pair of a mapping shares, and the
+    // map leaves that mapping unmerged, as the canonical port does.
+    parser.define_rule("pair", |spec| {
+        spec.add_bc(|rule, context| {
+            note_literal_merge_key(rule, context);
+        });
+    });
+
     parser.define_rule("map", |spec| {
         spec.add_bo(|rule, _context| {
             if counter(rule, "in").is_none() {
@@ -1204,8 +1215,10 @@ fn wire_rules(parser: &mut Tabnas) {
             }
             set_indent_key(rule, "yamlIn");
         });
-        spec.add_ac(|rule, _context| {
-            apply_merge_keys(rule);
+        spec.add_ac(|rule, context| {
+            if !state::map_take(context, state::LITERAL_MERGE, &cell_address(rule)) {
+                apply_merge_keys(rule);
+            }
         });
     });
 
@@ -1252,6 +1265,32 @@ fn store_elem_pair(rule: &mut Rule) {
     }
     let child = rule.child_node.clone();
     map_insert(&mut rule.node.borrow_mut(), string_of(&key), child);
+}
+
+/// Note a quoted `<<` key on the mapping it belongs to: the key a pair
+/// names is `<<`, and its token is a quoted scalar's (`#ST`), the token
+/// after the `?` of an explicit key in a flow mapping.
+fn note_literal_merge_key(rule: &Rule, context: &mut Context) {
+    let token = match rule.o0() {
+        Some(token) if token.name.as_ref() == "#QM" => rule.o1(),
+        other => other,
+    };
+    let quoted = token.is_some_and(|token| token.tin == TIN_ST);
+    if quoted && matches!(rule.u.get("key"), Some(Value::String(key)) if key == "<<") {
+        state::map_set(
+            context,
+            state::LITERAL_MERGE,
+            cell_address(rule),
+            Value::Bool(true),
+        );
+    }
+}
+
+/// The address of a rule's node cell. A mapping's pairs share its cell,
+/// and the cell lives as long as the parse that built it, so the address
+/// names the mapping.
+fn cell_address(rule: &Rule) -> String {
+    format!("{:p}", Rc::as_ptr(&rule.node))
 }
 
 /// Resolve a `<<` merge key in place: the merged entries are appended
@@ -1631,6 +1670,8 @@ pub struct TranslationParts {
     pub manifest: &'static str,
     /// An optional lift from the grammar's events to its first read shape.
     pub lift: Option<TranslationPart>,
+    /// An optional embedding of a plain tree in the format's schema, with its reverse.
+    pub embed: Option<TranslationPart>,
     /// An optional render from the write shape to text.
     pub render: Option<TranslationPart>,
 }
@@ -1638,6 +1679,7 @@ pub struct TranslationParts {
 const TRANSLATION: TranslationParts = TranslationParts {
     manifest: include_str!("../translate/manifest.json"),
     lift: None,
+    embed: None,
     render: Some(TranslationPart {
         entry: "yaml-render",
         source: Some(include_str!("../translate/render.alc")),

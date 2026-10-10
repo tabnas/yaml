@@ -140,6 +140,7 @@ type DocMeta = {
 | Block-scalar indent    | <code>&#124;2</code>          | explicit content indent |
 | Anchor / alias         | `&x 1`, `*x`                  | aliased value copied in |
 | Merge key              | `<<: *x`                      | keys merged, local keys win |
+| Quoted merge key       | `"<<": 1`                     | `{ '<<': 1 }`, an ordinary key |
 | Type tag               | `!!int "42"`                  | `42` (coerced) |
 | `%TAG` directive       | `%TAG !e! tag:example.com/`   | captured (see `meta.directives`) |
 | Explicit flow key      | `{? k : v}`                   | `{ k: 'v' }` |

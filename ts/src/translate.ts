@@ -11,6 +11,7 @@ type TranslationPart = Readonly<{
 type TranslationParts = Readonly<{
   manifest: string
   lift?: TranslationPart
+  embed?: TranslationPart
   render?: TranslationPart
 }>
 
@@ -60,6 +61,7 @@ const TRANSLATION: TranslationParts = Object.freeze({
   "translate": {
     "reads": "tree",
     "writes": "tree",
+    "root": "any",
     "render": "alchemy/render.alc",
     "loss": [
       "Comments are not kept.",
@@ -77,19 +79,23 @@ const TRANSLATION: TranslationParts = Object.freeze({
 ; its entry point is \`yaml-render\`, and nothing else here is the host's to
 ; call.
 ;
-; The profile is always-quoted, as the CSV renderer's is: every string and
-; every key is double-quoted (\`quoted\`: JSON's escapes, which YAML's
-; double-quoted style reads, and the C1 controls its printable set
-; excludes), so that no string reads back as a boolean, a null, a number
-; or a nested mapping. A number is its lexeme, or as the JSON renderer
-; writes it when it has none, and a non-finite one is \`.inf\`, \`-.inf\` or
-; \`.nan\`. A mapping under a key, and a sequence under a key or inside a
-; sequence, start on the next line, two spaces in; a sequence item is
-; \`- \`, and a mapping in a sequence has its first key on the item's line.
-; A container's opening is held until its first child or its end, so an
-; empty one is \`{}\` or \`[]\` on its key's line. A key whose quoted form is
-; longer than 1024 characters, past which YAML stops reading an implicit
-; key, is written explicitly, \`? key\` on its own line.
+; The profile is always-quoted, as the CSV renderer's is: every string
+; and every key is double-quoted (\`quoted\`: JSON's escapes, which YAML's
+; double-quoted style reads, and the C1 controls and the noncharacters
+; U+FFFE and U+FFFF, which its printable set excludes; and the line
+; separators U+2028 and U+2029 escaped as well, which YAML 1.2 reads as
+; themselves and YAML 1.1 as line breaks), so that no string reads back
+; as a boolean, a null, a number, a nested mapping or the merge key
+; \`<<\`. A number is its lexeme, or as the JSON renderer writes it when
+; it has none, and a non-finite one is \`.inf\`, \`-.inf\` or \`.nan\`,
+; whatever its lexeme. A mapping under a key, and a sequence under a key
+; or inside a sequence, start on the next line, two spaces in; a
+; sequence item is \`- \`, and a mapping in a sequence has its first key
+; on the item's line. A container's opening is held until its first
+; child or its end, so an empty one is \`{}\` or \`[]\` on its key's line. A
+; key whose written form is longer than 1024 characters, past which YAML
+; stops reading an implicit key, is written explicitly, \`? key\` on its
+; own line.
 ;
 ; The events are a tree's: a mapping holds each key once. A walked value
 ; is one by construction; a host that streams a parse must refuse a
@@ -102,7 +108,8 @@ const TRANSLATION: TranslationParts = Object.freeze({
 ; mapping waiting for a key, \`:member\` for one whose key is written and
 ; waits for the value, and \`:array\` for a sequence waiting for an item.
 ; Once the root value is written the state is \`[:root-done]\`, and nothing
-; may follow it. Events no tree has fail with INPUT_INVALID, saying so.
+; may follow it. Events no tree has fail with PROTOCOL_ORDER_ERROR,
+; saying so.
 
 def yaml-indent [s]
   repeat (count s) "  "
@@ -146,7 +153,7 @@ def yaml-lead [shape s]
           match shape
             case :sequence (concat (yaml-indent (pop s)) "-\\n")
             case _ (concat (yaml-indent (pop s)) "- ")
-        case _ (fail "the events hold a value where a key is due, which a tree's never do")
+        case _ (fail :protocol-order "the events hold a value where a key is due, which a tree's never do")
 
 ; A held sequence is opened by its first item.
 def yaml-opened [s]
@@ -172,6 +179,14 @@ def yaml-number [n]
     case :negative-infinity "-.inf"
     case :nan ".nan"
 
+; A string in the double-quoted form: \`quoted\`'s, with the line
+; separators U+2028 and U+2029, which YAML 1.2 reads as themselves and
+; YAML 1.1 as line breaks, written as their escapes too.
+def yaml-quoted [text]
+  replace-text "\\u2029" "\\\\u2029"
+    replace-text "\\u2028" "\\\\u2028"
+      quoted text
+
 def yaml-scalar [value]
   match (kind value)
     case :null "null"
@@ -180,16 +195,35 @@ def yaml-scalar [value]
         case true "true"
         case false "false"
     case :number (yaml-number value)
-    case _ (quoted value)
+    case _ (yaml-quoted value)
 
-; A key at the column \`at\`: implicit while its quoted form is at most
+; A key at the column \`at\`: implicit while its written form is at most
 ; 1024 characters, past which YAML stops reading an implicit key, and
 ; explicit beyond, \`? key\` on its own line and the value after a \`:\` at
 ; the key's column.
 def yaml-key [name at]
+  match (yaml-implicit-key name)
+    case true (concat (yaml-quoted name) ":")
+    case false (concat "? " (yaml-quoted name) "\\n" at ":")
+
+; Whether a key's written form is at most 1024 characters. It is the
+; quoted form, unless the key holds a line separator, whose escape adds
+; five characters \`length\` cannot count; then a key of at most 170
+; characters is short enough, since no character is written as more
+; than six.
+def yaml-implicit-key [name]
   match (compare (length (quoted name)) 1024)
-    case :greater (concat "? " (quoted name) "\\n" at ":")
-    case _ (concat (quoted name) ":")
+    case :greater false
+    case _
+      match (chars-within yaml-separator-free name)
+        case true true
+        case false
+          match (compare (length name) 170)
+            case :greater false
+            case _ true
+
+; Every character but the line separators U+2028 and U+2029.
+def yaml-separator-free [[0 8231] [8234 1114111]]
 
 ; A key, written where the mapping's keys go.
 def yaml-member [name s]
@@ -198,18 +232,18 @@ def yaml-member [name s]
       transition (yaml-mark :member s) [(yaml-lead :mapping (pop s)) (yaml-key name (yaml-indent (pop s)))]
     case :object
       transition (yaml-mark :member s) [(yaml-indent (pop s)) (yaml-key name (yaml-indent (pop s)))]
-    case _ (fail "the events hold a key where a value is due, which a tree's never do")
+    case _ (fail :protocol-order "the events hold a key where a value is due, which a tree's never do")
 
 ; The state a value may begin in: anywhere but a mapping waiting for a key.
 def yaml-value [s]
   match (yaml-top s)
-    case :object-open (fail "the events hold a value where a key is due, which a tree's never do")
-    case :object (fail "the events hold a value where a key is due, which a tree's never do")
+    case :object-open (fail :protocol-order "the events hold a value where a key is due, which a tree's never do")
+    case :object (fail :protocol-order "the events hold a value where a key is due, which a tree's never do")
     case _ s
 
 def yaml-step [s event]
   match (yaml-top s)
-    case :root-done (fail "the events hold more after the root value, which a tree's never do")
+    case :root-done (fail :protocol-order "the events hold more after the root value, which a tree's never do")
     case _ (yaml-event s event)
 
 def yaml-event [s event]
@@ -229,9 +263,9 @@ def yaml-event [s event]
         case :object
           transition (yaml-done (pop s)) []
         case :member
-          fail "the events end a mapping after a key and before its value, which a tree's never do"
+          fail :protocol-order "the events end a mapping after a key and before its value, which a tree's never do"
         case _
-          fail "the events end a mapping that is not open, which a tree's never do"
+          fail :protocol-order "the events end a mapping that is not open, which a tree's never do"
     case array-end
       match (yaml-top s)
         case :array-open
@@ -239,13 +273,13 @@ def yaml-event [s event]
         case :array
           transition (yaml-done (pop s)) []
         case _
-          fail "the events end a sequence that is not open, which a tree's never do"
+          fail :protocol-order "the events end a sequence that is not open, which a tree's never do"
 
 def yaml-finish [s]
   match (yaml-top s)
     case :root-done []
-    case :none (fail "the events hold no value, where a tree's hold one")
-    case _ (fail "the events ended inside a container")
+    case :none (fail :protocol-order "the events hold no value, where a tree's hold one")
+    case _ (fail :protocol-order "the events ended inside a container")
 
 ; The render: the tree's events in, the document's text out.
 def yaml-render [input]
