@@ -110,6 +110,12 @@ const TRANSLATION: TranslationParts = Object.freeze({
 ; Once the root value is written the state is \`[:root-done]\`, and nothing
 ; may follow it. Events no tree has fail with PROTOCOL_ORDER_ERROR,
 ; saying so.
+;
+; Each value directly inside the root mapping or sequence is a record of
+; the text: the step that ends one answers alchemy's \`:record-end\` after
+; its outputs, and so does the step that opens the root, so a host's
+; writer holds a record until its end, and a run that fails part way
+; leaves whole records behind.
 
 def yaml-indent [s]
   repeat (count s) "  "
@@ -241,6 +247,15 @@ def yaml-value [s]
     case :object (fail :protocol-order "the events hold a value where a key is due, which a tree's never do")
     case _ s
 
+; The outputs of a step whose next state is s, with the end of a record
+; after them when s is one level deep: the root opened, or a value
+; directly inside it ended (or the root itself, where the mark is the
+; document's end).
+def yaml-ended [s outputs]
+  match (count s)
+    case 1 (push :record-end outputs)
+    case _ outputs
+
 def yaml-step [s event]
   match (yaml-top s)
     case :root-done (fail :protocol-order "the events hold more after the root value, which a tree's never do")
@@ -249,19 +264,24 @@ def yaml-step [s event]
 def yaml-event [s event]
   match event
     case object-start
-      transition (push :object-open (yaml-opened (yaml-value s))) [(yaml-opening s)]
+      let [s2 (push :object-open (yaml-opened (yaml-value s)))]
+        transition s2 (yaml-ended s2 [(yaml-opening s)])
     case array-start
-      transition (push :array-open (yaml-opened (yaml-value s))) [(yaml-opening s)]
+      let [s2 (push :array-open (yaml-opened (yaml-value s)))]
+        transition s2 (yaml-ended s2 [(yaml-opening s)])
     case (key name) (yaml-member name s)
     case (scalar value)
       let [s2 (yaml-opened (yaml-value s))]
-        transition (yaml-done s2) [(yaml-opening s) (yaml-lead :scalar s2) (yaml-scalar value) "\\n"]
+        let [s3 (yaml-done s2)]
+          transition s3 (yaml-ended s3 [(yaml-opening s) (yaml-lead :scalar s2) (yaml-scalar value) "\\n"])
     case object-end
       match (yaml-top s)
         case :object-open
-          transition (yaml-done (pop s)) [(yaml-lead :scalar (pop s)) "{}\\n"]
+          let [s2 (yaml-done (pop s))]
+            transition s2 (yaml-ended s2 [(yaml-lead :scalar (pop s)) "{}\\n"])
         case :object
-          transition (yaml-done (pop s)) []
+          let [s2 (yaml-done (pop s))]
+            transition s2 (yaml-ended s2 [])
         case :member
           fail :protocol-order "the events end a mapping after a key and before its value, which a tree's never do"
         case _
@@ -269,9 +289,11 @@ def yaml-event [s event]
     case array-end
       match (yaml-top s)
         case :array-open
-          transition (yaml-done (pop s)) [(yaml-lead :scalar (pop s)) "[]\\n"]
+          let [s2 (yaml-done (pop s))]
+            transition s2 (yaml-ended s2 [(yaml-lead :scalar (pop s)) "[]\\n"])
         case :array
-          transition (yaml-done (pop s)) []
+          let [s2 (yaml-done (pop s))]
+            transition s2 (yaml-ended s2 [])
         case _
           fail :protocol-order "the events end a sequence that is not open, which a tree's never do"
 
