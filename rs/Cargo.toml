@@ -1,6 +1,6 @@
 [package]
 name = "tabnas-yaml"
-version = "0.5.23"
+version = "0.5.24"
 edition = "2021"
 rust-version = "1.85"
 license = "MIT"
