@@ -280,6 +280,45 @@ function yamlTagFloat(raw: string): number {
 }
 
 
+// A member this grammar stores itself, outside the engine's pair rule: a
+// key with no value in a flow mapping, a sequence entry's pair, a merge
+// key's members. With `map.ordered` on, the engine records the members
+// its own rule stores in a key-order side channel, which a reader that
+// walks a mapping in source order follows (`keyOrder`; alchemy-cli's walk
+// of a value); a member stored here is recorded the same way, so that it
+// walks where the document put it, and not after every recorded one. The
+// record is the engine's `recordKeyOrder`, which @tabnas/parser exports
+// after 0.12.12; its text is here until the floor moves.
+const KEY_ORDER = Symbol.for('tabnas.keyOrder')
+
+function storeMember(ctx: Context, node: any, key: string, value: any) {
+  if (ctx.cfg.map && ctx.cfg.map.ordered && !(key in node)) {
+    let order: any[] = node[KEY_ORDER]
+    if (undefined === order) {
+      order = []
+      Object.defineProperty(node, KEY_ORDER, {
+        value: order,
+        enumerable: false,
+        writable: true,
+        configurable: true,
+      })
+    }
+    order.push('' + key)
+  }
+  node[key] = value
+}
+
+// A member this grammar removes (the `<<` of a merge), taken out of the
+// record too, so `keyOrder` lists the members the mapping has.
+function deleteMember(node: any, key: string) {
+  delete node[key]
+  const order: any[] | undefined = node[KEY_ORDER]
+  if (undefined !== order) {
+    const at = order.indexOf(key)
+    if (-1 !== at) order.splice(at, 1)
+  }
+}
+
 const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
   // Install once per instance: a second use(Yaml) on the same instance
   // returns here. options() does not re-run plugins, and make() builds a
@@ -2668,17 +2707,17 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
     '@o0-eq-in': (rule: Rule) => rule.o0.val === rule.n.in,
     '@t0-eq-map-in': (rule: Rule, ctx: Context) => ctx.t0.val === rule.k.yamlMapIn,
     '@elem-key': (rule: Rule) => { rule.u.key = extractKey(rule) },
-    '@implicit-null-pair': (rule: Rule) => {
+    '@implicit-null-pair': (rule: Rule, ctx: Context) => {
       let key = extractKey(rule)
       rule.u.key = key
-      rule.node[key] = null
+      storeMember(ctx, rule.node, key, null)
     },
     // Same as @pairkey, but the KEY is at o1 (after the leading #QM).
     '@qm-pairkey': (rule: Rule) => { rule.u.key = extractKey(rule, rule.o1) },
-    '@qm-implicit-null-pair': (rule: Rule) => {
+    '@qm-implicit-null-pair': (rule: Rule, ctx: Context) => {
       let key = extractKey(rule, rule.o1)
       rule.u.key = key
-      rule.node[key] = null
+      storeMember(ctx, rule.node, key, null)
     },
   }
 
@@ -2951,22 +2990,22 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
       }
       rule.k.yamlIn = rule.n.in
     })
-    rulespec.ac((rule: Rule) => {
+    rulespec.ac((rule: Rule, ctx: Context) => {
       if (rule.node && typeof rule.node === 'object' && '<<' in rule.node &&
           !literalMergeKey.has(rule.node)) {
         let mergeVal = rule.node['<<']
-        delete rule.node['<<']
+        deleteMember(rule.node, '<<')
         if (Array.isArray(mergeVal)) {
           for (let m of mergeVal) {
             if (typeof m === 'object' && m !== null && !Array.isArray(m)) {
               for (let k of Object.keys(m)) {
-                if (!(k in rule.node)) rule.node[k] = m[k]
+                if (!(k in rule.node)) storeMember(ctx, rule.node, k, m[k])
               }
             }
           }
         } else if (typeof mergeVal === 'object' && mergeVal !== null) {
           for (let k of Object.keys(mergeVal)) {
-            if (!(k in rule.node)) rule.node[k] = mergeVal[k]
+            if (!(k in rule.node)) storeMember(ctx, rule.node, k, mergeVal[k])
           }
         }
       }
@@ -2982,11 +3021,14 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
     })
   })
 
-  // yamlElemPair rule: store each pair into the shared map node.
+  // yamlElemPair rule: store each pair into the shared map node. A pair
+  // whose value never arrived (`- a:` before the next entry) is a null
+  // member, as `a:` at the root is and as the Go port stores it: an
+  // undefined member is one JSON drops, and the mapping has the key.
   tabnas.rule('yamlElemPair', (rulespec: RuleSpec) => {
-    rulespec.bc((rule: Rule) => {
+    rulespec.bc((rule: Rule, ctx: Context) => {
       if (rule.u.key != null) {
-        rule.node[rule.u.key] = rule.child.node
+        storeMember(ctx, rule.node, rule.u.key, undefined === rule.child.node ? null : rule.child.node)
       }
     })
   })

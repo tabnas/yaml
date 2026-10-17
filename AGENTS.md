@@ -314,18 +314,47 @@ repository, through any runtime's `translate()`:
   (comments, anchors and aliases, tags, styles, a stream of several
   documents). There is no `lift`, since YAML's events carry the tree
   already, and no `embed` or `schema`, since that tree is a plain one.
+  Its `transduce` names the **transducer part**,
+  [`alchemy/transduce.alc`](alchemy/transduce.alc): the document's JSON
+  events from the grammar's rule passes, hand-written, through which a
+  host that reads parser events (alchemy-cli's `translate` and `run
+  --grammar yaml`) reads a document under the grammar's default options:
+  a `map`'s passes open and close an object, a flow `list`'s an array, a
+  `val` or `indent` whose open pushes the block list an array, a
+  sequence's mapping (`yamlElemMap`, replaced by its pairs) an object
+  ended by its last pair's close, a `pair`'s or `yamlElemPair`'s key
+  from its key token (the one after `?` on an explicit key), held until
+  its value begins, a `val`'s scalar at its close, so that adjacent
+  scalars (`"a" "b"`), an implicit list, start the array before the
+  first; an undefined value is null in a mapping, a sequence's mapping
+  included, at the root and as a block sequence's item, and nothing in
+  a flow sequence; a key with no value in a flow mapping (`{a, b: c}`)
+  is a null member at once; an `indent` opened on a plain scalar (the
+  value on the line after its key, indented) yields it at its close; an
+  unresolved alias is undefined; a separator with no value is a null
+  element; a stream of
+  directives and document markers alone is null. Every event is the one
+  the walk of the grammar's value gives (535 of the 568 fixture inputs
+  stream so), and the part refuses what the passes cannot show, which a
+  host reads whole (`fail :unstreamable`, STREAMABILITY_UNKNOWN): an
+  alias to a mapping or a sequence, whose value the token carries and no
+  part can expand, and a plain `<<` merge key, whose members the grammar
+  folds in after the passes; a stream of several documents is a second
+  root to the host's tree contract, read whole the same way.
   Admin's descriptor task keeps the object and checks its shape.
 
-Every runtime hands both over: `translate()` in TypeScript
+Every runtime hands all three over: `translate()` in TypeScript
 (`ts/src/translate.ts`), `Translate()` in Go (`go/translate.go`, with the
 copies in `go/translate/`), and `translate()`, `manifest_text()` and
 `render_text()` in Rust (the copies in `rs/translate/`, since a crate
-packaged for crates.io holds nothing outside `rs/`). Each part's `embed`
+packaged for crates.io holds nothing outside `rs/`; the transducer is
+the `transduce` field of `translate()`'s parts). Each part's `embed`
 field is absent, as the manifest names none. **Change the file at the
 root, then run `npm run embed` in `ts/`**, which writes all three copies
 (`ts/embed-translate.js`); never edit a copy. Each runtime's translation
 test (`ts/test/translate.test.ts`, `go/translate_test.go`,
-`rs/tests/translate_test.rs`) holds the copies to the files, checks the
+`rs/tests/translate_test.rs`) holds the copies to the files, the
+transducer's among them, checks the
 embed absent, and the Rust one checks the shapes and the loss are well
 formed and every definition is named for YAML. What they cannot check is
 the render itself, since this repository does not depend on alchemy

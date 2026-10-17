@@ -1255,15 +1255,15 @@ fn store_elem_pair(rule: &mut Rule) {
     if matches!(key, Value::Null | Value::Undefined) {
         return;
     }
-    // A pair whose value never arrived (`- i: ` at end of source) is
-    // assigned `undefined` in the canonical implementation, which makes
-    // the key present but drops it from every serialization. This
-    // engine's values turn `Undefined` into null on the way out, so the
-    // entry is left out instead and the serialized map agrees.
-    if rule.child_node.is_undefined() {
-        return;
-    }
-    let child = rule.child_node.clone();
+    // A pair whose value never arrived (`- a:` before the next entry) is
+    // a null member, as `a:` at the root is: the canonical implementation
+    // stores null for it, as the Go port does, and
+    // `test/spec/sequence-of-mappings.tsv` pins the member.
+    let child = if rule.child_node.is_undefined() {
+        Value::Null
+    } else {
+        rule.child_node.clone()
+    };
     map_insert(&mut rule.node.borrow_mut(), string_of(&key), child);
 }
 
@@ -1674,6 +1674,9 @@ pub struct TranslationParts {
     pub embed: Option<TranslationPart>,
     /// An optional render from the write shape to text.
     pub render: Option<TranslationPart>,
+    /// An optional transducer: the format's JSON events from its parser's
+    /// rule passes, for a host that reads parser events.
+    pub transduce: Option<TranslationPart>,
 }
 
 const TRANSLATION: TranslationParts = TranslationParts {
@@ -1683,6 +1686,10 @@ const TRANSLATION: TranslationParts = TranslationParts {
     render: Some(TranslationPart {
         entry: "yaml-render",
         source: Some(include_str!("../translate/render.alc")),
+    }),
+    transduce: Some(TranslationPart {
+        entry: "yaml-transduce",
+        source: Some(include_str!("../translate/transduce.alc")),
     }),
 };
 
@@ -1695,10 +1702,13 @@ pub const fn translate() -> Option<TranslationParts> {
 /// The plugin's manifest, `tabnas.plugin.json`, as the repository carries
 /// it. Its `translate` object is what a host that translates reads: the
 /// shape YAML is read as and written from (`tree`), the file that holds
-/// the render, and the sentences that say what the render does not keep.
-/// The crate embeds its own copy, `translate/manifest.json`, since a
-/// packaged crate holds nothing outside `rs/`; `tests/translate_test.rs`
-/// holds the copy to the file.
+/// the render, the sentences that say what the render does not keep, and
+/// the file that holds the transducer part (`transduce`), the document's
+/// JSON events from the grammar's rule passes under its default options,
+/// through which a host that reads parser events reads a document. The
+/// crate embeds its own copies, `translate/manifest.json` and
+/// `translate/transduce.alc`, since a packaged crate holds nothing outside
+/// `rs/`; `tests/translate_test.rs` holds each copy to its file.
 ///
 /// ```
 /// assert!(tabnas_yaml::manifest_text().contains("\"translate\""));
