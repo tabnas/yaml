@@ -1548,8 +1548,16 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 					case nil:
 						tkn = lex.Token("#VL", VL, nil, fwd[:nameEnd])
 					default:
-						// Complex value — use alias marker for later resolution.
-						tkn = lex.Token("#VL", VL, map[string]any{"__yamlAlias": aliasName}, fwd[:nameEnd])
+						// A mapping or a sequence: its copy, as the
+						// canonical port hands one (`JSON.parse(JSON.
+						// stringify(val))`), so the token carries the
+						// value, and a consumer of the rule passes (a
+						// transducer part) sees what the alias names.
+						// Deferring the copy to the val rule's close
+						// through the marker left the token the same as
+						// an alias to nothing, which the passes could not
+						// tell apart (tabnas/alchemy#81).
+						tkn = lex.Token("#VL", VL, deepCopy(val), fwd[:nameEnd])
 					}
 					advanceCol(pnt, fwd, nameEnd)
 					return tkn
