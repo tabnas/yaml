@@ -1,0 +1,244 @@
+; YAML's transducer part: the document's JSON events from the yaml
+; grammar's rule passes, for a host that reads parser events (alchemy-cli's
+; `translate` and `run --grammar yaml`). It is hand-written, since the
+; grammar builds its block structure and the relaxed forms it shares with
+; jsonic in its actions, which the passes do not show, and every event is
+; the one the walk of the grammar's value under its default options gives:
+; the options every host that reads a part builds the grammar with, which
+; the passes do not carry.
+;
+; The passes: a `map`'s open and close an object, a flow `list`'s an
+; array, and the `val` or `indent` whose open pushes `yamlBlockList`, the
+; block sequence, an array that its own close ends; `yamlBlockList` and
+; `yamlBlockElem`, the items, pass by. A sequence's mapping, `yamlElemMap`
+; (`- a: 1`), opens an object and is replaced by its pairs in the same
+; frame, so the close of its last pair, the one whose alternate replaces
+; it with nothing, ends the object. A `pair` opened on its key alternate,
+; and a `yamlElemPair`, announces its key from its key token (a string's
+; value, any other token's source; the token after `?` on an explicit
+; key), held until the value begins; a pair opened on a separator with no
+; key announces nothing. A `val` yields its scalar at its close, from the
+; value the close carries, so that adjacent scalars (`"a" "b"`), an
+; implicit list the close replaces the val with `list` for, start the
+; array before the first and the list's open starts no second one. An
+; undefined value (`a:`, `- `, an alias nothing defines) is null in a
+; mapping, at the root and as a block sequence's item, nothing in a flow
+; sequence, and nothing, its key dropped, in a sequence's mapping, as the
+; grammar keeps each; an `elem` opened on a separator with no value
+; (`[a, , b]`) is a null element; a stream of directives and document
+; markers alone (`...`) makes a `stream` pass and no value, null at
+; `finish`, as the empty document is.
+;
+; What the passes cannot show the part refuses in its own words
+; (`fail :unstreamable`, STREAMABILITY_UNKNOWN), and a host that reads a
+; part reads such a document whole: an alias to a mapping or a sequence,
+; whose resolved value the token carries whole and no part can expand into
+; events, and a plain `<<` merge key, whose members the grammar folds into
+; the mapping after the passes (a quoted `"<<"` is a member). A stream of
+; several documents streams its first before the sequence of them is
+; known, a second root to the tree contract a host puts after the part,
+; read whole the same way. Over the 566 inputs of `test/spec/*.tsv`, the
+; part writes what the walk writes for 532 and refuses the other 34 so.
+;
+; The state is [stack carry rooted pending]: a marker per open rule whose
+; close will come, innermost last (:object for a map, :array for a flow
+; list, :block-array for the val or indent whose open pushed the block
+; list, :elem-object for a yamlElemMap, :leaf for a val that pushed
+; nothing, :undefined for one whose token is an unresolved alias, :skip
+; for any other rule); whether a val's close made an implicit list, so the
+; list's open starts no array; whether a value has begun; and the key a
+; pair announced whose value has not begun, or missing. Nothing grows with
+; the document's length, only with its nesting, under max_metadata_bytes.
+
+def yaml-transduce-has-key [groups]
+  match (count (filter (fn [g] (match g (case "key" true) (case _ false))) groups))
+    case 0 false
+    case _ true
+
+def yaml-transduce-has-null [groups]
+  match (count (filter (fn [g] (match g (case "null" true) (case _ false))) groups))
+    case 0 false
+    case _ true
+
+def yaml-transduce-key-text [token]
+  match (kind (get :val token))
+    case :string (get :val token)
+    case _ (get :src token)
+
+; The key a pair announces: a plain `<<` is a merge key, whose members
+; the grammar folds into the mapping after the passes, which no part can
+; follow.
+def yaml-transduce-key [token]
+  match (get :name token)
+    case "#TX"
+      match (get :val token)
+        case "<<" (fail :unstreamable "a merge key, whose members the grammar folds into the mapping after the passes")
+        case _ (yaml-transduce-key-text token)
+    case _ (yaml-transduce-key-text token)
+
+; The token a pair's open announces its key with: the first on the key
+; alternate, the one after `?` on an explicit key's (`{? a : 1}`), none
+; on any other (a separator with no key).
+def yaml-transduce-key-token [rule]
+  match (yaml-transduce-has-key (yaml-transduce-groups rule))
+    case true (transduce-token 0 rule)
+    case _
+      match (transduce-token 0 rule)
+        case missing missing
+        case token
+          match (get :name token)
+            case "#QM" (transduce-token 1 rule)
+            case _ missing
+
+; The token a sequence's pair (yamlElemPair) announces its key with: its
+; first, or the one after `?` on an explicit key's.
+def yaml-transduce-elem-key-token [rule]
+  match (transduce-token 0 rule)
+    case missing missing
+    case token
+      match (get :name token)
+        case "#QM" (transduce-token 1 rule)
+        case _ token
+
+def yaml-transduce-groups [rule]
+  match (get :alt rule)
+    case missing []
+    case alt (get :g alt)
+
+def yaml-transduce-pushes [rule]
+  match (get :alt rule)
+    case missing ""
+    case alt (get :p alt)
+
+def yaml-transduce-replaces [rule]
+  match (get :alt rule)
+    case missing ""
+    case alt (get :r alt)
+
+; The innermost container the stack holds, or missing at the root.
+def yaml-transduce-container [stack]
+  let [containers (filter (fn [m] (match m (case :object true) (case :array true) (case :block-array true) (case :elem-object true) (case _ false))) stack)]
+    match (count containers)
+      case 0 missing
+      case _ (top containers)
+
+; A value's first events, after the key pending for it, if one is.
+def yaml-transduce-value [pending events]
+  match pending
+    case missing events
+    case name
+      match (count events)
+        case 1 [(key name) (get-path (path 0) events)]
+        case _ [(key name) (get-path (path 0) events) (get-path (path 1) events)]
+
+; A val that pushed nothing: a leaf, unless its token is an alias, which
+; the grammar resolved to the aliased value; one to a mapping or a
+; sequence holds members the passes do not show, and one to nothing is
+; undefined.
+def yaml-transduce-leaf-open [stack carry pending rule]
+  match (transduce-token 0 rule)
+    case missing (transition [(push :leaf stack) carry true pending] [])
+    case token
+      match (kind (get :val token))
+        case :record
+          match (get "__yamlAlias" (get :val token))
+            case missing (fail :unstreamable "an alias to a mapping, whose members the passes do not show")
+            case _ (transition [(push :undefined stack) carry true pending] [])
+        case :vector (fail :unstreamable "an alias to a sequence, whose elements the passes do not show")
+        case _ (transition [(push :leaf stack) carry true pending] [])
+
+def yaml-transduce-val-open [stack carry pending rule]
+  match (yaml-transduce-pushes rule)
+    case "yamlBlockList" (transition [(push :block-array stack) carry true missing] (yaml-transduce-value pending [array-start]))
+    case "" (yaml-transduce-leaf-open stack carry pending rule)
+    case _ (transition [(push :skip stack) carry true pending] [])
+
+def yaml-transduce-open [stack carry rooted pending rule]
+  match (get :name rule)
+    case "map" (transition [(push :object stack) carry true missing] (yaml-transduce-value pending [object-start]))
+    case "list"
+      match carry
+        case true (transition [(push :array stack) false true pending] [])
+        case _ (transition [(push :array stack) carry true missing] (yaml-transduce-value pending [array-start]))
+    case "val" (yaml-transduce-val-open stack carry pending rule)
+    case "indent"
+      match (yaml-transduce-pushes rule)
+        case "yamlBlockList" (transition [(push :block-array stack) carry true missing] (yaml-transduce-value pending [array-start]))
+        case _ (transition [(push :skip stack) carry rooted pending] [])
+    case "pair"
+      match (yaml-transduce-key-token rule)
+        case missing (transition [(push :skip stack) carry rooted pending] [])
+        case token (transition [(push :skip stack) carry rooted (yaml-transduce-key token)] [])
+    case "elem"
+      match (yaml-transduce-has-null (yaml-transduce-groups rule))
+        case true (transition [(push :skip stack) carry true pending] [(scalar null)])
+        case _ (transition [(push :skip stack) carry rooted pending] [])
+    case "yamlElemMap"
+      match (yaml-transduce-replaces rule)
+        case "yamlElemPair" (transition [(push :elem-object stack) carry true missing] (yaml-transduce-value pending [object-start]))
+        case _ (transition [(push :object stack) carry true missing] (yaml-transduce-value pending [object-start]))
+    case "yamlElemPair"
+      match (yaml-transduce-elem-key-token rule)
+        case missing (transition [(push :skip stack) carry rooted pending] [])
+        case token (transition [(push :skip stack) carry rooted (yaml-transduce-key token)] [])
+    case "stream"
+      match (yaml-transduce-replaces rule)
+        case "stream" (transition [stack carry rooted pending] [])
+        case _ (transition [(push :skip stack) carry rooted pending] [])
+    case _ (transition [(push :skip stack) carry rooted pending] [])
+
+; An undefined value: null in a mapping, at the root and as a block
+; sequence's item; nothing in a flow sequence; and nothing, its key
+; dropped, in a sequence's mapping, as the grammar keeps each.
+def yaml-transduce-undefined [rest carry pending]
+  match (yaml-transduce-container rest)
+    case :array (transition [rest carry true missing] [])
+    case :elem-object (transition [rest carry true missing] [])
+    case _ (transition [rest carry true missing] (yaml-transduce-value pending [(scalar null)]))
+
+; A leaf's close: its value, from the value the close carries; a close
+; whose alternate replaces the val with list is the first element of an
+; implicit list, which starts before it.
+def yaml-transduce-leaf [rest carry pending rule]
+  match (get :value rule)
+    case missing (yaml-transduce-undefined rest carry pending)
+    case value
+      match (yaml-transduce-replaces rule)
+        case "list" (transition [rest true true missing] (yaml-transduce-value pending [array-start (scalar value)]))
+        case _ (transition [rest carry true missing] (yaml-transduce-value pending [(scalar value)]))
+
+def yaml-transduce-close [stack carry rooted pending rule]
+  let [rest (pop stack)]
+    match (top stack)
+      case :leaf (yaml-transduce-leaf rest carry pending rule)
+      case :undefined (yaml-transduce-undefined rest carry pending)
+      case :object (transition [rest carry rooted pending] [object-end])
+      case :array (transition [rest carry rooted pending] [array-end])
+      case :block-array (transition [rest carry rooted pending] [array-end])
+      case :elem-object (transition [rest carry rooted pending] [object-end])
+      case _
+        match (get :name rule)
+          case "yamlElemPair"
+            match (yaml-transduce-replaces rule)
+              case "yamlElemPair" (transition [rest carry rooted pending] [])
+              case _
+                match (top rest)
+                  case :elem-object (transition [(pop rest) carry rooted pending] [object-end])
+                  case _ (transition [rest carry rooted pending] [])
+          case _ (transition [rest carry rooted pending] [])
+
+def yaml-transduce-step [state pass]
+  match state
+    case [stack carry rooted pending]
+      match pass
+        case (open rule) (yaml-transduce-open stack carry rooted pending rule)
+        case (close rule) (yaml-transduce-close stack carry rooted pending rule)
+
+def yaml-transduce-finish [state]
+  match state
+    case [[] carry false pending] [(scalar null)]
+    case [[] carry true pending] []
+    case _ (fail :protocol-order "the rule passes ended inside a container, which a tree's never do")
+
+def yaml-transduce [input]
+  as-events (scan-emit [[] false false missing] yaml-transduce-step yaml-transduce-finish (parser-events input))

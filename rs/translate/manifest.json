@@ -45,6 +45,7 @@
     "writes": "tree",
     "root": "any",
     "render": "alchemy/render.alc",
+    "transduce": "alchemy/transduce.alc",
     "loss": [
       "Comments are not kept.",
       "Anchors and aliases are not kept: an alias is written as a copy of the value it names.",

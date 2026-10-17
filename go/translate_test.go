@@ -36,6 +36,23 @@ func TestTranslationParts(t *testing.T) {
 	}
 }
 
+// The transducer part the manifest names is the one the package embeds,
+// under the entry a host calls.
+func TestTranslationTransduce(t *testing.T) {
+	inCheckout(t)
+	parts := Translate()
+	if parts.Transduce == nil || parts.Transduce.Entry != "yaml-transduce" {
+		t.Fatalf("transduce entry is %#v", parts.Transduce)
+	}
+	transduce, err := os.ReadFile("../alchemy/transduce.alc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parts.Transduce.Source != string(transduce) {
+		t.Fatal("embedded transducer differs from alchemy/transduce.alc")
+	}
+}
+
 // An embed takes a plain tree into a format's own schema. YAML's events
 // carry a plain tree, so its manifest names none and the package carries
 // none; a manifest that named one would be held to its file here, as the

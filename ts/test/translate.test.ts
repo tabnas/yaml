@@ -20,6 +20,16 @@ test('translation parts expose the manifest, source and explicit entry', () => {
     readFileSync(path.join(root, 'alchemy', 'render.alc'), 'utf8'))
 })
 
+// The transducer part the manifest names is the one the package carries,
+// under the entry a host calls.
+test('translation parts carry the transducer the manifest names', () => {
+  const parts = translate()
+  assert.equal(parts.transduce?.entry, 'yaml-transduce')
+  assert.equal(
+    parts.transduce?.source,
+    readFileSync(path.join(root, 'alchemy', 'transduce.alc'), 'utf8'))
+})
+
 // An embed takes a plain tree into a format's own schema. YAML's events
 // carry a plain tree, so its manifest names none and the package carries
 // none; a manifest that named one would be held to its file here, as the
