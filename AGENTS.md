@@ -334,7 +334,7 @@ repository, through any runtime's `translate()`:
   unresolved alias is undefined; a separator with no value is a null
   element; a stream of
   directives and document markers alone is null. Every event is the one
-  the walk of the grammar's value gives (533 of the 566 fixture inputs
+  the walk of the grammar's value gives (535 of the 568 fixture inputs
   stream so), and the part refuses what the passes cannot show, which a
   host reads whole (`fail :unstreamable`, STREAMABILITY_UNKNOWN): an
   alias to a mapping or a sequence, whose value the token carries and no
