@@ -1255,15 +1255,15 @@ fn store_elem_pair(rule: &mut Rule) {
     if matches!(key, Value::Null | Value::Undefined) {
         return;
     }
-    // A pair whose value never arrived (`- i: ` at end of source) is
-    // assigned `undefined` in the canonical implementation, which makes
-    // the key present but drops it from every serialization. This
-    // engine's values turn `Undefined` into null on the way out, so the
-    // entry is left out instead and the serialized map agrees.
-    if rule.child_node.is_undefined() {
-        return;
-    }
-    let child = rule.child_node.clone();
+    // A pair whose value never arrived (`- a:` before the next entry) is
+    // a null member, as `a:` at the root is: the canonical implementation
+    // stores null for it, as the Go port does, and
+    // `test/spec/sequence-of-mappings.tsv` pins the member.
+    let child = if rule.child_node.is_undefined() {
+        Value::Null
+    } else {
+        rule.child_node.clone()
+    };
     map_insert(&mut rule.node.borrow_mut(), string_of(&key), child);
 }
 

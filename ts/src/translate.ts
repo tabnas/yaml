@@ -333,10 +333,13 @@ def yaml-render [input]
 ; value the close carries, so that adjacent scalars (\`"a" "b"\`), an
 ; implicit list the close replaces the val with \`list\` for, start the
 ; array before the first and the list's open starts no second one. An
-; undefined value (\`a:\`, \`- \`, an alias nothing defines) is null in a
-; mapping, at the root and as a block sequence's item, nothing in a flow
-; sequence, and nothing, its key dropped, in a sequence's mapping, as the
-; grammar keeps each; an \`elem\` opened on a separator with no value
+; undefined value (\`a:\`, \`- a:\`, \`- \`, an alias nothing defines) is null
+; in a mapping, at the root and as a block sequence's item, and nothing in
+; a flow sequence, as the grammar keeps each; a pair opened on a key with
+; no value in a flow mapping (\`{a, b: c}\`) is a null member at once, as
+; the grammar stores it; an \`indent\` opened on a plain scalar (\`a:\` and
+; the scalar on the next line, indented) yields it at its close, as a
+; \`val\` does; an \`elem\` opened on a separator with no value
 ; (\`[a, , b]\`) is a null element; a stream of directives and document
 ; markers alone (\`...\`) makes a \`stream\` pass and no value, null at
 ; \`finish\`, as the empty document is.
@@ -369,6 +372,11 @@ def yaml-transduce-has-key [groups]
 
 def yaml-transduce-has-null [groups]
   match (count (filter (fn [g] (match g (case "null" true) (case _ false))) groups))
+    case 0 false
+    case _ true
+
+def yaml-transduce-has-yaml [groups]
+  match (count (filter (fn [g] (match g (case "yaml" true) (case _ false))) groups))
     case 0 false
     case _ true
 
@@ -465,6 +473,19 @@ def yaml-transduce-val-open [stack carry pending rule]
     case "" (yaml-transduce-leaf-open stack carry pending rule)
     case _ (transition [(push :skip stack) carry true pending] [])
 
+; A pair whose alternate pushes nothing: on the grammar's own alternates
+; for a key with no value in a flow mapping (\`{a, b: c}\`, \`{? a, b: c}\`),
+; which consume the key (the one after \`?\` on an explicit key's) and
+; store the member as null at once, the member; on a separator with no
+; key, or the end of the source, nothing.
+def yaml-transduce-pair-without-value [stack carry rooted pending rule]
+  match (yaml-transduce-has-yaml (yaml-transduce-groups rule))
+    case true
+      match (yaml-transduce-elem-key-token rule)
+        case missing (transition [(push :skip stack) carry rooted pending] [])
+        case token (transition [(push :skip stack) carry true missing] (yaml-transduce-value pending [(key (yaml-transduce-key token)) (scalar null)]))
+    case _ (transition [(push :skip stack) carry rooted pending] [])
+
 def yaml-transduce-open [stack carry rooted pending rule]
   match (get :name rule)
     case "map" (transition [(push :object stack) carry true missing] (yaml-transduce-value pending [object-start]))
@@ -476,11 +497,15 @@ def yaml-transduce-open [stack carry rooted pending rule]
     case "indent"
       match (yaml-transduce-pushes rule)
         case "yamlBlockList" (transition [(push :block-array stack) carry true missing] (yaml-transduce-value pending [array-start]))
+        case "" (transition [(push :leaf stack) carry true pending] [])
         case _ (transition [(push :skip stack) carry rooted pending] [])
     case "pair"
-      match (yaml-transduce-key-token rule)
-        case missing (transition [(push :skip stack) carry rooted pending] [])
-        case token (transition [(push :skip stack) carry rooted (yaml-transduce-key token)] [])
+      match (yaml-transduce-pushes rule)
+        case "" (yaml-transduce-pair-without-value stack carry rooted pending rule)
+        case _
+          match (yaml-transduce-key-token rule)
+            case missing (transition [(push :skip stack) carry rooted pending] [])
+            case token (transition [(push :skip stack) carry rooted (yaml-transduce-key token)] [])
     case "elem"
       match (yaml-transduce-has-null (yaml-transduce-groups rule))
         case true (transition [(push :skip stack) carry true pending] [(scalar null)])
@@ -499,13 +524,12 @@ def yaml-transduce-open [stack carry rooted pending rule]
         case _ (transition [(push :skip stack) carry rooted pending] [])
     case _ (transition [(push :skip stack) carry rooted pending] [])
 
-; An undefined value: null in a mapping, at the root and as a block
-; sequence's item; nothing in a flow sequence; and nothing, its key
-; dropped, in a sequence's mapping, as the grammar keeps each.
+; An undefined value: null in a mapping, a sequence's mapping included, at
+; the root and as a block sequence's item; nothing in a flow sequence, as
+; the grammar keeps each.
 def yaml-transduce-undefined [rest carry pending]
   match (yaml-transduce-container rest)
     case :array (transition [rest carry true missing] [])
-    case :elem-object (transition [rest carry true missing] [])
     case _ (transition [rest carry true missing] (yaml-transduce-value pending [(scalar null)]))
 
 ; A leaf's close: its value, from the value the close carries; a close

@@ -326,10 +326,13 @@ repository, through any runtime's `translate()`:
   from its key token (the one after `?` on an explicit key), held until
   its value begins, a `val`'s scalar at its close, so that adjacent
   scalars (`"a" "b"`), an implicit list, start the array before the
-  first; an undefined value is null in a mapping, at the root and as a
-  block sequence's item, nothing in a flow sequence, and nothing, its
-  key dropped, in a sequence's mapping; an unresolved alias is
-  undefined; a separator with no value is a null element; a stream of
+  first; an undefined value is null in a mapping, a sequence's mapping
+  included, at the root and as a block sequence's item, and nothing in
+  a flow sequence; a key with no value in a flow mapping (`{a, b: c}`)
+  is a null member at once; an `indent` opened on a plain scalar (the
+  value on the line after its key, indented) yields it at its close; an
+  unresolved alias is undefined; a separator with no value is a null
+  element; a stream of
   directives and document markers alone is null. Every event is the one
   the walk of the grammar's value gives (533 of the 566 fixture inputs
   stream so), and the part refuses what the passes cannot show, which a

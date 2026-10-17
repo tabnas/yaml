@@ -2982,11 +2982,14 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
     })
   })
 
-  // yamlElemPair rule: store each pair into the shared map node.
+  // yamlElemPair rule: store each pair into the shared map node. A pair
+  // whose value never arrived (`- a:` before the next entry) is a null
+  // member, as `a:` at the root is and as the Go port stores it: an
+  // undefined member is one JSON drops, and the mapping has the key.
   tabnas.rule('yamlElemPair', (rulespec: RuleSpec) => {
     rulespec.bc((rule: Rule) => {
       if (rule.u.key != null) {
-        rule.node[rule.u.key] = rule.child.node
+        rule.node[rule.u.key] = undefined === rule.child.node ? null : rule.child.node
       }
     })
   })
