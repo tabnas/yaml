@@ -173,7 +173,7 @@ All numbers (including hex/octal/binary integers) come back as
 | Anchor / alias         | `&x 1`, `*x`                  | aliased value copied in |
 | Merge key              | `<<: *x`                      | keys merged, local keys win |
 | Quoted merge key       | `"<<": 1`                     | `map[<<:1]`, an ordinary key |
-| Repeated key           | `a: {b: 1}` then `a: {c: 2}`  | `map[a:map[b:1 c:2]]`, merged as jsonic merges; `Map.Extend` false keeps the later |
+| Repeated key           | `a: {b: 1}` then `a: {c: 2}`  | `map[a:map[b:1 c:2]]`, merged as jsonic merges, or the later value with `Map.Extend` false |
 | Type tag               | `!!int "42"`                  | `float64(42)` (coerced) |
 | `%TAG` directive       | `%TAG !e! tag:example.com/`   | captured (see `Meta.Directives`) |
 | Explicit flow key      | `{? k : v}`                   | `map[k:v]` |
