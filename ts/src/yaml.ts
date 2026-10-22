@@ -282,7 +282,12 @@ function yamlTagFloat(raw: string): number {
 
 // A member this grammar stores itself, outside the engine's pair rule: a
 // key with no value in a flow mapping, a sequence entry's pair, a merge
-// key's members. With `map.ordered` on, the engine records the members
+// key's members. A key the mapping holds already is combined as the pair
+// rule combines one (jsonic's `pairval`): through the grammar's
+// `map.merge` when it has one, else merged deep under `map.extend`, the
+// default, else replaced by the later value; an earlier null is replaced.
+// So `- a: {b: 1}` and `a: {c: 2}` in one sequence entry merge as they
+// do at the root. With `map.ordered` on, the engine records the members
 // its own rule stores in a key-order side channel, which a reader that
 // walks a mapping in source order follows (`keyOrder`; alchemy-cli's walk
 // of a value); a member stored here is recorded the same way, so that it
@@ -291,7 +296,17 @@ function yamlTagFloat(raw: string): number {
 // after 0.12.12; its text is here until the floor moves.
 const KEY_ORDER = Symbol.for('tabnas.keyOrder')
 
-function storeMember(ctx: Context, node: any, key: string, value: any) {
+function storeMember(rule: Rule, ctx: Context, key: string, value: any) {
+  const node = rule.node
+  const prev = node[key]
+  if (null != prev) {
+    const map = ctx.cfg.map
+    value = map && map.merge
+      ? map.merge(prev, value, rule, ctx)
+      : !map || map.extend
+        ? Tabnas.util.deep(prev, value)
+        : value
+  }
   if (ctx.cfg.map && ctx.cfg.map.ordered && !(key in node)) {
     let order: any[] = node[KEY_ORDER]
     if (undefined === order) {
@@ -2710,14 +2725,14 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
     '@implicit-null-pair': (rule: Rule, ctx: Context) => {
       let key = extractKey(rule)
       rule.u.key = key
-      storeMember(ctx, rule.node, key, null)
+      storeMember(rule, ctx, key, null)
     },
     // Same as @pairkey, but the KEY is at o1 (after the leading #QM).
     '@qm-pairkey': (rule: Rule) => { rule.u.key = extractKey(rule, rule.o1) },
     '@qm-implicit-null-pair': (rule: Rule, ctx: Context) => {
       let key = extractKey(rule, rule.o1)
       rule.u.key = key
-      storeMember(ctx, rule.node, key, null)
+      storeMember(rule, ctx, key, null)
     },
   }
 
@@ -2999,13 +3014,13 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
           for (let m of mergeVal) {
             if (typeof m === 'object' && m !== null && !Array.isArray(m)) {
               for (let k of Object.keys(m)) {
-                if (!(k in rule.node)) storeMember(ctx, rule.node, k, m[k])
+                if (!(k in rule.node)) storeMember(rule, ctx, k, m[k])
               }
             }
           }
         } else if (typeof mergeVal === 'object' && mergeVal !== null) {
           for (let k of Object.keys(mergeVal)) {
-            if (!(k in rule.node)) storeMember(ctx, rule.node, k, mergeVal[k])
+            if (!(k in rule.node)) storeMember(rule, ctx, k, mergeVal[k])
           }
         }
       }
@@ -3028,7 +3043,7 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
   tabnas.rule('yamlElemPair', (rulespec: RuleSpec) => {
     rulespec.bc((rule: Rule, ctx: Context) => {
       if (rule.u.key != null) {
-        storeMember(ctx, rule.node, rule.u.key, undefined === rule.child.node ? null : rule.child.node)
+        storeMember(rule, ctx, rule.u.key, undefined === rule.child.node ? null : rule.child.node)
       }
     })
   })

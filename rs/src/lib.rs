@@ -323,6 +323,31 @@ fn map_insert(node: &mut Value, key: String, value: Value) {
     }
 }
 
+/// Set a member this grammar stores itself, outside the engine's pair
+/// rule: a key with no value in a flow mapping, and a sequence entry's
+/// pair. A key the mapping holds already is combined as jsonic's `pairval`
+/// combines one: through the grammar's `map.merge` when it has one, else
+/// merged deep under `map.extend`, the default, else replaced by the later
+/// value; an earlier null is replaced. So `- a: {b: 1}` and `a: {c: 2}` in
+/// one sequence entry merge as they do at the root, as the canonical
+/// TypeScript stores them.
+fn store_member(rule: &mut Rule, context: &mut Context, key: String, value: Value) {
+    let previous = map_entries(&rule.node.borrow()).and_then(|map| map.get(&key).cloned());
+    let value = match previous {
+        None | Some(Value::Null) | Some(Value::Undefined) => value,
+        Some(previous) => {
+            if let Some(merge) = context.options.map.merge.clone() {
+                merge(previous, value, rule, context)
+            } else if context.options.map.extend {
+                tabnas_jsonic::deep_merge(previous, value)
+            } else {
+                value
+            }
+        }
+    };
+    map_insert(&mut rule.node.borrow_mut(), key, value);
+}
+
 fn map_entries(node: &Value) -> Option<&IndexMap<String, Value>> {
     match node {
         Value::Object(map) => Some(map),
@@ -845,7 +870,7 @@ fn register_refs(parser: &mut Tabnas) {
     parser.action_with_context("@implicit-null-pair", |rule, context| {
         let key = token_key(rule, 0, context);
         rule.u_mut().insert("key".to_string(), key.clone());
-        map_insert(&mut rule.node.borrow_mut(), string_of(&key), Value::Null);
+        store_member(rule, context, string_of(&key), Value::Null);
         Ok(())
     });
     parser.action_with_context("@qm-pairkey", |rule, context| {
@@ -856,7 +881,7 @@ fn register_refs(parser: &mut Tabnas) {
     parser.action_with_context("@qm-implicit-null-pair", |rule, context| {
         let key = token_key(rule, 1, context);
         rule.u_mut().insert("key".to_string(), key.clone());
-        map_insert(&mut rule.node.borrow_mut(), string_of(&key), Value::Null);
+        store_member(rule, context, string_of(&key), Value::Null);
         Ok(())
     });
 
@@ -1232,8 +1257,8 @@ fn wire_rules(parser: &mut Tabnas) {
     });
 
     parser.define_rule("yamlElemPair", |spec| {
-        spec.add_bc(|rule, _context| {
-            store_elem_pair(rule);
+        spec.add_bc(|rule, context| {
+            store_elem_pair(rule, context);
         });
     });
 }
@@ -1248,7 +1273,7 @@ fn set_indent_key(rule: &mut Rule, name: &str) {
     rule.k_mut().insert(name.to_string(), indent);
 }
 
-fn store_elem_pair(rule: &mut Rule) {
+fn store_elem_pair(rule: &mut Rule, context: &mut Context) {
     let Some(key) = rule.u.get("key").cloned() else {
         return;
     };
@@ -1264,7 +1289,7 @@ fn store_elem_pair(rule: &mut Rule) {
     } else {
         rule.child_node.clone()
     };
-    map_insert(&mut rule.node.borrow_mut(), string_of(&key), child);
+    store_member(rule, context, string_of(&key), child);
 }
 
 /// Note a quoted `<<` key on the mapping it belongs to: the key a pair

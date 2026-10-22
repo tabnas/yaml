@@ -141,6 +141,7 @@ type DocMeta = {
 | Anchor / alias         | `&x 1`, `*x`                  | aliased value copied in |
 | Merge key              | `<<: *x`                      | keys merged, local keys win |
 | Quoted merge key       | `"<<": 1`                     | `{ '<<': 1 }`, an ordinary key |
+| Repeated key           | `a: {b: 1}` then `a: {c: 2}`  | `{ a: { b: 1, c: 2 } }`, merged as jsonic merges, or the later value with `map.extend: false` |
 | Type tag               | `!!int "42"`                  | `42` (coerced) |
 | `%TAG` directive       | `%TAG !e! tag:example.com/`   | captured (see `meta.directives`) |
 | Explicit flow key      | `{? k : v}`                   | `{ k: 'v' }` |
