@@ -352,8 +352,13 @@ def yaml-render [input]
 ; the mapping after the passes (a quoted \`"<<"\` is a member). A stream of
 ; several documents streams its first before the sequence of them is
 ; known, a second root to the tree contract a host puts after the part,
-; read whole the same way. Over the 568 inputs of \`test/spec/*.tsv\`, the
-; part writes what the walk writes for 535 and refuses the other 33 so.
+; read whole the same way; so is a mapping that repeats a key, whose
+; values the grammar merges, where the part writes the member twice and
+; the same contract refuses the second. Over the 601 inputs of
+; \`test/spec/*.tsv\`, the part writes what the walk writes for 547; of the
+; other 54, it refuses 15 (13 merge keys, 2 aliases to a collection) and
+; the tree contract 39 (18 streams of several documents, 21 repeated
+; keys), each read whole.
 ;
 ; The state is [stack carry rooted pending]: a marker per open rule whose
 ; close will come, innermost last (:object for a map, :array for a flow

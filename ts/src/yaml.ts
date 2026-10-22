@@ -2696,17 +2696,52 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
     return ST === tkn.tin || TX === tkn.tin ? tkn.val : tkn.src
   }
 
+  // The column the mapping of a block sequence's entry starts at, on the
+  // line of the source index `at`: past the line's indentation and every
+  // `- ` that leads it, as a block scalar's explicit indent counts its
+  // key's column above. `- a: 1` starts at 2, `-   a: 1` and `- - a: 1`
+  // at 4, and `- &x a: 1` at 2, where the anchor starts the mapping ahead
+  // of its first key's own token.
+  function entryColumn(src: string, at: number): number {
+    let li = at
+    while (li > 0 && src[li - 1] !== '\n' && src[li - 1] !== '\r') li--
+    if (0 === li && 0xFEFF === src.charCodeAt(0)) li = 1
+    let col = 0
+    let i = li
+    while (i < at && ' ' === src[i]) { col++; i++ }
+    while (i < at && '-' === src[i] && (' ' === src[i + 1] || '\t' === src[i + 1])) {
+      col += 2
+      i += 2
+      while (i < at && ' ' === src[i]) { col++; i++ }
+    }
+    return col
+  }
+
+  // The column of the sequence entry's mapping whose pair a value is, when
+  // it is the value of one (`- a: ...`): the mapping's keys stand at that
+  // column, so the value nests only below it, as a block mapping's value
+  // nests only below its key.
+  function entryMapIn(rule: Rule): number | undefined {
+    return 'yamlElemPair' === rule.parent?.name ? rule.k.yamlMapIn : undefined
+  }
+
   // Function refs used by the declarative grammar (yaml-grammar.jsonic).
   const refs: Record<string, Function> = {
     '@val-indent-deeper': (rule: Rule, ctx: Context) => {
       let parentIn = rule.k.yamlIn
       let listIn = rule.k.yamlListIn
+      let mapIn = entryMapIn(rule)
       if (listIn != null && ctx.t0.val <= listIn) return false
+      if (mapIn != null && ctx.t0.val <= mapIn) return false
       return parentIn == null || ctx.t0.val > parentIn
     },
+    // A sequence at the indent of the key it is the value of, its mapping's
+    // or a sequence entry's: `a:\n- x` and `- a:\n  - x`.
     '@val-indent-eq-parent': (rule: Rule, ctx: Context) => {
       let parentIn = rule.k.yamlIn
-      return parentIn != null && ctx.t0.val === parentIn
+      let mapIn = entryMapIn(rule)
+      return (parentIn != null && ctx.t0.val === parentIn) ||
+        (mapIn != null && ctx.t0.val === mapIn)
     },
     '@val-set-in-from-o0': (rule: Rule) => { rule.n.in = rule.o0.val },
     '@val-set-null': (rule: Rule) => { rule.node = null },
@@ -2715,7 +2750,14 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
       rule.node = ST === rule.o0.tin || TX === rule.o0.tin
         ? rule.o0.val : rule.o0.src
     },
-    '@set-map-in': (rule: Rule) => { rule.k.yamlMapIn = rule.n.in + 2 },
+    // A block sequence entry's mapping stands at the column its content
+    // starts at; a flow sequence's pair (`[a: 1]`) keeps the list's indent
+    // and two, which no indent token reads.
+    '@set-map-in': (rule: Rule, ctx: Context) => {
+      rule.k.yamlMapIn = 'yamlBlockList' === rule.name || 'yamlBlockElem' === rule.name
+        ? entryColumn(ctx.src(), rule.o0.sI)
+        : rule.n.in + 2
+    },
     '@t0-eq-in': (rule: Rule, ctx: Context) => ctx.t0.val === rule.n.in,
     '@t0-le-in': (rule: Rule, ctx: Context) => ctx.t0.val <= rule.n.in,
     '@t0-lt-in': (rule: Rule, ctx: Context) => ctx.t0.val < rule.n.in,

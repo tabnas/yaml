@@ -882,6 +882,50 @@ func storeMember(r *tabnas.Rule, ctx *tabnas.Context, key string, val any) {
 	setNodeKey(r.Node, key, val)
 }
 
+// entryColumn is the column the mapping of a block sequence's entry starts
+// at, on the line of the source index at: past the line's indentation and
+// every `- ` that leads it, as a block scalar's explicit indent counts its
+// key's column. `- a: 1` starts at 2, `-   a: 1` and `- - a: 1` at 4, and
+// `- &x a: 1` at 2, where the anchor starts the mapping ahead of its first
+// key's own token.
+func entryColumn(src string, at int) int {
+	if at > len(src) {
+		at = len(src)
+	}
+	li := at
+	for li > 0 && src[li-1] != '\n' && src[li-1] != '\r' {
+		li--
+	}
+	if li == 0 && strings.HasPrefix(src, bomText) {
+		li = len(bomText)
+	}
+	col, i := 0, li
+	for i < at && src[i] == ' ' {
+		col++
+		i++
+	}
+	for i < at && src[i] == '-' && i+1 < len(src) && (src[i+1] == ' ' || src[i+1] == '\t') {
+		col += 2
+		i += 2
+		for i < at && src[i] == ' ' {
+			col++
+			i++
+		}
+	}
+	return col
+}
+
+// entryMapIn is the column of the sequence entry's mapping whose pair r's
+// value is, when it is the value of one (`- a: ...`): the mapping's keys
+// stand at that column, so the value nests only below it, as a block
+// mapping's value nests only below its key.
+func entryMapIn(r *tabnas.Rule) (int, bool) {
+	if r.Parent == nil || r.Parent == tabnas.NoRule || r.Parent.Name != "yamlElemPair" {
+		return 0, false
+	}
+	return toInt(r.K["yamlMapIn"])
+}
+
 // applyMergeKeys resolves the YAML `<<` merge key on a parsed mapping node
 // in place, the way the canonical TypeScript does: it deletes the `<<`
 // entry, then appends each key a merge source holds that the mapping does
@@ -4249,6 +4293,11 @@ func configureGrammarRules(j *tabnas.Tabnas, IN, EL tabnas.Tin, KEY []tabnas.Tin
 					}
 				}
 			}
+			if mapIn, ok := entryMapIn(r); ok {
+				if t0Val, ok := toInt(ctx.T0.Val); ok && t0Val <= mapIn {
+					return false
+				}
+			}
 			if !hasParentIn || parentIn == nil {
 				return true
 			}
@@ -4259,7 +4308,14 @@ func configureGrammarRules(j *tabnas.Tabnas, IN, EL tabnas.Tin, KEY []tabnas.Tin
 			}
 			return true
 		}),
+		// A sequence at the indent of the key it is the value of, its
+		// mapping's or a sequence entry's: `a:\n- x` and `- a:\n  - x`.
 		"@val-indent-eq-parent": tabnas.AltCond(func(r *tabnas.Rule, ctx *tabnas.Context) bool {
+			if mapIn, ok := entryMapIn(r); ok {
+				if t0Val, ok := toInt(ctx.T0.Val); ok && t0Val == mapIn {
+					return true
+				}
+			}
 			parentIn, hasParentIn := r.K["yamlIn"]
 			if !hasParentIn || parentIn == nil {
 				return false
@@ -4289,7 +4345,14 @@ func configureGrammarRules(j *tabnas.Tabnas, IN, EL tabnas.Tin, KEY []tabnas.Tin
 				r.Node = r.O0.Src
 			}
 		}),
+		// A block sequence entry's mapping stands at the column its content
+		// starts at; a flow sequence's pair (`[a: 1]`) keeps the list's
+		// indent and two, which no indent token reads.
 		"@set-map-in": tabnas.AltAction(func(r *tabnas.Rule, ctx *tabnas.Context) {
+			if (r.Name == "yamlBlockList" || r.Name == "yamlBlockElem") && r.O0 != nil {
+				r.EnsureK()["yamlMapIn"] = entryColumn(ctx.Src, r.O0.SI)
+				return
+			}
 			r.EnsureK()["yamlMapIn"] = r.N["in"] + 2
 		}),
 		"@t0-eq-in": tabnas.AltCond(func(r *tabnas.Rule, ctx *tabnas.Context) bool {

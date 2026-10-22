@@ -852,6 +852,15 @@ c:
       assert.deepEqual(y(`people:\n  - name: alice\n  - name: bob`),
         { people: [{ name: 'alice' }, { name: 'bob' }] })
     })
+
+    test('entry-past-a-byte-order-mark', () => {
+      // An entry's keys stand at their column past a mark opening the
+      // stream, as go/parity_regression_test.go and
+      // rs/tests/untrusted_test.rs pin too.
+      const bom = String.fromCharCode(0xfeff)
+      assert.deepEqual(y(bom + `- a:\n  b: 1`), [{ a: null, b: 1 }])
+      assert.deepEqual(y(bom + `-   a: 1\n    b: 2`), [{ a: 1, b: 2 }])
+    })
   })
 
 

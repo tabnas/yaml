@@ -773,6 +773,53 @@ fn token_number(value: &Value) -> Option<f64> {
     }
 }
 
+/// The column the mapping of a block sequence's entry starts at, on the
+/// line of the source byte `at`: past the line's indentation and every
+/// `- ` that leads it, as a block scalar's explicit indent counts its key's
+/// column. `- a: 1` starts at 2, `-   a: 1` and `- - a: 1` at 4, and
+/// `- &x a: 1` at 2, where the anchor starts the mapping ahead of its first
+/// key's own token.
+fn entry_column(src: &str, at: usize) -> usize {
+    let bytes = src.as_bytes();
+    let at = at.min(bytes.len());
+    let mut line = at;
+    while line > 0 && bytes[line - 1] != b'\n' && bytes[line - 1] != b'\r' {
+        line -= 1;
+    }
+    if line == 0 && src.starts_with('\u{feff}') {
+        line = '\u{feff}'.len_utf8();
+    }
+    let (mut column, mut index) = (0, line);
+    while index < at && bytes[index] == b' ' {
+        column += 1;
+        index += 1;
+    }
+    while index < at && bytes[index] == b'-' && matches!(bytes.get(index + 1), Some(b' ' | b'\t')) {
+        column += 2;
+        index += 2;
+        while index < at && bytes[index] == b' ' {
+            column += 1;
+            index += 1;
+        }
+    }
+    column
+}
+
+/// The column of the sequence entry's mapping whose pair this value is,
+/// when it is the value of one (`- a: ...`): the mapping's keys stand at
+/// that column, so the value nests only below it, as a block mapping's
+/// value nests only below its key.
+fn entry_map_in(rule: &Rule) -> Option<f64> {
+    let parent = rule.parent_rule.as_ref()?;
+    if parent.name.as_str() != "yamlElemPair" {
+        return None;
+    }
+    match rule.k.get("yamlMapIn") {
+        Some(Value::Number(column)) => Some(*column),
+        _ => None,
+    }
+}
+
 fn t0_number(context: &Context) -> Option<f64> {
     context.t0().and_then(|token| token_number(&token.val))
 }
@@ -792,16 +839,22 @@ fn register_refs(parser: &mut Tabnas) {
                 return false;
             }
         }
+        if entry_map_in(rule).is_some_and(|map_in| t0 <= map_in) {
+            return false;
+        }
         match rule.k.get("yamlIn") {
             Some(Value::Number(parent)) => t0 > *parent,
             _ => true,
         }
     });
+    // A sequence at the indent of the key it is the value of, its
+    // mapping's or a sequence entry's: `a:\n- x` and `- a:\n  - x`.
     parser.alt_condition("@val-indent-eq-parent", |rule, context| {
         let Some(t0) = t0_number(context) else {
             return false;
         };
-        matches!(rule.k.get("yamlIn"), Some(Value::Number(parent)) if t0 == *parent)
+        entry_map_in(rule) == Some(t0)
+            || matches!(rule.k.get("yamlIn"), Some(Value::Number(parent)) if t0 == *parent)
     });
     parser.alt_condition("@t0-eq-in", |rule, context| {
         matches!((t0_number(context), counter(rule, "in")),
@@ -852,12 +905,18 @@ fn register_refs(parser: &mut Tabnas) {
         set_node(rule, node);
         Ok(())
     });
-    parser.action_with_context("@set-map-in", |rule, _context| {
-        // `r.k.yamlMapIn = r.n.in + 2`. With no `in` counter that is
-        // `undefined + 2`, which is NaN, and NaN never equals the indent
-        // `@t0-eq-map-in` compares it to. A zero here would instead make
-        // the comparison true at the outermost indent.
-        let indent = counter(rule, "in").map_or(f64::NAN, |value| f64::from(value + 2));
+    parser.action_with_context("@set-map-in", |rule, context| {
+        // A block sequence entry's mapping stands at the column its content
+        // starts at. A flow sequence's pair (`[a: 1]`) keeps
+        // `r.k.yamlMapIn = r.n.in + 2`, which no indent token reads; with no
+        // `in` counter that is `undefined + 2`, which is NaN, and NaN never
+        // equals the indent `@t0-eq-map-in` compares it to. A zero here
+        // would instead make the comparison true at the outermost indent.
+        let block = matches!(rule.name.as_str(), "yamlBlockList" | "yamlBlockElem");
+        let indent = match rule.o0() {
+            Some(token) if block => entry_column(&context.source, token.site.si) as f64,
+            _ => counter(rule, "in").map_or(f64::NAN, |value| f64::from(value + 2)),
+        };
         rule.k_mut()
             .insert("yamlMapIn".to_string(), Value::Number(indent));
         Ok(())

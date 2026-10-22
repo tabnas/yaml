@@ -261,6 +261,17 @@ fn odd_characters_are_handled_not_crashed() {
         ("escape", "a: \u{1b}[0m", Some("{\"a\":\"\u{1b}[0m\"}")),
         // A byte order mark opening the stream is not content.
         ("byte-order-mark", "\u{feff}a: 1", Some("{\"a\":1}")),
+        // A sequence entry's keys stand at their column past the mark.
+        (
+            "byte-order-mark-entry",
+            "\u{feff}- a:\n  b: 1",
+            Some("[{\"a\":null,\"b\":1}]"),
+        ),
+        (
+            "byte-order-mark-wide-entry",
+            "\u{feff}-   a: 1\n    b: 2",
+            Some("[{\"a\":1,\"b\":2}]"),
+        ),
         ("astral", "a: \u{1F600}", Some("{\"a\":\"\u{1F600}\"}")),
         ("next-line", "a: \u{85}", Some("{\"a\":\"\u{85}\"}")),
         (
