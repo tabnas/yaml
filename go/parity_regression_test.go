@@ -250,6 +250,9 @@ func TestParity_ByteOrderMarkOnRepeatedParse(t *testing.T) {
 		{bomText + "a: 1", `{"a":1}`},
 		{bomText + "[1, 2]", `[1,2]`},
 		{bomText + "- a\n- b", `["a","b"]`},
+		// A sequence entry's keys stand at their column past the mark.
+		{bomText + "- a:\n  b: 1", `[{"a":null,"b":1}]`},
+		{bomText + "-   a: 1\n    b: 2", `[{"a":1,"b":2}]`},
 	}
 	for _, c := range cases {
 		for round := 1; round <= 2; round++ {
