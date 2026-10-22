@@ -850,6 +850,38 @@ func setNodeKey(node any, key string, val any) {
 	}
 }
 
+// getNodeKey is the member at key, or nil when the mapping has none.
+func getNodeKey(node any, key string) any {
+	switch m := node.(type) {
+	case *tabnas.OrderedMap:
+		v, _ := m.Get(key)
+		return v
+	case map[string]any:
+		return m[key]
+	}
+	return nil
+}
+
+// storeMember sets a member this grammar stores itself, outside the
+// engine's pair rule: a key with no value in a flow mapping, and a
+// sequence entry's pair. A key the mapping holds already is combined as
+// jsonic's pairval combines one: through the grammar's MapMerge when it
+// has one, else merged deep under MapExtend, the default, else replaced by
+// the later value; an earlier nil is replaced. So `- a: {b: 1}` and
+// `a: {c: 2}` in one sequence entry merge as they do at the root, as the
+// canonical TypeScript stores them.
+func storeMember(r *tabnas.Rule, ctx *tabnas.Context, key string, val any) {
+	if prev := getNodeKey(r.Node, key); prev != nil && !tabnas.IsUndefined(prev) {
+		switch cfg := ctx.Cfg; {
+		case cfg != nil && cfg.MapMerge != nil:
+			val = cfg.MapMerge(prev, val, r, ctx)
+		case cfg == nil || cfg.MapExtend:
+			val = tabnas.Deep(prev, val)
+		}
+	}
+	setNodeKey(r.Node, key, val)
+}
+
 // applyMergeKeys resolves the YAML `<<` merge key on a parsed mapping node
 // in place, the way the canonical TypeScript does: it deletes the `<<`
 // entry, then appends each key a merge source holds that the mapping does
@@ -4295,18 +4327,18 @@ func configureGrammarRules(j *tabnas.Tabnas, IN, EL tabnas.Tin, KEY []tabnas.Tin
 		"@elem-key": tabnas.AltAction(func(r *tabnas.Rule, ctx *tabnas.Context) {
 			r.EnsureU()["key"] = extractKey(r.O0, anchors)
 		}),
-		"@implicit-null-pair": tabnas.AltAction(func(r *tabnas.Rule, _ *tabnas.Context) {
+		"@implicit-null-pair": tabnas.AltAction(func(r *tabnas.Rule, ctx *tabnas.Context) {
 			key := extractKey(r.O0, anchors)
 			r.EnsureU()["key"] = key
-			setNodeKey(r.Node, formatKey(key), nil)
+			storeMember(r, ctx, formatKey(key), nil)
 		}),
 		"@qm-pairkey": tabnas.AltAction(func(r *tabnas.Rule, _ *tabnas.Context) {
 			r.EnsureU()["key"] = extractKey(r.O1, anchors)
 		}),
-		"@qm-implicit-null-pair": tabnas.AltAction(func(r *tabnas.Rule, _ *tabnas.Context) {
+		"@qm-implicit-null-pair": tabnas.AltAction(func(r *tabnas.Rule, ctx *tabnas.Context) {
 			key := extractKey(r.O1, anchors)
 			r.EnsureU()["key"] = key
-			setNodeKey(r.Node, formatKey(key), nil)
+			storeMember(r, ctx, formatKey(key), nil)
 		}),
 	}
 
@@ -4546,12 +4578,12 @@ func configureGrammarRules(j *tabnas.Tabnas, IN, EL tabnas.Tin, KEY []tabnas.Tin
 	j.Rule("yamlElemPair", func(rs *tabnas.RuleSpec, _ *tabnas.Parser) {
 		rs.AddBC(func(r *tabnas.Rule, ctx *tabnas.Context) {
 			if key := r.U["key"]; key != nil {
-				if m, ok := r.Node.(*tabnas.OrderedMap); ok {
+				if _, ok := r.Node.(*tabnas.OrderedMap); ok {
 					val := childNode(r)
 					if tabnas.IsUndefined(val) {
 						val = nil
 					}
-					m.Set(formatKey(key), val)
+					storeMember(r, ctx, formatKey(key), val)
 				}
 			}
 		})

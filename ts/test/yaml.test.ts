@@ -1051,3 +1051,49 @@ s4: "tab\\there"
   })
 
 })
+
+
+// A repeated mapping key is combined as jsonic's pair rule combines one,
+// wherever the mapping is. The shared rows in test/spec/repeated-keys.tsv
+// pin the default, a deep merge; these pin the engine's map options, which
+// a row cannot set. The compact mapping of a sequence entry (`- a: ...`)
+// stored its members itself and kept only the later value before 0.5.26.
+describe('repeated keys', () => {
+  const shapes = [
+    'a:\n  b: 1\na:\n  c: 2\n',
+    '- a:\n    b: 1\n  a:\n    c: 2\n',
+    '{a: {b: 1}, a: {c: 2}}',
+  ]
+
+  test('map.extend false keeps the later value, in every mapping', () => {
+    const j = new Tabnas().use(jsonic).use(Yaml)
+    j.options({ map: { extend: false } })
+    eq(j.parse(shapes[0]), { a: { c: 2 } })
+    eq(j.parse(shapes[1]), [{ a: { c: 2 } }])
+    eq(j.parse(shapes[2]), { a: { c: 2 } })
+  })
+
+  test('a map.merge function combines them, in every mapping', () => {
+    const seen: any[] = []
+    const j = new Tabnas().use(jsonic).use(Yaml)
+    j.options({
+      map: {
+        merge: (prev: any, curr: any) => {
+          seen.push([prev, curr])
+          return 'merged'
+        },
+      },
+    })
+    for (const src of shapes) {
+      seen.length = 0
+      const got = j.parse(src)
+      eq(Array.isArray(got) ? got[0] : got, { a: 'merged' })
+      eq(seen, [[{ b: 1 }, { c: 2 }]])
+    }
+    // A key with no value in a flow mapping is a member the grammar stores
+    // itself too, and is combined the same way.
+    seen.length = 0
+    eq(j.parse('{a: 1, a}'), { a: 'merged' })
+    eq(seen, [[1, null]])
+  })
+})

@@ -842,3 +842,72 @@ func TestAnUnrelatedSetOptionsKeepsTheLexChecks(t *testing.T) {
 		}
 	}
 }
+
+// A repeated mapping key is combined as jsonic's pair rule combines one,
+// wherever the mapping is. The shared rows in test/spec/repeated-keys.tsv
+// pin the default, a deep merge; these pin the engine's map options, which
+// a row cannot set. The compact mapping of a sequence entry (`- a: ...`)
+// stored its members itself and kept only the later value before 0.5.26.
+var repeatedKeyShapes = []string{
+	"a:\n  b: 1\na:\n  c: 2\n",
+	"- a:\n    b: 1\n  a:\n    c: 2\n",
+	"{a: {b: 1}, a: {c: 2}}",
+}
+
+func canonJSON(t *testing.T, v any) string {
+	t.Helper()
+	got, err := json.Marshal(jsonFlatten(specCanon(v)))
+	if err != nil {
+		t.Fatalf("marshal %v: %v", v, err)
+	}
+	return string(got)
+}
+
+func TestRepeatedKeysMapExtendFalseKeepsTheLaterValue(t *testing.T) {
+	f := false
+	j := MakeJsonic()
+	j.SetOptions(jsonic.Options{Map: &jsonic.MapOptions{Extend: &f}})
+	for i, want := range []string{`{"a":{"c":2}}`, `[{"a":{"c":2}}]`, `{"a":{"c":2}}`} {
+		v, err := j.Parse(repeatedKeyShapes[i])
+		if err != nil {
+			t.Fatalf("%q: %v", repeatedKeyShapes[i], err)
+		}
+		if got := canonJSON(t, v); got != want {
+			t.Errorf("%q with map.extend false = %s, want %s", repeatedKeyShapes[i], got, want)
+		}
+	}
+}
+
+func TestRepeatedKeysMapMergeCombinesThem(t *testing.T) {
+	var seen []string
+	j := MakeJsonic()
+	j.SetOptions(jsonic.Options{Map: &jsonic.MapOptions{
+		Merge: func(prev, val any, _ *jsonic.Rule, _ *jsonic.Context) any {
+			seen = append(seen, canonJSON(t, prev)+" "+canonJSON(t, val))
+			return "merged"
+		},
+	}})
+	for i, want := range []string{`{"a":"merged"}`, `[{"a":"merged"}]`, `{"a":"merged"}`} {
+		seen = nil
+		v, err := j.Parse(repeatedKeyShapes[i])
+		if err != nil {
+			t.Fatalf("%q: %v", repeatedKeyShapes[i], err)
+		}
+		if got := canonJSON(t, v); got != want {
+			t.Errorf("%q with a map.merge = %s, want %s", repeatedKeyShapes[i], got, want)
+		}
+		if len(seen) != 1 || seen[0] != `{"b":1} {"c":2}` {
+			t.Errorf("%q: map.merge saw %v, want one {\"b\":1} {\"c\":2}", repeatedKeyShapes[i], seen)
+		}
+	}
+	// A key with no value in a flow mapping is a member the grammar stores
+	// itself too, and is combined the same way.
+	seen = nil
+	v, err := j.Parse("{a: 1, a}")
+	if err != nil {
+		t.Fatalf("{a: 1, a}: %v", err)
+	}
+	if got := canonJSON(t, v); got != `{"a":"merged"}` || len(seen) != 1 || seen[0] != "1 null" {
+		t.Errorf("{a: 1, a} = %s, map.merge saw %v", got, seen)
+	}
+}

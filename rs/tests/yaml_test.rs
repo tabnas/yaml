@@ -682,3 +682,79 @@ fn the_grammar_adds_the_yaml_rules() {
         );
     }
 }
+
+// ===== REPEATED KEYS =====
+//
+// A repeated mapping key is combined as jsonic's pair rule combines one,
+// wherever the mapping is. The shared rows in test/spec/repeated-keys.tsv
+// pin the default, a deep merge; these pin the engine's map options, which
+// a row cannot set. The compact mapping of a sequence entry (`- a: ...`)
+// stored its members itself and kept only the later value before 0.5.26.
+
+const REPEATED_KEY_SHAPES: [&str; 3] = [
+    "a:\n  b: 1\na:\n  c: 2\n",
+    "- a:\n    b: 1\n  a:\n    c: 2\n",
+    "{a: {b: 1}, a: {c: 2}}",
+];
+
+#[test]
+fn repeated_keys_map_extend_false_keeps_the_later_value() {
+    let mut parser = make();
+    parser
+        .set_options(|options| options.map.extend = false)
+        .expect("map.extend sets");
+    let wants = [
+        j!({"a": {"c": 2}}),
+        j!([{"a": {"c": 2}}]),
+        j!({"a": {"c": 2}}),
+    ];
+    for (src, want) in REPEATED_KEY_SHAPES.iter().zip(wants) {
+        let got = parser
+            .parse(src)
+            .unwrap_or_else(|error| panic!("{src:?}: {error}"));
+        assert_eq!(common::plain(&got), want, "{src:?}");
+    }
+}
+
+#[test]
+fn repeated_keys_map_merge_combines_them() {
+    use std::sync::{Arc, Mutex};
+    type Seen = Arc<Mutex<Vec<(serde_json::Value, serde_json::Value)>>>;
+    let seen: Seen = Arc::default();
+    let record = Arc::clone(&seen);
+    let mut parser = make();
+    parser
+        .set_options(move |options| {
+            options.map.merge = Some(Arc::new(move |previous, value, _rule, _context| {
+                record
+                    .lock()
+                    .unwrap()
+                    .push((common::plain(&previous), common::plain(&value)));
+                tabnas::Value::String("merged".to_string())
+            }));
+        })
+        .expect("map.merge sets");
+    let wants = [
+        j!({"a": "merged"}),
+        j!([{"a": "merged"}]),
+        j!({"a": "merged"}),
+    ];
+    for (src, want) in REPEATED_KEY_SHAPES.iter().zip(wants) {
+        seen.lock().unwrap().clear();
+        let got = parser
+            .parse(src)
+            .unwrap_or_else(|error| panic!("{src:?}: {error}"));
+        assert_eq!(common::plain(&got), want, "{src:?}");
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![(j!({"b": 1}), j!({"c": 2}))],
+            "{src:?}"
+        );
+    }
+    // A key with no value in a flow mapping is a member the grammar stores
+    // itself too, and is combined the same way.
+    seen.lock().unwrap().clear();
+    let got = parser.parse("{a: 1, a}").expect("{a: 1, a} parses");
+    assert_eq!(common::plain(&got), j!({"a": "merged"}));
+    assert_eq!(*seen.lock().unwrap(), vec![(j!(1), j!(null))]);
+}

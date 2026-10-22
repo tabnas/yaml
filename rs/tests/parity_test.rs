@@ -202,6 +202,7 @@ fn every_fixture_is_present() {
         "quoted-strings.tsv",
         "real-world-regressions.tsv",
         "real-world.tsv",
+        "repeated-keys.tsv",
         "scalar-types.tsv",
         "sequence-of-mappings.tsv",
         "special-chars-in-values.tsv",
