@@ -55,7 +55,9 @@ const TRANSLATION: TranslationParts = Object.freeze({
       "internal"
     ]
   },
-  "errorCodes": [],
+  "errorCodes": [
+    "yaml_undefined_alias"
+  ],
   "docs": "https://tabnas.dev/docs/packages",
   "repository": "https://github.com/tabnas/yaml",
   "versionSource": "ts/package.json",

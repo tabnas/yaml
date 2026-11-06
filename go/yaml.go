@@ -996,6 +996,77 @@ func mergeSources(mergeVal any) []any {
 	}
 }
 
+// jsString is `String(value)` as JavaScript spells it, which is how the
+// canonical port turns an alias used as a key into a property name.
+func jsString(v any) string {
+	switch x := v.(type) {
+	case nil:
+		return "null"
+	case string:
+		return x
+	case bool:
+		return strconv.FormatBool(x)
+	case float64:
+		return jsNumberString(x)
+	case []any:
+		parts := make([]string, len(x))
+		for i, item := range x {
+			if item != nil && !tabnas.IsUndefined(item) {
+				parts[i] = jsString(item)
+			}
+		}
+		return strings.Join(parts, ",")
+	case *tabnas.OrderedMap, tabnas.OrderedMap, map[string]any:
+		return "[object Object]"
+	}
+	if tabnas.IsUndefined(v) {
+		return "undefined"
+	}
+	return fmt.Sprint(v)
+}
+
+// jsNumberString is `String(number)` as JavaScript spells it: the shortest
+// digits that read back as the same double, in plain decimal while the
+// decimal point stays inside (-6, 21] and in exponent form outside it.
+func jsNumberString(f float64) string {
+	switch {
+	case math.IsNaN(f):
+		return "NaN"
+	case f == 0:
+		// Catches -0 as well: JavaScript spells both zeros "0".
+		return "0"
+	case f < 0:
+		return "-" + jsNumberString(-f)
+	case math.IsInf(f, 1):
+		return "Infinity"
+	}
+	mantissa, exponent, _ := strings.Cut(strconv.FormatFloat(f, 'e', -1, 64), "e")
+	digits := strings.TrimRight(strings.Replace(mantissa, ".", "", 1), "0")
+	if digits == "" {
+		digits = "0"
+	}
+	k := len(digits)
+	power, _ := strconv.Atoi(exponent)
+	n := power + 1
+	switch {
+	case k <= n && n <= 21:
+		return digits + strings.Repeat("0", n-k)
+	case 0 < n && n <= 21:
+		return digits[:n] + "." + digits[n:]
+	case -6 < n && n <= 0:
+		return "0." + strings.Repeat("0", -n) + digits
+	}
+	sign := "+"
+	if n-1 < 0 {
+		sign = "-"
+	}
+	shown := strconv.Itoa(int(math.Abs(float64(n - 1))))
+	if k == 1 {
+		return digits + "e" + sign + shown
+	}
+	return digits[:1] + "." + digits[1:] + "e" + sign + shown
+}
+
 // extractKey extracts a key value from a token, resolving aliases.
 func extractKey(o0 *tabnas.Token, anchors map[string]any) any {
 	if o0.Tin == tabnas.TinVL {
@@ -1452,6 +1523,11 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 	// Shared state for the plugin instance.
 	anchors := make(map[string]any)
 	var pendingAnchors []anchorInfo
+	// Every anchor name the lexer has passed, so an alias can be checked
+	// against YAML's rule that its anchor occurs before it. The anchors map
+	// cannot answer that: a value is recorded only when its node closes, so
+	// `&a [*a]` names an anchor that occurs before it but is not recorded yet.
+	declaredAnchors := make(map[string]bool)
 	pendingExplicitCL := false
 	var pendingTokens []*tabnas.Token
 	tagHandles := make(map[string]string)
@@ -1534,6 +1610,9 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 				delete(anchors, k)
 			}
 			pendingAnchors = pendingAnchors[:0]
+			for k := range declaredAnchors {
+				delete(declaredAnchors, k)
+			}
 			pendingExplicitCL = false
 			skipNumberMatch = false
 			pendingTokens = pendingTokens[:0]
@@ -1609,9 +1688,39 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 					fwd[nameEnd] != '\n' && fwd[nameEnd] != '\r' && fwd[nameEnd] != ',' &&
 					fwd[nameEnd] != '{' && fwd[nameEnd] != '}' && fwd[nameEnd] != '[' &&
 					fwd[nameEnd] != ']' {
+					// A colon ends the name only before a space or a tab, as
+					// in the canonical port; elsewhere it is a name character.
+					if fwd[nameEnd] == ':' && nameEnd+1 < len(fwd) &&
+						(fwd[nameEnd+1] == ' ' || fwd[nameEnd+1] == '\t') {
+						break
+					}
 					nameEnd++
 				}
 				aliasName := fwd[1:nameEnd]
+				// YAML 1.2.2, 7.1: "It is an error for an alias node to use
+				// an anchor that does not previously occur in the document."
+				// Checked here, as a key or as a value, because an alias read
+				// as nothing hides a mistyped name.
+				if !declaredAnchors[aliasName] {
+					tkn := lex.Bad("yaml_undefined_alias")
+					tkn.Src = fwd[:nameEnd]
+					return tkn
+				}
+				// An alias used as a key, before `:` and a blank, the line's
+				// end or the source's: the property name its recorded value
+				// makes, as the canonical port's `String(anchors[name])`.
+				afterAlias := nameEnd
+				for afterAlias < len(fwd) && (fwd[afterAlias] == ' ' || fwd[afterAlias] == '\t') {
+					afterAlias++
+				}
+				isKey := afterAlias < len(fwd) && fwd[afterAlias] == ':' &&
+					(afterAlias+1 == len(fwd) || fwd[afterAlias+1] == ' ' || fwd[afterAlias+1] == '\t' ||
+						fwd[afterAlias+1] == '\n' || fwd[afterAlias+1] == '\r')
+				if val, ok := anchors[aliasName]; isKey && ok && !tabnas.IsUndefined(val) {
+					tkn := lex.Token("#TX", TX, jsString(val), fwd[:nameEnd])
+					advanceCol(pnt, fwd, nameEnd)
+					return tkn
+				}
 				if val, ok := anchors[aliasName]; ok {
 					var tkn *tabnas.Token
 					switch v := val.(type) {
@@ -1728,6 +1837,7 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 				}
 
 				pendingAnchors = append(pendingAnchors, anchorInfo{name: anchorName, inline: anchorInline})
+				declaredAnchors[anchorName] = true
 
 				// Check whether the anchor is the first content on its line
 				// (only whitespace precedes it), and record that indent.
@@ -1892,7 +2002,7 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 			// !!type tags (!!str, !!int, !!float, !!bool, !!null).
 			if fwd[0] == '!' && len(fwd) > 1 && fwd[1] == '!' {
 				preSI := pnt.SI
-				if tkn := handleTypeTag(lex, pnt, fwd, tagHandles, &pendingAnchors, anchors, TX, NR, VL, ST); tkn != nil {
+				if tkn := handleTypeTag(lex, pnt, fwd, tagHandles, &pendingAnchors, declaredAnchors, anchors, TX, NR, VL, ST); tkn != nil {
 					return tkn
 				}
 				// Tag followed by a newline was consumed with no token —
@@ -2182,6 +2292,7 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 						if afterAnchor >= len(fwd) || fwd[afterAnchor] == '\n' ||
 							fwd[afterAnchor] == '\r' || fwd[afterAnchor] == '#' {
 							pendingAnchors = append(pendingAnchors, anchorInfo{name: fwd[pos+1 : ae], inline: false})
+							declaredAnchors[fwd[pos+1:ae]] = true
 							for afterAnchor < len(fwd) && fwd[afterAnchor] != '\n' && fwd[afterAnchor] != '\r' {
 								afterAnchor++
 							}
@@ -2274,6 +2385,17 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 				built.NumberCheck = numberCheck
 			},
 		}},
+		// This plugin's own error codes, with the templates and hints the
+		// engine fills from the bad token. Each is declared in every runtime
+		// and listed in tabnas.plugin.json.
+		Error: map[string]string{
+			"yaml_undefined_alias": "undefined alias: {src}",
+		},
+		Hint: map[string]string{
+			"yaml_undefined_alias": "\nThe alias {src} names no anchor that occurs before it in the document.\n" +
+				"An anchor is written &name on the node it names, and an alias can only\n" +
+				"name an anchor defined earlier.",
+		},
 	})
 
 	// Remove colon as a fixed token — YAML uses ": " (colon-space). Fixed
@@ -3056,7 +3178,7 @@ func handlePlainScalar(lex *tabnas.Lex, pnt *tabnas.Point, src, fwd string, flow
 
 // handleTypeTag processes !!type tags (!!str, !!int, !!float, etc.).
 func handleTypeTag(lex *tabnas.Lex, pnt *tabnas.Point, fwd string,
-	tagHandles map[string]string, pendingAnchors *[]anchorInfo,
+	tagHandles map[string]string, pendingAnchors *[]anchorInfo, declaredAnchors map[string]bool,
 	anchors map[string]any, TX, NR, VL, ST tabnas.Tin) *tabnas.Token {
 
 	tagEnd := 2
@@ -3081,6 +3203,7 @@ func handleTypeTag(lex *tabnas.Lex, pnt *tabnas.Point, fwd string,
 		}
 		tagAnchorName = fwd[valStart+1 : anchorEnd]
 		*pendingAnchors = append(*pendingAnchors, anchorInfo{name: tagAnchorName, inline: true})
+		declaredAnchors[tagAnchorName] = true
 		if anchorEnd < len(fwd) && fwd[anchorEnd] == ' ' {
 			anchorEnd++
 		}

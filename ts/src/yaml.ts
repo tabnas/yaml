@@ -360,6 +360,21 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
     },
   })
 
+  // This plugin's own error codes, with the templates and hints the engine
+  // fills from the bad token. Each is declared in every runtime and listed
+  // in tabnas.plugin.json.
+  tabnas.options({
+    error: {
+      yaml_undefined_alias: 'undefined alias: {src}',
+    },
+    hint: {
+      yaml_undefined_alias: `
+The alias {src} names no anchor that occurs before it in the document.
+An anchor is written &name on the node it names, and an alias can only
+name an anchor defined earlier.`,
+    },
+  })
+
   let TX = tabnas.token.TX
   let NR = tabnas.token.NR
   let ST = tabnas.token.ST
@@ -378,6 +393,15 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
   // silently dropped and *__proto__ reads back Object.prototype.
   let anchors: Record<string, any> = Object.create(null)
   let pendingAnchors: { name: string, inline: boolean }[] = []
+  // Every anchor name the lexer has passed, so an alias can be checked
+  // against YAML's rule that its anchor occurs before it. The anchors table
+  // cannot answer that: a value is recorded only when its node closes, so
+  // `&a [*a]` names an anchor that occurs before it but is not recorded yet.
+  let declaredAnchors: Set<string> = new Set()
+  const pendAnchor = (name: string, inline: boolean) => {
+    pendingAnchors.push({ name, inline })
+    declaredAnchors.add(name)
+  }
   let pendingExplicitCL = false
   // Flag to tell the number matcher to skip, so text.check handles the value.
   let skipNumberMatch = false
@@ -1381,6 +1405,7 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
                 seenLex.add(lex)
                 anchors = Object.create(null)
                 pendingAnchors = []
+                declaredAnchors = new Set()
                 pendingExplicitCL = false
                 skipNumberMatch = false
                 pendingTokens = []
@@ -1462,6 +1487,13 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
                 }
                 let name = fwd.substring(1, nameEnd)
                 let src = fwd.substring(0, nameEnd)
+                // YAML 1.2.2, 7.1: "It is an error for an alias node to use
+                // an anchor that does not previously occur in the document."
+                // Checked here, as a key or as a value, because an alias read
+                // as nothing hides a mistyped name.
+                if (!declaredAnchors.has(name)) {
+                  return lex.bad('yaml_undefined_alias', pnt.sI, pnt.sI + nameEnd)
+                }
                 // Check if this alias is used as a map key (followed by ` :` or `:`).
                 let afterAlias = nameEnd
                 while (afterAlias < fwd.length && (fwd[afterAlias] === ' ' || fwd[afterAlias] === '\t')) afterAlias++
@@ -1586,7 +1618,7 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
                   }
                 }
                 // Push pending anchor with inline flag.
-                pendingAnchors.push({ name: anchorName, inline: anchorInline })
+                pendAnchor(anchorName, anchorInline)
                 // If the anchored value is a flow collection (&a [..] / &a {..}),
                 // emit its opener here: we've advanced past the anchor marker,
                 // so jsonic's fixed-token matcher would mis-lex it as #BD.
@@ -1786,7 +1818,7 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
                   while (anchorEnd < fwd.length && fwd[anchorEnd] !== ' ' &&
                          fwd[anchorEnd] !== '\n' && fwd[anchorEnd] !== '\r') anchorEnd++
                   tagAnchorName = fwd.substring(valStart + 1, anchorEnd)
-                  pendingAnchors.push({ name: tagAnchorName, inline: true })
+                  pendAnchor(tagAnchorName, true)
                   if (fwd[anchorEnd] === ' ') anchorEnd++
                   valStart = anchorEnd
                   valEnd = valStart
@@ -2157,7 +2189,7 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
                 if (fwd[skip] === ' ') skip++
                 pnt.sI += skip
                 pnt.cI += skip
-                pendingAnchors.push({ name: anchorName, inline: true })
+                pendAnchor(anchorName, true)
                 fwd = lex.refwd()
               }
 
@@ -2600,7 +2632,7 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
                            (fwd[afterAnchor] === ' ' || fwd[afterAnchor] === '\t')) afterAnchor++
                     if (afterAnchor >= fwd.length || fwd[afterAnchor] === '\n' ||
                         fwd[afterAnchor] === '\r' || fwd[afterAnchor] === '#') {
-                      pendingAnchors.push({ name: fwd.substring(pos + 1, ae), inline: false })
+                      pendAnchor(fwd.substring(pos + 1, ae), false)
                       // Skip to end of line (including any comment).
                       while (afterAnchor < fwd.length &&
                              fwd[afterAnchor] !== '\n' && fwd[afterAnchor] !== '\r') afterAnchor++

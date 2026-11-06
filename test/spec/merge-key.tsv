@@ -7,8 +7,8 @@ input	expected	opts	keys
 defaults: &d\n  a: 1\n  b: 2\nresult:\n  <<: *d\n  c: 3	{"defaults":{"a":1,"b":2},"result":{"c":3,"a":1,"b":2}}		ordered
 base: &b\n  x: 1\n  y: 2\nchild:\n  <<: *b\n  y: 99	{"base":{"x":1,"y":2},"child":{"y":99,"x":1}}		ordered
 a: &a\n  x: 1\nb: &b\n  y: 2\nc:\n  <<: [*a, *b]\n  z: 3	{"a":{"x":1},"b":{"y":2},"c":{"z":3,"x":1,"y":2}}		ordered
-<<: *n	{}
-a:\n  <<: *n\n  b: 1\n	{"a":{"b":1}}
+<<: *n	ERROR:yaml_undefined_alias
+a:\n  <<: *n\n  b: 1\n	ERROR:yaml_undefined_alias
 base: &b\n  x: 1\nd:\n  <<: *b\n  y: 2	{"base":{"x":1},"d":{"y":2,"x":1}}		ordered
 base: &b\n  x: 1\n  z: 3\nd:\n  w: 0\n  <<: *b\n  y: 2	{"base":{"x":1,"z":3},"d":{"w":0,"y":2,"x":1,"z":3}}		ordered
 a: &a\n  p: 1\n  q: 2\nb: &b\n  q: 9\n  r: 3\nd:\n  s: 0\n  <<: [*a, *b]\n  t: 4	{"a":{"p":1,"q":2},"b":{"q":9,"r":3},"d":{"s":0,"t":4,"p":1,"q":2,"r":3}}		ordered

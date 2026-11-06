@@ -32,6 +32,13 @@ pub(crate) const ANCHORS: &str = "yamlAnchors";
 /// object `{n: name, i: inline}`.
 pub(crate) const PENDING_ANCHORS: &str = "yamlPendingAnchors";
 
+/// `declaredAnchors`: every anchor name the lexer has passed, each mapped
+/// to `true`, so an alias can be checked against YAML's rule that its
+/// anchor occurs before it. [`ANCHORS`] cannot answer that: a value is
+/// recorded only when its node closes, so `&a [*a]` names an anchor that
+/// occurs before it but is not recorded yet.
+pub(crate) const DECLARED_ANCHORS: &str = "yamlDeclaredAnchors";
+
 /// `pendingExplicitCL`: a `#CL` owed to the explicit-key handler.
 pub(crate) const PENDING_CL: &str = "yamlPendingCL";
 
@@ -125,6 +132,23 @@ pub(crate) fn map_set(context: &mut Context, key: &str, entry: String, value: Va
     }
 }
 
+/// Queue an anchor for the next `val` rule to claim, and note that it
+/// occurs, for [`anchor_declared`].
+pub(crate) fn pend_anchor(context: &mut Context, name: &str, pending: Value) {
+    list_push(context, PENDING_ANCHORS, pending);
+    map_set(
+        context,
+        DECLARED_ANCHORS,
+        name.to_string(),
+        Value::Bool(true),
+    );
+}
+
+/// Has an anchor named `name` occurred before this point of the parse?
+pub(crate) fn anchor_declared(context: &Context, name: &str) -> bool {
+    matches!(context.u.get(DECLARED_ANCHORS), Some(Value::Object(map)) if map.contains_key(name))
+}
+
 /// Remove one entry of an object-valued slot, saying whether it was there.
 pub(crate) fn map_take(context: &mut Context, key: &str, entry: &str) -> bool {
     match context.u.get_mut(key) {
@@ -201,6 +225,7 @@ pub(crate) fn clear(context: &mut Context, key: &str) {
 pub(crate) fn initialise(context: &mut Context) {
     set_flag(context, INIT, true);
     map_put(context, ANCHORS, IndexMap::new());
+    map_put(context, DECLARED_ANCHORS, IndexMap::new());
     map_put(context, TAG_HANDLES, IndexMap::new());
     context
         .u

@@ -223,7 +223,7 @@ fn unterminated_constructs_terminate() {
         ("a: |", true),
         ("&a", false),
         ("[1, 2\n", false),
-        ("*missing", true),
+        ("*missing", false),
     ] {
         let result = parser.parse(src);
         assert_eq!(

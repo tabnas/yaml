@@ -53,6 +53,10 @@ pub const VERSION: &str = "0.5.26";
 /// The plugin name, which is also the key its options sit under.
 const PLUGIN_NAME: &str = "yaml";
 
+/// The error code for an alias whose anchor does not occur before it.
+/// Its template and hint are in [`options_document`].
+pub(crate) const UNDEFINED_ALIAS: &str = "yaml_undefined_alias";
+
 /// Set on the instance once the plugin has installed. The install guard
 /// reads it together with the instance's rules ([`grammar_installed`]):
 /// a derived child inherits this decoration before it has any rule of its
@@ -1471,7 +1475,14 @@ fn options_document() -> serde_json::Value {
             },
             // A document stream is the entry point, and it opens into the
             // shared `val` rule.
-            "rule": { "start": "stream" }
+            "rule": { "start": "stream" },
+            // This plugin's own error codes, with the templates and hints
+            // the engine fills from the bad token. Each is declared in every
+            // runtime and listed in tabnas.plugin.json.
+            "error": { "yaml_undefined_alias": "undefined alias: {src}" },
+            "hint": {
+                "yaml_undefined_alias": "\nThe alias {src} names no anchor that occurs before it in the document.\nAn anchor is written &name on the node it names, and an alias can only\nname an anchor defined earlier."
+            }
         }
     })
 }

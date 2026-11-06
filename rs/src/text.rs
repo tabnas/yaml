@@ -780,7 +780,7 @@ pub(crate) fn type_tag(
         let mut pending = indexmap::IndexMap::new();
         pending.insert("n".to_string(), Value::String(anchor_name.clone()));
         pending.insert("i".to_string(), Value::Bool(true));
-        state::list_push(context, state::PENDING_ANCHORS, Value::object(pending));
+        state::pend_anchor(context, &anchor_name, Value::object(pending));
         if is(fwd, anchor_end, b' ') {
             anchor_end += 1;
         }
