@@ -799,22 +799,27 @@ They stay in the Makefile because removing them is a separate change.
 
 ## Error codes
 
-This package declares **no** error codes of its own — no runtime
-extends `options.error` — and no fixture pins one: `test/spec/` currently
-has no error rows at all, even though the fixture format supports `ERROR` /
-`ERROR:<code>` (see [`test/AGENTS.md`](test/AGENTS.md)). The only
-error-behaviour assertions in the repo are the YAML Test Suite's `error`
-bucket and its leniency ledger, which assert *that* a case is rejected,
-never with which code. Rejections therefore surface whatever code the engine
-and `@tabnas/jsonic` raise, unpinned — a weak spot, and adding
+This package declares one error code of its own, with a template and a
+hint, in every runtime's `options.error` and `options.hint`:
+
+| Code | Raised when |
+|---|---|
+| `yaml_undefined_alias` | an alias, as a value or as a key, names an anchor that does not occur before it in the document (YAML 1.2.2, 7.1). The lexer checks the alias against the names of the anchors it has passed, not against the anchors table: a value is recorded only when its node closes, so `&a [*a]` names an anchor that occurs before it but is not recorded yet, and stays accepted. |
+
+`test/spec/anchors-aliases.tsv` and `test/spec/merge-key.tsv` pin it with
+`ERROR:yaml_undefined_alias` rows (the format is in
+[`test/AGENTS.md`](test/AGENTS.md)). Every other rejection surfaces
+whatever code the engine and `@tabnas/jsonic` raise, unpinned: the YAML
+Test Suite's `error` bucket and its leniency ledger assert *that* a case is
+rejected, never with which code. That is a weak spot, and adding
 `ERROR:<code>` rows for the documented rejections is a standing
 strengthening target (plan items A3/A4: the error-code registry and the
 coverage tripwire measure exactly this).
 
 The machine-readable list is [`tabnas.plugin.json`](tabnas.plugin.json)
-(`errorCodes` — correctly empty). If a yaml-specific code is ever added,
-declare it in every runtime, add it to that list, and pin it with an
-`ERROR:<code>` fixture row: the code is the contract, not the message.
+(`errorCodes`). A new yaml-specific code is declared in every runtime,
+added to that list, and pinned with an `ERROR:<code>` fixture row: the code
+is the contract, not the message.
 
 ## Untrusted input
 

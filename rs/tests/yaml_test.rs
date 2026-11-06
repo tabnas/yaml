@@ -575,11 +575,12 @@ fn anchors_do_not_leak_between_parses() {
         common::plain(&parser.parse("a: &ref hello\nb: *ref").expect("parses")),
         j!({"a": "hello", "b": "hello"})
     );
-    // `*ref` now names nothing. It resolves to the literal alias text,
-    // not to the value the previous parse anchored.
+    // `*ref` now names an anchor this parse has not passed, so it is
+    // refused, rather than resolved to the value the previous parse
+    // anchored.
     assert_eq!(
-        common::plain(&parser.parse("b: *ref").expect("parses")),
-        j!({"b": null})
+        parser.parse("b: *ref").expect_err("refused").code,
+        "yaml_undefined_alias"
     );
 }
 

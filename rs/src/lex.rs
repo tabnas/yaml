@@ -88,9 +88,17 @@ pub(crate) struct Act {
     pub(crate) ri: usize,
     pub(crate) ci: usize,
     pub(crate) token: Option<Tok>,
-    /// The source ran out inside a construct this matcher had already
-    /// begun consuming. See [`exhausted`].
-    pub(crate) bad: bool,
+    /// The refusal to report where this matcher's cursor stands, if any.
+    pub(crate) bad: Option<Bad>,
+}
+
+/// A refusal: its error code, and how many characters from the cursor the
+/// report names. None names the character under the cursor, as the
+/// engine's own refusal does.
+#[derive(Clone, Copy)]
+pub(crate) struct Bad {
+    pub(crate) code: &'static str,
+    pub(crate) chars: usize,
 }
 
 impl Act {
@@ -100,7 +108,7 @@ impl Act {
             ri: at.1,
             ci: at.2,
             token: None,
-            bad: false,
+            bad: None,
         }
     }
 
@@ -110,21 +118,40 @@ impl Act {
             ri: at.1,
             ci: at.2,
             token,
-            bad: false,
+            bad: None,
         }
     }
 
     /// This matcher moved the cursor and has no token for where it
     /// landed, and the canonical engine would leave that position
-    /// unclaimed. See [`claimable_after_move`] and the end-of-source
-    /// guard in [`decide`].
+    /// unclaimed, or the source ran out inside a construct it had already
+    /// begun consuming. See [`claimable_after_move`], [`exhausted`] and the
+    /// end-of-source guard in [`decide`].
     pub(crate) fn refuse(at: (usize, usize, usize)) -> Self {
         Act {
             si: at.0,
             ri: at.1,
             ci: at.2,
             token: None,
-            bad: true,
+            bad: Some(Bad {
+                code: "unexpected",
+                chars: 0,
+            }),
+        }
+    }
+
+    /// An alias of `chars` characters whose anchor does not occur before
+    /// it, refused where it starts.
+    pub(crate) fn undefined_alias(at: (usize, usize, usize), chars: usize) -> Self {
+        Act {
+            si: at.0,
+            ri: at.1,
+            ci: at.2,
+            token: None,
+            bad: Some(Bad {
+                code: crate::UNDEFINED_ALIAS,
+                chars,
+            }),
         }
     }
 }
@@ -395,11 +422,15 @@ pub(crate) fn apply(lexer: &mut Lexer<'_>, context: &mut Context, act: Act) -> O
         lexer.advance_chars(characters);
     }
     store_point(context, &act);
-    if act.bad {
+    if let Some(bad) = act.bad {
         // The refusal is reported where this plugin's cursor stands, not
         // where the engine's does, for the reason every other token here
         // carries the plugin's point.
-        let mut refusal = lexer.bad("unexpected");
+        let mut refusal = if bad.chars == 0 {
+            lexer.bad(bad.code)
+        } else {
+            lexer.bad_span(bad.code, start_pos, start_pos + bad.chars)
+        };
         refusal.site.ri = act.ri;
         refusal.site.ci = act.ci;
         return Some(refusal);
@@ -424,7 +455,7 @@ pub(crate) fn yaml_matcher(
     // A call that moved the cursor and produced nothing leaves the rest
     // of the matcher chain reading a position it was not dispatched for.
     // The text check compensates; see `crate::text::check`.
-    let moved = act.token.is_none() && !act.bad && act.si != start;
+    let moved = act.token.is_none() && act.bad.is_none() && act.si != start;
     state::set_flag(context, state::MOVED, moved);
     apply(lexer, context, act)
 }
@@ -950,6 +981,14 @@ fn alias(src: &str, fwd: &str, cursor: (usize, usize, usize), context: &mut Cont
     let name = fwd[1..end].to_string();
     let source = fwd[..end].to_string();
 
+    // YAML 1.2.2, 7.1: "It is an error for an alias node to use an anchor
+    // that does not previously occur in the document." Checked here, as a
+    // key or as a value, because an alias read as nothing hides a mistyped
+    // name.
+    if !state::anchor_declared(context, &name) {
+        return Act::undefined_alias(cursor, source.chars().count());
+    }
+
     // An alias used as a key resolves to its anchor's text right here.
     let mut after = end;
     while blank(at(fwd, after)) {
@@ -1062,9 +1101,9 @@ fn anchor(
     }
 
     let mut pending = indexmap::IndexMap::new();
-    pending.insert("n".to_string(), Value::String(name));
+    pending.insert("n".to_string(), Value::String(name.clone()));
     pending.insert("i".to_string(), Value::Bool(inline));
-    state::list_push(context, state::PENDING_ANCHORS, Value::object(pending));
+    state::pend_anchor(context, &name, Value::object(pending));
 
     // An anchored flow collection: emit the opener here, because the
     // cursor has already passed the marker and the fixed-token matcher
@@ -1882,13 +1921,11 @@ fn block_newline(
                 after += 1;
             }
             if after >= fwd.len() || line_end(at(fwd, after)) || is(fwd, after, b'#') {
+                let name = &fwd[pos + 1..end];
                 let mut pending = indexmap::IndexMap::new();
-                pending.insert(
-                    "n".to_string(),
-                    Value::String(fwd[pos + 1..end].to_string()),
-                );
+                pending.insert("n".to_string(), Value::String(name.to_string()));
                 pending.insert("i".to_string(), Value::Bool(false));
-                state::list_push(context, state::PENDING_ANCHORS, Value::object(pending));
+                state::pend_anchor(context, name, Value::object(pending));
                 while after < fwd.len() && !line_end(at(fwd, after)) {
                     after += 1;
                 }

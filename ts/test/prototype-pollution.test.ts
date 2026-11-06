@@ -43,12 +43,21 @@ describe('prototype-pollution', () => {
   })
 
   test('anchor named __proto__ does not reparent the anchor table', () => {
-    // The alias *toString was never defined. Before the fix the map anchored
-    // as __proto__ became the anchor table's prototype, so this resolved to
-    // the injected value instead of staying undefined.
-    const out = p('a: &__proto__\n  toString: pwned\nb: *toString\n')
+    // *toString names an anchor that occurs before it, on the node still
+    // open around it, so it is looked up in the anchor table and found
+    // unrecorded. Were the map anchored as __proto__ to become the table's
+    // prototype, the lookup would find the injected value instead.
+    const out = p('a: &__proto__\n  toString: pwned\nb: &toString\n  c: *toString\n')
     noGlobalPollution()
-    assert.equal(out.b, null)
+    assert.equal(JSON.stringify(out), '{"a":{"toString":"pwned"},"b":{"c":null}}')
+  })
+
+  test('alias to an anchor never defined is refused', () => {
+    assert.throws(
+      () => p('a: &__proto__\n  toString: pwned\nb: *toString\n'),
+      (err: any) => err.code === 'yaml_undefined_alias',
+    )
+    noGlobalPollution()
   })
 
   test('key named __proto__ is an ordinary key', () => {
