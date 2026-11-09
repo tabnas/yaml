@@ -317,7 +317,7 @@ repository, through any runtime's `translate()`:
   Its `transduce` names the **transducer part**,
   [`alchemy/transduce.alc`](alchemy/transduce.alc): the document's JSON
   events from the grammar's rule passes, hand-written, through which a
-  host that reads parser events (alchemy-cli's `translate` and `run
+  host that reads parser events (dmog's `translate` and `run
   --grammar yaml`) reads a document under the grammar's default options:
   a `map`'s passes open and close an object, a flow `list`'s an array, a
   `val` or `indent` whose open pushes the block list an array, a
@@ -331,16 +331,44 @@ repository, through any runtime's `translate()`:
   a flow sequence; a key with no value in a flow mapping (`{a, b: c}`)
   is a null member at once; an `indent` opened on a plain scalar (the
   value on the line after its key, indented) yields it at its close; an
-  unresolved alias is undefined; a separator with no value is a null
-  element; a stream of
-  directives and document markers alone is null. Every event is the one
-  the walk of the grammar's value gives (535 of the 568 fixture inputs
-  stream so), and the part refuses what the passes cannot show, which a
-  host reads whole (`fail :unstreamable`, STREAMABILITY_UNKNOWN): an
-  alias to a mapping or a sequence, whose value the token carries and no
-  part can expand, and a plain `<<` merge key, whose members the grammar
-  folds in after the passes; a stream of several documents is a second
-  root to the host's tree contract, read whole the same way.
+  alias whose anchor's node is still open is undefined; a separator with
+  no value is a null element; a stream of directives and document
+  markers alone is null. Every event is the one the walk of the
+  grammar's value gives. The part's header says how, and what it
+  measured: over the 617 inputs of `test/spec/*.tsv` that are not error
+  rows and the 287 cases of the YAML Test Suite the reader reads, it
+  writes the walk's tree for 847 in every runtime, and the host's tree
+  contract refuses the other 57, which a host reads whole: a stream of
+  several documents is a second root (ruling 5 of admin ADR-33), and a
+  mapping that repeats a key, whose values the grammar combines, holds
+  the key twice.
+  - **Aliases are replayed.** The lexer reads `&name` and hands it to
+    the val that claims it, so no pass carries it. That val names it in
+    its counters instead (`nameAnchors` in `ts/src/yaml.ts`, and its
+    twins): the counter `&name`, whose value is the val's own instance
+    number `i`, and `yamlAnchored`, of the same value, which marks the
+    val; a counter keeps its value as it passes to the rules below. The
+    part keeps the events of the value of the val whose `yamlAnchored` is
+    its own `i`, from its open pass to its close, records a mapping's or
+    a sequence's under the name, and writes them again at an alias to a
+    collection, whose token carries the value the grammar resolved
+    (a scalar's the val's close carries already). What the part keeps is
+    held in its state, under `max_metadata_bytes`, past which the run
+    fails with `RESOURCE_LIMIT_EXCEEDED` naming it.
+  - **A merge key's members are held.** A plain `<<` in a mapping is no
+    member: the part keeps its value's events until its pair closes, the
+    members of the mapping it names or of each mapping a sequence of
+    them holds, the first of a name. The grammar folds the members in at
+    the map's close, after the passes, keeping the mapping's own keys
+    wherever they stand, and names each key it merged in the map's
+    counters, the counter `<<key`, on its close pass (`mergeMember`, and
+    its twins); the part writes those members as the mapping's last. A
+    mapping with two plain `<<`, or a plain and a quoted one, whose
+    values the grammar combines, is refused in the part's own words
+    (`fail :unstreamable`, STREAMABILITY_UNKNOWN), read whole the same
+    way. A sequence's mapping (`- <<: *a`) is not merged, by the
+    grammar or the part.
+
   Admin's descriptor task keeps the object and checks its shape.
   A host that streams through the part also empties the engine's
   arrays behind the stream (transduce's prune), and an anchor is
@@ -352,10 +380,15 @@ repository, through any runtime's `translate()`:
   that honours the hold empties no array while it is above zero, so an
   alias used as a key names the anchored sequence's text whether the
   tree is pruned or not
-  ([tabnas/yaml#138](https://github.com/tabnas/yaml/issues/138)).
+  ([tabnas/yaml#138](https://github.com/tabnas/yaml/issues/138)). A
+  plain `<<` raises it too, from its pair's open to its close, since the
+  map's close merges the sources a sequence lists, and one emptied
+  behind the stream would merge nothing and name no merged key.
   `rs/tests/prune_hold_test.rs`, `ts/test/prune-hold.test.ts` and
   `go/prune_hold_test.go` empty arrays as such a host does and hold the
-  keys to the whole parse's.
+  keys and the merged members to the whole parse's, and
+  `ts/test/counters.test.ts`, `go/counters_test.go` and
+  `rs/tests/counters_test.rs` hold the counters the part reads.
 
 Every runtime hands all three over: `translate()` in TypeScript
 (`ts/src/translate.ts`), `Translate()` in Go (`go/translate.go`, with the
@@ -419,6 +452,23 @@ Keep the naming rule when you change the render.
   member in the same pass never tells it, and a first member whose value
   is a collection is then refused (tabnas/yaml#105). The
   `key-before-value` tests in all three runtimes hold this.
+- **The passes name anchors and merged keys in counters.** YAML's
+  transducer part reads no anchor and no merge from the tokens, so the
+  val that claims an anchor sets `&name` and `yamlAnchored` to its own
+  instance number, and the map that merges sets `<<key` for each key it
+  merged, on its close pass. They are part of the passes' contract with
+  the part: rename one and the part writes an alias or a merge wrong,
+  which the `counters` tests in all three runtimes catch first. A counter
+  passes to the rules below its rule, so only the val whose
+  `yamlAnchored` is its own `i` is the anchored one.
+- **An alias is the anchored node again.** The value an anchor records,
+  and the one an alias resolves to, is a copy (`copyAnchored` in
+  TypeScript, `deepCopy` in Go, `deep_copy` in Rust) that rebuilds every
+  container and keeps every scalar as it is, `.inf` and `.nan` included
+  (YAML 1.2.2, 3.2.2.2). It was a JSON round trip in TypeScript, and its
+  copy in Rust, which wrote such a number as null; `anchors-aliases.tsv`
+  pins the copy. The TypeScript copy defines each key as an own
+  property, so a key `__proto__` stays a key.
 - **The Rust port keeps its per-parse state in the parse context.** The
   TS and Go plugins close over thirteen variables (anchors, pending
   anchors, pending tokens, tag handles, the stream accumulators, the

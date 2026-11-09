@@ -41,3 +41,19 @@ a: &__proto__ 1\nb: *__proto__\n	{"a":1,"b":1}
 a: &__proto__\n  toString: pwned\nb: *toString\n	ERROR:yaml_undefined_alias
 a: &__proto__\n  toString: pwned\nb: &toString\n  c: *toString\n	{"a":{"toString":"pwned"},"b":{"c":null}}
 __proto__:\n  polluted: yes\n	{"__proto__":{"polluted":true}}
+# An alias is the anchored node again (YAML 1.2.2, 3.2.2.2): a number that
+# is not finite is kept, which a JSON round trip of the anchored value once
+# wrote as null in TypeScript and Rust, and an anchor on a mapping that
+# follows its tag (`&a !!map`) names that mapping, where the Go port once
+# kept the tag's text.
+a: &x [.inf, .nan, 1]\nb: *x	{"a":["@@Infinity","@@NaN",1],"b":["@@Infinity","@@NaN",1]}
+a: &x [.inf]\n*x : v	{"a":["@@Infinity"],"Infinity":"v"}
+x: &a !!map\n  a: 1\ny: *a	{"x":{"a":1},"y":{"a":1}}
+# An alias to a collection writes its anchored value again, as the
+# transducer part replays it: nested anchors, an anchor defined again, an
+# anchor on an alias, and a key `__proto__` in the copy.
+a: &x [1, &y [2], *y]\nb: *x\nc: *y	{"a":[1,[2],[2]],"b":[1,[2],[2]],"c":[2]}
+a: &x [1]\nb: *x\nc: &x {p: 2}\nd: *x	{"a":[1],"b":[1],"c":{"p":2},"d":{"p":2}}
+a: &x {p: 1}\nb: &y *x\nc: [*y, *x]	{"a":{"p":1},"b":{"p":1},"c":[{"p":1},{"p":1}]}
+a: &x [{p: &y {q: [1]}}]\nb: *x\nc: {d: *y}	{"a":[{"p":{"q":[1]}}],"b":[{"p":{"q":[1]}}],"c":{"d":{"q":[1]}}}
+a: &m {__proto__: 1}\nb: *m	{"a":{"__proto__":1},"b":{"__proto__":1}}

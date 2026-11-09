@@ -377,18 +377,18 @@ fn is_container(value: &Value) -> bool {
     )
 }
 
-/// The `JSON.parse(JSON.stringify(v))` the canonical implementation
-/// copies an anchored value with: containers are rebuilt, an `undefined`
-/// entry is dropped from an object and becomes null in an array, and a
-/// non-finite number becomes null.
+/// A copy of an anchored value, as an alias presents it, the canonical
+/// implementation's `copyAnchored`. An alias is the anchored node again
+/// (YAML 1.2.2, 3.2.2.2), so every scalar is kept as it is, a number that
+/// is not finite included, where the JSON round trip the canonical
+/// implementation once copied with wrote one as null; and every container
+/// is rebuilt, so a merge into one alias cannot reach the anchor or another
+/// alias.
 fn deep_copy(value: &Value) -> Value {
     match value {
         Value::Object(map) => {
             let mut out = IndexMap::new();
             for (key, entry) in map.iter() {
-                if matches!(entry, Value::Undefined) {
-                    continue;
-                }
                 out.insert(key.clone(), deep_copy(entry));
             }
             Value::object(out)
@@ -396,17 +396,12 @@ fn deep_copy(value: &Value) -> Value {
         Value::MapRef(map) => {
             let mut out = IndexMap::new();
             for (key, entry) in map.value.iter() {
-                if matches!(entry, Value::Undefined) {
-                    continue;
-                }
                 out.insert(key.clone(), deep_copy(entry));
             }
             Value::object(out)
         }
         Value::Array(items) => Value::array(items.iter().map(deep_copy).collect()),
         Value::ListRef(list) => Value::array(list.value.iter().map(deep_copy).collect()),
-        Value::Undefined => Value::Null,
-        Value::Number(number) if !number.is_finite() => Value::Null,
         Value::Text(text) => Value::String(text.string.clone()),
         other => other.clone(),
     }
@@ -1138,6 +1133,7 @@ fn wire_rules(parser: &mut Tabnas) {
                     node if is_container(node) => Value::Undefined,
                     node => node.clone(),
                 };
+                name_anchors(rule, &pending, &open_node);
                 rule.u_mut()
                     .insert("yamlAnchors".to_string(), Value::array(pending));
                 rule.u_mut()
@@ -1297,8 +1293,14 @@ fn wire_rules(parser: &mut Tabnas) {
     // mapping's node cell, which every pair of a mapping shares, and the
     // map leaves that mapping unmerged, as the canonical port does.
     parser.define_rule("pair", |spec| {
+        spec.add_ao(|rule, context| {
+            hold_merge(rule, context);
+        });
         spec.add_bc(|rule, context| {
             note_literal_merge_key(rule, context);
+        });
+        spec.add_ac(|rule, context| {
+            release_merge(rule, context);
         });
     });
 
@@ -1311,7 +1313,15 @@ fn wire_rules(parser: &mut Tabnas) {
         });
         spec.add_ac(|rule, context| {
             if !state::map_take(context, state::LITERAL_MERGE, &cell_address(rule)) {
-                apply_merge_keys(rule);
+                // Each key a merge brings is named in the map's counters
+                // as `<<key`, so the map's close pass names every key it
+                // merged: a host that reads the rule passes (YAML's
+                // transducer part) writes those members of the merge
+                // sources, and no other, as the mapping's last, as
+                // `mergeMember` does in the canonical source.
+                for key in apply_merge_keys(rule) {
+                    rule.n_mut().insert(format!("<<{key}"), 1);
+                }
             }
         });
     });
@@ -1361,6 +1371,64 @@ fn store_elem_pair(rule: &mut Rule, context: &mut Context) {
     store_member(rule, context, string_of(&key), child);
 }
 
+/// Name, in the val's counters, each anchor it claims that its close may
+/// record as its node: the counter `&name`, whose value is the val's own
+/// instance number, and the counter `yamlAnchored`, of the same value,
+/// which marks the val. A host that reads the rule passes (YAML's
+/// transducer part) knows the anchored val as the one whose `yamlAnchored`
+/// is its own `i`, keeps the events of its value, and writes them again at
+/// an alias of a name. An inline anchor on a val that opened on a scalar
+/// records that scalar or nothing (the val's after-close), so it is not
+/// named. Mirrors `nameAnchors` in the canonical source.
+fn name_anchors(rule: &mut Rule, anchors: &[Value], open_node: &Value) {
+    let scalar = !matches!(open_node, Value::Undefined | Value::Null) && !is_container(open_node);
+    // A parse of more rules than an `i32` counts names no anchor, so an
+    // alias of one past them is refused rather than written wrong.
+    let Ok(instance) = i32::try_from(rule.i) else {
+        return;
+    };
+    for anchor in anchors {
+        let Value::Object(entry) = anchor else {
+            continue;
+        };
+        let inline = matches!(entry.get("i"), Some(Value::Bool(true)));
+        let Some(Value::String(name)) = entry.get("n") else {
+            continue;
+        };
+        if inline && scalar {
+            continue;
+        }
+        rule.n_mut().insert(format!("&{name}"), instance);
+        rule.n_mut().insert("yamlAnchored".to_string(), instance);
+    }
+}
+
+/// A plain `<<` holds a streaming host's pruning ([`state::PRUNE_HOLD`])
+/// from its pair's open to its close: the map's after-close merges the
+/// sources the `<<` value lists, and a sequence of them, emptied behind
+/// the stream when its rule closed, would merge nothing.
+fn hold_merge(rule: &mut Rule, context: &mut Context) {
+    let token = match rule.o0() {
+        Some(token) if token.name.as_ref() == "#QM" => rule.o1(),
+        other => other,
+    };
+    let plain = token.is_some_and(|token| token.tin != TIN_ST);
+    if plain && matches!(rule.u.get("key"), Some(Value::String(key)) if key == "<<") {
+        rule.u_mut()
+            .insert("yamlMergeHold".to_string(), Value::Bool(true));
+        state::hold_pruning(context, 1.0);
+    }
+}
+
+/// The hold [`hold_merge`] raised, released as the merge key's pair closes.
+fn release_merge(rule: &mut Rule, context: &mut Context) {
+    if matches!(rule.u.get("yamlMergeHold"), Some(Value::Bool(true))) {
+        rule.u_mut()
+            .insert("yamlMergeHold".to_string(), Value::Bool(false));
+        state::hold_pruning(context, -1.0);
+    }
+}
+
 /// Note a quoted `<<` key on the mapping it belongs to: the key a pair
 /// names is `<<`, and its token is a quoted scalar's (`#ST`), the token
 /// after the `?` of an explicit key in a flow mapping.
@@ -1388,14 +1456,16 @@ fn cell_address(rule: &Rule) -> String {
 }
 
 /// Resolve a `<<` merge key in place: the merged entries are appended
-/// after the explicit ones, and an explicit key always wins.
-fn apply_merge_keys(rule: &mut Rule) {
+/// after the explicit ones, and an explicit key always wins. It answers
+/// the keys it merged, in the order it merged them.
+fn apply_merge_keys(rule: &mut Rule) -> Vec<String> {
+    let mut merged = Vec::new();
     let mut node = rule.node.borrow_mut();
     let Some(entries) = map_entries(&node) else {
-        return;
+        return merged;
     };
     let Some(merge) = entries.get("<<").cloned() else {
-        return;
+        return merged;
     };
     let sources = match &merge {
         Value::Array(items) => (**items).clone(),
@@ -1423,9 +1493,11 @@ fn apply_merge_keys(rule: &mut Rule) {
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect();
         for (key, value) in additions {
+            merged.push(key.clone());
             map_insert(&mut node, key, value);
         }
     }
+    merged
 }
 
 // ---------------------------------------------------------------------

@@ -68,6 +68,17 @@ describe('prune-hold', () => {
     assert.strictEqual(Math.max(...holds), 2, JSON.stringify(holds))
   })
 
+  // A merge key's sources are merged at its mapping's close, after the
+  // sequence that lists them has closed: its pair holds the pruning from
+  // its open to its close, so the sequence is merged whole, and the
+  // sequence after it is emptied as any other.
+  test('a merge key holds pruning until its sources are read', () => {
+    const { value, holds } = pruned('a: &a {x: 1}\nb: &b {y: 2}\nc:\n  <<: [*a, *b]\n  z: [3]\n')
+    assert.deepStrictEqual(value.c, { z: [], x: 1, y: 2 }, JSON.stringify(value))
+    assert.ok(holds.some((h) => h > 0), JSON.stringify(holds))
+    assert.strictEqual(holds[holds.length - 1], 0, `released: ${JSON.stringify(holds)}`)
+  })
+
   test('a document with no anchor holds nothing', () => {
     const { value, holds } = pruned('a: [1, [2, 3]]\nb: [4]\n')
     assert.ok(0 < holds.length && holds.every((h) => 0 === h), JSON.stringify(holds))

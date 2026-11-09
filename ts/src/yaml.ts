@@ -311,6 +311,26 @@ function holdPruning(ctx: Context, by: number): void {
   ctx.u[PRUNE_HOLD] = Math.max(0, now + by)
 }
 
+// Name, in the val's counters, each anchor it claims that its close may
+// record as its node: the counter `&name`, whose value is the val's own
+// instance number, and the counter `yamlAnchored`, of the same value,
+// which marks the val. A counter passes to every rule below the val, with
+// the val's number, so a host that reads the rule passes (YAML's
+// transducer part) knows the anchored val as the one whose `yamlAnchored`
+// is its own `i`, with one lookup on each val's pass, keeps the events of
+// its value, and writes them again at an alias of a name. An inline anchor
+// on a val that opened on a scalar records that scalar or nothing (the
+// val's ac), so it is not named.
+function nameAnchors(rule: Rule): void {
+  const open = rule.u.yamlAnchorOpenNode
+  const scalar = null != open && 'object' !== typeof open
+  for (const anchor of rule.u.yamlAnchors) {
+    if (anchor.inline && scalar) continue
+    rule.n['&' + anchor.name] = rule.i
+    rule.n.yamlAnchored = rule.i
+  }
+}
+
 const KEY_ORDER = Symbol.for('tabnas.keyOrder')
 
 function storeMember(rule: Rule, ctx: Context, key: string, value: any) {
@@ -338,6 +358,38 @@ function storeMember(rule: Rule, ctx: Context, key: string, value: any) {
     order.push('' + key)
   }
   node[key] = value
+}
+
+// A copy of an anchored value, as an alias presents it. An alias is the
+// anchored node again (YAML 1.2.2, 3.2.2.2), so every scalar is kept as it
+// is, a number that is not finite included, where the JSON round trip this
+// copy replaces wrote one as null; and every container is rebuilt, so a
+// merge into one alias cannot reach the anchor or another alias. A
+// mapping's keys are defined as its own properties, so a key `__proto__`
+// stays a key, as JSON.parse kept it.
+function copyAnchored(val: any): any {
+  if (Array.isArray(val)) return val.map(copyAnchored)
+  if (null == val || 'object' !== typeof val) return val
+  const out: Record<string, any> = {}
+  for (const key of Object.keys(val)) {
+    Object.defineProperty(out, key, {
+      value: copyAnchored(val[key]),
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    })
+  }
+  return out
+}
+
+// A member a merge key brings, stored, and named in the mapping's counters
+// as the counter `<<key`, so that the map's close pass names every key it
+// merged: a host that reads the rule passes (YAML's transducer part)
+// writes those members of the merge sources, and no other, as the
+// mapping's last.
+function mergeMember(rule: Rule, ctx: Context, key: string, value: any) {
+  storeMember(rule, ctx, key, value)
+  rule.n['<<' + key] = 1
 }
 
 // A member this grammar removes (the `<<` of a merge), taken out of the
@@ -1532,7 +1584,7 @@ name an anchor defined earlier.`,
                 if (anchors[name] !== undefined) {
                   let val = anchors[name]
                   if (typeof val === 'object' && val !== null) {
-                    val = JSON.parse(JSON.stringify(val))
+                    val = copyAnchored(val)
                   }
                   let tin = typeof val === 'string' ? '#TX' :
                             typeof val === 'number' ? '#NR' : '#VL'
@@ -2846,6 +2898,7 @@ name an anchor defined earlier.`,
         // that empties them, until the anchor is recorded at this val's
         // close (holdPruning).
         holdPruning(ctx, 1)
+        nameAnchors(rule)
       }
     })
     rulespec.bc((rule: Rule) => {
@@ -2860,7 +2913,7 @@ name an anchor defined earlier.`,
         let name = rule.node.__yamlAlias
         let val = anchors[name]
         if (typeof val === 'object' && val !== null) {
-          rule.node = JSON.parse(JSON.stringify(val))
+          rule.node = copyAnchored(val)
         } else {
           rule.node = val
         }
@@ -2877,7 +2930,7 @@ name an anchor defined earlier.`,
           }
           let val = rule.node
           if (typeof val === 'object' && val !== null) {
-            val = JSON.parse(JSON.stringify(val))
+            val = copyAnchored(val)
           }
           anchors[anchor.name] = val
         }
@@ -3083,13 +3136,29 @@ name an anchor defined earlier.`,
 
   // pair rule: note a quoted `<<` key, a string token (after the `?` of
   // an explicit key in a flow mapping), on the mapping's node, which every
-  // pair of a mapping shares.
+  // pair of a mapping shares. A plain `<<` holds a streaming host's
+  // pruning (holdPruning) from its pair's open to its close: the map's ac
+  // merges the sources the `<<` value lists, and a sequence of them,
+  // emptied behind the stream when its rule closed, would merge nothing.
   tabnas.rule('pair', (rulespec: RuleSpec) => {
+    rulespec.ao((rule: Rule, ctx: Context) => {
+      let keyToken = QM === rule.o0.tin ? rule.o1 : rule.o0
+      if ('<<' === rule.u.key && null != keyToken && ST !== keyToken.tin) {
+        rule.u.yamlMergeHold = true
+        holdPruning(ctx, 1)
+      }
+    })
     rulespec.bc((rule: Rule) => {
       let keyToken = QM === rule.o0.tin ? rule.o1 : rule.o0
       if ('<<' === rule.u.key && ST === keyToken.tin &&
           null != rule.node && 'object' === typeof rule.node) {
         literalMergeKey.add(rule.node)
+      }
+    })
+    rulespec.ac((rule: Rule, ctx: Context) => {
+      if (rule.u.yamlMergeHold) {
+        rule.u.yamlMergeHold = false
+        holdPruning(ctx, -1)
       }
     })
   })
@@ -3111,13 +3180,13 @@ name an anchor defined earlier.`,
           for (let m of mergeVal) {
             if (typeof m === 'object' && m !== null && !Array.isArray(m)) {
               for (let k of Object.keys(m)) {
-                if (!(k in rule.node)) storeMember(rule, ctx, k, m[k])
+                if (!(k in rule.node)) mergeMember(rule, ctx, k, m[k])
               }
             }
           }
         } else if (typeof mergeVal === 'object' && mergeVal !== null) {
           for (let k of Object.keys(mergeVal)) {
-            if (!(k in rule.node)) storeMember(rule, ctx, k, mergeVal[k])
+            if (!(k in rule.node)) mergeMember(rule, ctx, k, mergeVal[k])
           }
         }
       }
