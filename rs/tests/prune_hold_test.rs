@@ -79,6 +79,21 @@ fn nested_anchors_raise_the_hold_twice() {
     assert_eq!(holds.iter().copied().fold(0.0, f64::max), 2.0, "{holds:?}");
 }
 
+/// A merge key's sources are merged at its mapping's close, after the
+/// sequence that names them has closed: its pair holds the pruning from its
+/// open to its close, so the sequence is merged whole, and the sequence
+/// after it is emptied as any other.
+#[test]
+fn a_merge_key_holds_pruning_until_its_sources_are_read() {
+    let (value, holds) = pruned("a: &a {x: 1}\nb: &b {y: 2}\nc:\n  <<: [*a, *b]\n  z: [3]\n");
+    assert_eq!(
+        value,
+        r#"{"a":{"x":1},"b":{"y":2},"c":{"z":[],"x":1,"y":2}}"#
+    );
+    assert!(holds.iter().any(|h| *h > 0.0), "{holds:?}");
+    assert_eq!(holds.last(), Some(&0.0), "released: {holds:?}");
+}
+
 /// A document with no anchor raises no hold, so the host empties every
 /// array it would.
 #[test]

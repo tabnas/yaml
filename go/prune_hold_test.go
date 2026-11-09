@@ -93,6 +93,25 @@ func TestNestedAnchorsRaiseTheHoldTwice(t *testing.T) {
 	}
 }
 
+// A merge key's sources are merged at its mapping's close, after the list
+// that names them has closed: its pair holds the pruning from its open to
+// its close, so the list is merged whole, and the list after it is
+// emptied as any other.
+func TestAMergeKeyHoldsPruningUntilItsSourcesAreRead(t *testing.T) {
+	value, holds := pruned(t, "a: &a {x: 1}\nb: &b {y: 2}\nc:\n  <<: [*a, *b]\n  z: [3]\n")
+	out, _ := json.Marshal(value["c"])
+	if string(out) != `{"x":1,"y":2,"z":[]}` {
+		t.Errorf("c is %s", out)
+	}
+	raised := false
+	for _, h := range holds {
+		raised = raised || h > 0
+	}
+	if !raised || len(holds) == 0 || holds[len(holds)-1] != 0 {
+		t.Errorf("the holds %v", holds)
+	}
+}
+
 // A document with no anchor raises no hold, so the host empties every list
 // it would.
 func TestADocumentWithNoAnchorHoldsNothing(t *testing.T) {

@@ -816,6 +816,39 @@ func deepCopy(v any) any {
 	}
 }
 
+// isContainer is `typeof value === 'object'` with null left out, as the
+// canonical guards on an anchored value read it.
+func isContainer(v any) bool {
+	switch v.(type) {
+	case *tabnas.OrderedMap, tabnas.OrderedMap, map[string]any, []any:
+		return true
+	}
+	return false
+}
+
+// openedOnScalar says whether a val opened on a scalar node: a value that
+// is neither null, nor undefined, nor a container.
+func openedOnScalar(open any) bool {
+	return open != nil && !tabnas.IsUndefined(open) && !isContainer(open)
+}
+
+// nameAnchors names, in the val's counters, each anchor it claims that its
+// close may record as its node: the counter `&name`, whose value is the
+// val's own instance number. A host that reads the rule passes (YAML's
+// transducer part) knows the anchored val as the one whose `&name` is its
+// own `i`, keeps the events of its value, and writes them again at an
+// alias of the name. An inline anchor on a val that opened on a scalar
+// records that scalar or nothing (the val's AC), so it is not named.
+// Mirrors nameAnchors in src/yaml.ts.
+func nameAnchors(r *tabnas.Rule, anchors []anchorInfo, open any) {
+	for _, anchor := range anchors {
+		if anchor.inline && openedOnScalar(open) {
+			continue
+		}
+		r.EnsureN()["&"+anchor.name] = r.I
+	}
+}
+
 // asStringMap views a parsed object value as a plain map[string]any.
 //
 // The shared jsonic engine now returns parsed JSON objects as an
@@ -960,18 +993,19 @@ func entryMapIn(r *tabnas.Rule) (int, bool) {
 // An explicit key always wins over a merged one, and an earlier source
 // over a later one. The node is an insertion-ordered *OrderedMap, block or
 // flow, or, defensively, a plain map[string]any, which has no order to
-// keep.
-func applyMergeKeys(node any) {
+// keep. It answers the keys it merged, in the order it merged them.
+func applyMergeKeys(node any) []string {
+	var merged []string
 	om, ok := node.(*tabnas.OrderedMap)
 	if !ok {
 		// Plain map: no order to keep; merge by value.
 		m, ok := node.(map[string]any)
 		if !ok {
-			return
+			return nil
 		}
 		mergeVal, hasMerge := m["<<"]
 		if !hasMerge {
-			return
+			return nil
 		}
 		delete(m, "<<")
 		for _, mm := range mergeSources(mergeVal) {
@@ -979,14 +1013,15 @@ func applyMergeKeys(node any) {
 			for _, k := range mkeys {
 				if _, exists := m[k]; !exists {
 					m[k] = mvals[k]
+					merged = append(merged, k)
 				}
 			}
 		}
-		return
+		return merged
 	}
 	mergeVal, hasMerge := om.Get("<<")
 	if !hasMerge {
-		return
+		return nil
 	}
 	// Delete, then append: Set adds a key it has not seen at the END, and
 	// the explicit keys are already in place, so they keep their order and
@@ -998,9 +1033,11 @@ func applyMergeKeys(node any) {
 		for _, mk := range mkeys {
 			if !om.Has(mk) {
 				om.Set(mk, mvals[mk])
+				merged = append(merged, mk)
 			}
 		}
 	}
+	return merged
 }
 
 // mergeSources normalizes a `<<` merge value into the list of source
@@ -4582,6 +4619,7 @@ func configureGrammarRules(j *tabnas.Tabnas, IN, EL tabnas.Tin, KEY []tabnas.Tin
 				// stream that empties them, until the anchor is recorded at
 				// this val's close (holdPruning).
 				holdPruning(ctx, 1)
+				nameAnchors(r, anchorsCopy, r.Node)
 			}
 		})
 		rs.AddBC(func(r *tabnas.Rule, ctx *tabnas.Context) {
@@ -4629,14 +4667,14 @@ func configureGrammarRules(j *tabnas.Tabnas, IN, EL tabnas.Tin, KEY []tabnas.Tin
 				anchorsSlice, ok := anchorList.([]anchorInfo)
 				if ok {
 					for _, anchor := range anchorsSlice {
-						if anchor.inline {
-							openNode := r.U["yamlAnchorOpenNode"]
-							if openNode != nil {
-								switch openNode.(type) {
-								case *tabnas.OrderedMap, tabnas.OrderedMap, map[string]any, []any:
-									continue
-								}
-							}
+						// An inline anchor that named a scalar keeps that
+						// scalar: the container this val ended up holding
+						// belongs to a later, deeper value. Mirrors the
+						// canonical guard, which reads a val that opened on
+						// a container (`x: &a !!map` and the mapping on the
+						// next lines) as the anchor's node.
+						if anchor.inline && openedOnScalar(r.U["yamlAnchorOpenNode"]) && isContainer(r.Node) {
+							continue
 						}
 						val := r.Node
 						switch v := val.(type) {
@@ -4743,7 +4781,23 @@ func configureGrammarRules(j *tabnas.Tabnas, IN, EL tabnas.Tin, KEY []tabnas.Tin
 	// token (after the `?` of an explicit key in a flow mapping), on the
 	// mapping's node, which every pair of a mapping shares, and the map
 	// leaves that node unmerged. Mirrors the pair rule in src/yaml.ts.
+	//
+	// A plain `<<` holds a streaming host's pruning (holdPruning) from its
+	// pair's open to its close: the map's AC merges the sources the `<<`
+	// value lists, and a sequence of them, emptied behind the stream when
+	// its rule closed, would merge nothing.
 	j.Rule("pair", func(rs *tabnas.RuleSpec, _ *tabnas.Parser) {
+		rs.AddAO(func(r *tabnas.Rule, ctx *tabnas.Context) {
+			keyTkn := r.O0
+			if keyTkn != nil && keyTkn.Tin == QM {
+				keyTkn = r.O1
+			}
+			if keyTkn == nil || keyTkn.Tin == ST || r.U["key"] != "<<" {
+				return
+			}
+			r.EnsureU()["yamlMergeHold"] = true
+			holdPruning(ctx, 1)
+		})
 		rs.AddBC(func(r *tabnas.Rule, ctx *tabnas.Context) {
 			keyTkn := r.O0
 			if keyTkn.Tin == QM {
@@ -4754,6 +4808,12 @@ func configureGrammarRules(j *tabnas.Tabnas, IN, EL tabnas.Tin, KEY []tabnas.Tin
 			}
 			if om, ok := r.Node.(*tabnas.OrderedMap); ok {
 				literalMergeKey[om] = true
+			}
+		})
+		rs.AddAC(func(r *tabnas.Rule, ctx *tabnas.Context) {
+			if held, _ := r.U["yamlMergeHold"].(bool); held {
+				r.U["yamlMergeHold"] = false
+				holdPruning(ctx, -1)
 			}
 		})
 	})
@@ -4770,7 +4830,14 @@ func configureGrammarRules(j *tabnas.Tabnas, IN, EL tabnas.Tin, KEY []tabnas.Tin
 				delete(literalMergeKey, om)
 				return
 			}
-			applyMergeKeys(r.Node)
+			// Each key a merge brings is named in the map's counters as
+			// `<<key`, so the map's close pass names every key it merged:
+			// a host that reads the rule passes (YAML's transducer part)
+			// writes those members of the merge sources, and no other, as
+			// the mapping's last. Mirrors mergeMember in src/yaml.ts.
+			for _, k := range applyMergeKeys(r.Node) {
+				r.EnsureN()["<<"+k] = 1
+			}
 		})
 	})
 
