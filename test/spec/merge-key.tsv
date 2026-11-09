@@ -43,3 +43,17 @@ a: {<<: 1, b: 2}	{"a":{"b":2}}		ordered
 {<<, b: 1}	{"b":1}		ordered
 a: {<<: [1, [2], {c: 3}], b: 2}	{"a":{"b":2,"c":3}}		ordered
 a: &a {x: .inf}\nb:\n  <<: *a	{"a":{"x":"@@Infinity"},"b":{"x":"@@Infinity"}}		ordered
+# A source that repeats a key: the grammar combines the key's values in
+# the source first, as in any mapping (repeated-keys.tsv), and merges what
+# that leaves, so a later value wins, a mapping's members gather, and a
+# key the mapping sets, or an earlier source holds, still wins. Only a
+# sequence's mappings are sources, counted in order.
+{<<: {a: 1, a: 2}}	{"a":2}		ordered
+x:\n  <<: {a: 1, a: 2}	{"x":{"a":2}}		ordered
+x:\n  <<:\n    a: 1\n    a: 2	{"x":{"a":2}}		ordered
+x:\n  <<: [{a: 1, a: 2}]	{"x":{"a":2}}		ordered
+b: &b {a: 1}\nx:\n  <<: [{a: 3, a: 4}, *b]	{"b":{"a":1},"x":{"a":4}}		ordered
+x:\n  <<: {a: {p: 1}, a: {q: 2}}	{"x":{"a":{"p":1,"q":2}}}		ordered
+x:\n  a: 0\n  <<: {a: 1, a: 2}	{"x":{"a":0}}		ordered
+x:\n  <<: [{a: 1}, {a: 2, a: 3}]	{"x":{"a":1}}		ordered
+a: &a {x: 1}\nb: &b {x: 2, y: 2}\nc:\n  <<: [1, {}, *b, [w], *a]	{"a":{"x":1},"b":{"x":2,"y":2},"c":{"x":2,"y":2}}		ordered

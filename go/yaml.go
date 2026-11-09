@@ -996,9 +996,10 @@ func entryMapIn(r *tabnas.Rule) (int, bool) {
 // An explicit key always wins over a merged one, and an earlier source
 // over a later one. The node is an insertion-ordered *OrderedMap, block or
 // flow, or, defensively, a plain map[string]any, which has no order to
-// keep. It answers the keys it merged, in the order it merged them.
-func applyMergeKeys(node any) []string {
-	var merged []string
+// keep. It answers the keys it merged, in the order it merged them, each
+// with the number of the source it came from.
+func applyMergeKeys(node any) []mergedKey {
+	var merged []mergedKey
 	om, ok := node.(*tabnas.OrderedMap)
 	if !ok {
 		// Plain map: no order to keep; merge by value.
@@ -1011,12 +1012,17 @@ func applyMergeKeys(node any) []string {
 			return nil
 		}
 		delete(m, "<<")
+		source := 0
 		for _, mm := range mergeSources(mergeVal) {
+			if !isMapping(mm) {
+				continue
+			}
+			source++
 			mkeys, mvals := orderedEntries(mm)
 			for _, k := range mkeys {
 				if _, exists := m[k]; !exists {
 					m[k] = mvals[k]
-					merged = append(merged, k)
+					merged = append(merged, mergedKey{k, source})
 				}
 			}
 		}
@@ -1031,16 +1037,39 @@ func applyMergeKeys(node any) []string {
 	// lead. This port once spliced the merged keys in where the `<<` stood
 	// instead, which gave the same members in a different order.
 	om.Delete("<<")
+	source := 0
 	for _, mm := range mergeSources(mergeVal) {
+		if !isMapping(mm) {
+			continue
+		}
+		source++
 		mkeys, mvals := orderedEntries(mm)
 		for _, mk := range mkeys {
 			if !om.Has(mk) {
 				om.Set(mk, mvals[mk])
-				merged = append(merged, mk)
+				merged = append(merged, mergedKey{mk, source})
 			}
 		}
 	}
 	return merged
+}
+
+// mergedKey is a key a merge brought and the number of the source it came
+// from: 1 for the mapping a `<<` names, and for a sequence, the place of
+// the mapping among the sequence's mappings, counted from 1.
+type mergedKey struct {
+	key    string
+	source int
+}
+
+// isMapping reports whether a merge source is a mapping, which a merge
+// takes members from and counts; any other source brings nothing.
+func isMapping(v any) bool {
+	switch v.(type) {
+	case *tabnas.OrderedMap, tabnas.OrderedMap, map[string]any:
+		return true
+	}
+	return false
 }
 
 // mergeSources normalizes a `<<` merge value into the list of source
@@ -4834,12 +4863,14 @@ func configureGrammarRules(j *tabnas.Tabnas, IN, EL tabnas.Tin, KEY []tabnas.Tin
 				return
 			}
 			// Each key a merge brings is named in the map's counters as
-			// `<<key`, so the map's close pass names every key it merged:
-			// a host that reads the rule passes (YAML's transducer part)
-			// writes those members of the merge sources, and no other, as
-			// the mapping's last. Mirrors mergeMember in src/yaml.ts.
-			for _, k := range applyMergeKeys(r.Node) {
-				r.EnsureN()["<<"+k] = 1
+			// `<<key`, whose value is the number of the source it came
+			// from, so the map's close pass names every key it merged and
+			// where it took it: a host that reads the rule passes (YAML's
+			// transducer part) writes those members of those sources, and
+			// no other, as the mapping's last. Mirrors mergeMember in
+			// src/yaml.ts.
+			for _, m := range applyMergeKeys(r.Node) {
+				r.EnsureN()["<<"+m.key] = m.source
 			}
 		})
 	})

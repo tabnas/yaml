@@ -370,28 +370,35 @@ def yaml-render [input]
 ; Merge keys. A plain \`<<\` in a mapping (\`map\`; a sequence's mapping is
 ; not merged, as the grammar merges none) is no member: the part keeps its
 ; value's events, a level of their own that recorders see and the output
-; does not, until its pair closes, and its candidates are then the members
-; of that mapping, or of each mapping that sequence holds, the first of a
-; name. The grammar folds the members in at the map's close, after the
-; passes, keeping the mapping's own keys wherever they stand, and names
-; each key it merged in the map's counters, \`<<key\`, on its close pass; the
-; part writes those candidates, in order, as the mapping's last members,
-; and refuses a merge it kept no candidate for. A quoted \`<<\` is an
+; does not, until the mapping closes. The grammar folds the members in at
+; the map's close, after the passes, keeping the mapping's own keys
+; wherever they stand, and names each key it merged in the map's counters,
+; \`<<key\`, on its close pass, with the number of the source it took the
+; key from: 1 for the mapping the \`<<\` names, and for a sequence, the
+; place of the mapping among the sequence's mappings, from 1. The part
+; finds the members of that mapping, or of each mapping the sequence
+; holds, with one sort over the kept events, and writes those the
+; counters name, in order, as the mapping's last members. Each key the
+; grammar merged is one member the part kept, or the part refuses: a
+; source that repeats a key the grammar merged, whose values the grammar
+; combines before it merges, keeps the key twice. A quoted \`<<\` is an
 ; ordinary key and leaves its mapping unmerged; a mapping that holds both,
-; or two plain \`<<\`, whose values the grammar combines, is refused in the
-; part's own words (\`fail :unstreamable\`, STREAMABILITY_UNKNOWN), and a
-; host that reads a part reads such a document whole.
+; or two plain \`<<\`, whose values the grammar combines, is refused too.
+; The part refuses each in its own words (\`fail :unstreamable\`,
+; STREAMABILITY_UNKNOWN), and a host that reads a part reads such a
+; document whole.
 ;
 ; What the tree contract after the part refuses is read whole the same
 ; way: a stream of several documents, whose second root follows the
 ; first, and a mapping that repeats a key, whose values the grammar
-; combines, where the part writes the member twice. Over the 617 inputs
+; combines, where the part writes the member twice. Over the 626 inputs
 ; of \`test/spec/*.tsv\` that are not error rows, the part writes what the
-; walk writes for 578; the tree contract refuses the other 39 (18 streams
-; of several documents, 21 repeated keys). Over the YAML Test Suite's 308
-; cases that are not error cases, the reader reads 287, and the part
-; writes what the walk writes for 269 of them; the other 18 are streams
-; of several documents.
+; walk writes for 581; it refuses 6 itself, merge sources that repeat a
+; key the grammar merged, and the tree contract refuses the other 39 (18
+; streams of several documents, 21 repeated keys). Over the YAML Test
+; Suite's 308 cases that are not error cases, the reader reads 287, and
+; the part writes what the walk writes for 269 of them; the other 18 are
+; streams of several documents.
 ;
 ; The state is [stack carry rooted pending held], held [levels anchors
 ; merges]. The stack holds a marker per open rule whose close will come,
@@ -695,11 +702,12 @@ def yaml-transduce-routes [state pieces]
 ; ---------------------------------------------------------------------
 ; Merge keys
 ; ---------------------------------------------------------------------
-
-def yaml-transduce-key-at [depth item]
-  match item
-    case [d (key k)] (equal d depth)
-    case _ false
+;
+; A merge key's value is collected whole, as [depth event] items, and held
+; until its mapping closes, whose counters name each key the grammar
+; merged and the source it took it from. Its members are found by one
+; sort over its items, never by a search per member, so finding them
+; costs what sorting the items does, however many members there are.
 
 def yaml-transduce-shallower [d depth]
   match (compare d depth)
@@ -711,67 +719,88 @@ def yaml-transduce-not-deeper [d depth]
     case :greater false
     case _ true
 
-; Whether item x, after a member's key at j, ends that member: a key at
-; its depth or above, or any other event above it.
-def yaml-transduce-ends [depth j item x]
-  match (compare x j)
-    case :greater
-      match item
-        case [d (key k)] (yaml-transduce-not-deeper d depth)
-        case [d e] (yaml-transduce-shallower d depth)
+; Whether an item bounds a member when the members' keys stand at
+; \`depth\`: such a key, which starts one, or any item above them, which
+; ends the last.
+def yaml-transduce-bound [depth item]
+  match item
+    case [d (key k)] (yaml-transduce-not-deeper d depth)
+    case [d e] (yaml-transduce-shallower d depth)
+
+; Four times a number, which a mark sorts as; a place sorts as one more.
+def yaml-transduce-quadruple [x]
+  let [twice (add x x)]
+    add twice twice
+
+; Whether the number at i of a sorted whole of marks and places is a
+; mark's: a mark m sorts as 4m, just before 4m + 1, its own place's,
+; where a place's number is followed by the next mark's or place's, three
+; or four more.
+def yaml-transduce-mark [i all]
+  match (get-path (path (inc i)) all)
+    case missing false
+    case next (equal next (inc (get-path (path i) all)))
+
+; For each place 0 to n - 1 (\`places\`, the indices of a vector of n
+; items), the index in \`marks\`, places in ascending order, of the last
+; mark at or before it, or -1. One sort answers every place: the marks
+; and the places sort together, a mark just before its own place, so the
+; place k stands after the k places before it and the marks at or before
+; it.
+def yaml-transduce-owners [marks places]
+  let [all (sort (push-all (map (fn [x] (inc (yaml-transduce-quadruple x))) places) (map (fn [m] (yaml-transduce-quadruple m)) marks)))
+       at (filter (fn [i] (if (yaml-transduce-mark i all) false true)) (indices all))]
+    map (fn [k] (sub (sub (get-path (path k) at) k) 1)) (indices at)
+
+def yaml-transduce-mapping-start [item]
+  match item
+    case [1 object-start] true
     case _ false
 
-def yaml-transduce-between [from to x]
-  match (compare x from)
-    case :less false
+; The number of the source each bound (\`marked\`, the items that bound)
+; stands in: 1 in a mapping; in a sequence, the place of its mapping among
+; the sequence's mappings, from 1, as the grammar counts them (0 before
+; the first).
+def yaml-transduce-sources [depth marked]
+  match depth
+    case 1 (map (fn [b] 1) marked)
     case _
-      match (compare x to)
-        case :less true
-        case _ false
+      let [starts (filter (fn [p] (yaml-transduce-mapping-start (get-path (path p) marked))) (indices marked))]
+        map (fn [o] (add o 1)) (yaml-transduce-owners starts (indices marked))
 
-; The items from \`from\` up to \`to\`, their depths moved by \`shift\`.
-def yaml-transduce-span [shift from to items]
-  map (fn [x] (match (get-path (path x) items) (case [d e] [(add d shift) e])))
-    filter (fn [x] (yaml-transduce-between from to x)) (indices items)
-
-; The member whose key is item j, at \`depth\`: [name items], its key and its
-; value's events, the key moved to depth 1.
-def yaml-transduce-member [depth j items]
-  let [ends (filter (fn [x] (yaml-transduce-ends depth j (get-path (path x) items) x)) (indices items))
-       end (match ends (case [] (count items)) (case _ (get-path (path 0) ends)))]
-    match (get-path (path j) items)
-      case [d (key k)] [k (yaml-transduce-span (sub 1 depth) j end items)]
-
-def yaml-transduce-members [depth items]
-  map (fn [j] (yaml-transduce-member depth j items))
-    filter (fn [j] (yaml-transduce-key-at depth (get-path (path j) items))) (indices items)
-
-def yaml-transduce-earlier [x j name members]
-  match (compare x j)
-    case :less (equal (get-path (path x 0) members) name)
+; Whether a bound is the key of a member the grammar merged from source
+; s: its mapping's counter \`<<key\` names that source.
+def yaml-transduce-takes [depth item s n]
+  match item
+    case [d (key k)] (if (equal d depth) (equal (get (string-join "" ["<<" k]) n) s) false)
     case _ false
 
-def yaml-transduce-earliest [j members]
-  let [name (get-path (path j 0) members)]
-    match (count (filter (fn [x] (yaml-transduce-earlier x j name members)) (indices members)))
-      case 0 true
-      case _ false
+def yaml-transduce-key-name [item]
+  match item
+    case [d (key k)] k
 
-; The members with the first of each name: an earlier source wins.
-def yaml-transduce-first [members]
-  map (fn [j] (get-path (path j) members))
-    filter (fn [j] (yaml-transduce-earliest j members)) (indices members)
+; What a merge key's value brings to its mapping, which closed with the
+; counters n: [names items], the names of the members the grammar took
+; from it and their events, in order, each key moved to depth 1. Every
+; item belongs to the last bound at or before it, so a member the grammar
+; took keeps its items, and nothing else is kept.
+def yaml-transduce-merge-members [depth items n]
+  let [bounds (filter (fn [x] (yaml-transduce-bound depth (get-path (path x) items))) (indices items))
+       marked (map (fn [b] (get-path (path b) items)) bounds)
+       sources (yaml-transduce-sources depth marked)
+       taken (map (fn [p] (yaml-transduce-takes depth (get-path (path p) marked) (get-path (path p) sources) n)) (indices marked))
+       keeps (map (fn [o] (get-path (path o) taken)) (yaml-transduce-owners bounds (indices items)))
+       kept (filter (fn [x] (get-path (path x) keeps)) (indices items))]
+    [(map (fn [p] (yaml-transduce-key-name (get-path (path p) marked))) (filter (fn [p] (get-path (path p) taken)) (indices marked)))
+     (map (fn [x] (match (get-path (path x) items) (case [d e] [(sub d (sub depth 1)) e]))) kept)]
 
-; What a merge key's value brings: a mapping's members, or the members of
-; each mapping a sequence holds, in order; nothing from anything else.
-def yaml-transduce-candidates [collected]
-  match collected
-    case [c started true items]
-      match (get-path (path 0) items)
-        case [0 object-start] (yaml-transduce-first (yaml-transduce-members 1 items))
-        case [0 array-start] (yaml-transduce-first (yaml-transduce-members 2 items))
-        case _ []
-    case _ []
+; A mapping's members, keys at depth 1, or the members of each mapping a
+; sequence holds, keys at depth 2; nothing from any other value.
+def yaml-transduce-merge-run [items n]
+  match (get-path (path 0) items)
+    case [0 object-start] (yaml-transduce-merge-members 1 items n)
+    case [0 array-start] (yaml-transduce-merge-members 2 items n)
+    case _ [[] []]
 
 ; A merge key's pair opens in a mapping: the mapping merges, and the
 ; pair's value is collected in a level of its own, not written.
@@ -780,37 +809,40 @@ def yaml-transduce-merge-open [rest carry held]
     case [levels anchors merges]
       transition [(push :merge-pair (push :merge-object rest)) carry true missing [(push [yaml-transduce-collector []] levels) anchors (push [] merges)]] []
 
-; A merge key's pair closes: its value's candidates are the mapping's.
+; A collector's items once it holds a whole value, or none.
+def yaml-transduce-collected [coll]
+  match coll
+    case [c started true items] items
+    case _ []
+
+; A merge key's pair closes: its value's events are held for its
+; mapping's close.
 def yaml-transduce-merge-taken [rest carry rooted pending held]
   match held
     case [levels anchors merges]
       match (top levels)
         case [collected recorders]
-          transition [rest carry rooted pending [(pop levels) anchors (push (yaml-transduce-candidates collected) (pop merges))]] []
+          transition [rest carry rooted pending [(pop levels) anchors (push (yaml-transduce-collected collected) (pop merges))]] []
 
 ; The keys the grammar merged into a mapping, which its close pass names
 ; in its counters, each \`<<\` and the key.
-def yaml-transduce-merged-keys [rule]
-  match (get :n rule)
-    case missing []
-    case n
-      map (fn [k] (get-path (path 1) (first-split "<<" k)))
-        filter (fn [k] (starts-with "<<" k)) (keys n)
+def yaml-transduce-merged-keys [n]
+  map (fn [k] (get-path (path 1) (first-split "<<" k)))
+    filter (fn [k] (starts-with "<<" k)) (keys n)
 
-def yaml-transduce-taken [names member]
-  match member
-    case [k items] (if (yaml-transduce-unnamed names k) false true)
-
-; A merging mapping closes: the candidates the grammar merged, in order,
-; then its end.
+; A merging mapping closes: the members the grammar took, in order, then
+; its end. Each key the grammar merged is one member the part kept, or the
+; part refuses: a source that repeats a key, whose values the grammar
+; combines, keeps the key twice.
 def yaml-transduce-merged [rest carry rooted pending held rule]
   match held
     case [levels anchors merges]
-      let [names (yaml-transduce-merged-keys rule)
-           members (filter (fn [m] (yaml-transduce-taken names m)) (top merges))]
-        match (equal (count members) (count names))
-          case true (transition [rest carry rooted pending [levels anchors (pop merges)]] [[:run -1 (flatten (map (fn [m] (match m (case [k items] items))) members))] object-end])
-          case _ (fail :unstreamable "a merge whose members the part did not keep")
+      let [n (get-or :n (record) rule)]
+        match (yaml-transduce-merge-run (top merges) n)
+          case [names items]
+            match (equal (sort names) (sort (yaml-transduce-merged-keys n)))
+              case true (transition [rest carry rooted pending [levels anchors (pop merges)]] [[:run -1 items] object-end])
+              case _ (fail :unstreamable "a merge whose source repeats a key the grammar merged, whose values it combines, or whose members the part did not keep")
 
 def yaml-transduce-unmerged [why]
   fail :unstreamable why
