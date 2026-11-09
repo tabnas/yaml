@@ -1142,6 +1142,10 @@ fn wire_rules(parser: &mut Tabnas) {
                     .insert("yamlAnchors".to_string(), Value::array(pending));
                 rule.u_mut()
                     .insert("yamlAnchorOpenNode".to_string(), open_node);
+                // The arrays inside the anchored value are kept, behind a
+                // stream that empties them, until the anchor is recorded
+                // at this val's close ([`state::PRUNE_HOLD`]).
+                state::hold_pruning(context, 1.0);
             }
             // A YAML alt that opens on `#IN` or `#EL` (pushing `indent` or
             // `yamlBlockList`, or backing up for an empty value) leaves this val's node as the cell
@@ -1225,6 +1229,8 @@ fn wire_rules(parser: &mut Tabnas) {
                 };
                 state::map_set(context, state::ANCHORS, name.clone(), value);
             }
+            // Recorded: the hold this val raised at its open is released.
+            state::hold_pruning(context, -1.0);
         });
     });
 

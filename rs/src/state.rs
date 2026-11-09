@@ -132,6 +132,28 @@ pub(crate) fn map_set(context: &mut Context, key: &str, entry: String, value: Va
     }
 }
 
+/// `pruneHold`: how many anchored values are open. A host that streams a
+/// document through transduce's `ParserEventSource` empties each array
+/// behind the stream once its rule's close pass has gone by, and an
+/// anchor is recorded only when its value closes, after the arrays inside
+/// it have closed, so the record would hold them emptied: an alias used as
+/// a key would then name the emptied text (tabnas/yaml#138). While this
+/// count is above zero, a source that honours the hold empties no array.
+/// The key is transduce's, the same in every runtime, and lives in the
+/// context's bag, not under the `yaml` prefix, because a host reads it.
+pub(crate) const PRUNE_HOLD: &str = "pruneHold";
+
+/// Raise or lower [`PRUNE_HOLD`] by `by`, one open anchored value at a time.
+pub(crate) fn hold_pruning(context: &mut Context, by: f64) {
+    let now = match context.u.get(PRUNE_HOLD) {
+        Some(Value::Number(n)) => *n,
+        _ => 0.0,
+    };
+    context
+        .u
+        .insert(PRUNE_HOLD.to_string(), Value::Number((now + by).max(0.0)));
+}
+
 /// Queue an anchor for the next `val` rule to claim, and note that it
 /// occurs, for [`anchor_declared`].
 pub(crate) fn pend_anchor(context: &mut Context, name: &str, pending: Value) {
