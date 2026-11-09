@@ -21,18 +21,20 @@ import { Yaml } from '../dist/yaml'
 // val with the val's number, so the anchored val is the one whose
 // `yamlAnchored` is its own `i`. And a merge key's members are folded
 // into its mapping at the map's close, after the passes: the map names
-// each key it merged in its counters, `<<key`, on its close pass, so the
-// part writes those members of the merge's sources, and no other, as the
-// mapping's last. The Go and Rust twins are go/counters_test.go and
-// rs/tests/counters_test.rs.
+// each key it merged in its counters, `<<key`, on its close pass, whose
+// value is the number of the source it took the key from (1 for the
+// mapping a `<<` names; for a sequence, the place of the mapping among
+// the sequence's mappings, from 1), so the part writes those members of
+// those sources, and no other, as the mapping's last. The Go and Rust
+// twins are go/counters_test.go and rs/tests/counters_test.rs.
 
 // What the passes name: the anchors each val names as its own, in the
 // order the vals open, and the keys each map names as merged at its
-// close, sorted, in the order the maps close.
-function named(src: string): { anchors: string[], merged: string[][] } {
+// close, each with its source, sorted, in the order the maps close.
+function named(src: string): { anchors: string[], merged: [string, number][][] } {
   const j = new Tabnas().use(jsonic).use(Yaml)
   const anchors: string[] = []
-  const merged: string[][] = []
+  const merged: [string, number][][] = []
   j.sub({
     ruleDone: (rule: any, _ctx: any, done: any) => {
       const n = rule.n
@@ -44,7 +46,7 @@ function named(src: string): { anchors: string[], merged: string[][] } {
       }
       if ('map' === rule.name && 'c' === done.state) {
         const keys = counters.filter((k) => k.startsWith('<<')).map((k) => k.slice(2))
-        if (0 < keys.length) merged.push(keys.sort())
+        if (0 < keys.length) merged.push(keys.sort().map((k): [string, number] => [k, n['<<' + k]]))
       }
     },
   })
@@ -74,11 +76,16 @@ describe('counters', () => {
     assert.deepStrictEqual(passes, ['o', 'c'])
   })
 
-  test('a map names the keys its merge brought, and only those', () => {
-    assert.deepStrictEqual(named('a: &a {x: 1, y: 1}\nb:\n  y: 2\n  <<: *a\n').merged, [['x']])
+  test('a map names the keys its merge brought, and only those, with their sources', () => {
+    assert.deepStrictEqual(named('a: &a {x: 1, y: 1}\nb:\n  y: 2\n  <<: *a\n').merged, [[['x', 1]]])
     assert.deepStrictEqual(
       named('a: &a {x: 1}\nb: &b {y: 2, x: 3}\nc: {<<: [*a, *b], z: 3}\n').merged,
-      [['x', 'y']],
+      [[['x', 1], ['y', 2]]],
+    )
+    // Only a sequence's mappings are sources, and only they are counted.
+    assert.deepStrictEqual(
+      named('a: &a {x: 1}\nb: &b {y: 2, x: 3}\nc: {<<: [1, {}, *a, [w], *b]}\n').merged,
+      [[['x', 2], ['y', 3]]],
     )
     assert.deepStrictEqual(named('a: &a {x: 1}\nb:\n  x: 2\n  <<: *a\n').merged, [])
     assert.deepStrictEqual(named('"<<": {x: 1}\nb: 2\n').merged, [])

@@ -335,13 +335,14 @@ repository, through any runtime's `translate()`:
   no value is a null element; a stream of directives and document
   markers alone is null. Every event is the one the walk of the
   grammar's value gives. The part's header says how, and what it
-  measured: over the 617 inputs of `test/spec/*.tsv` that are not error
+  measured: over the 626 inputs of `test/spec/*.tsv` that are not error
   rows and the 287 cases of the YAML Test Suite the reader reads, it
-  writes the walk's tree for 847 in every runtime, and the host's tree
-  contract refuses the other 57, which a host reads whole: a stream of
-  several documents is a second root (ruling 5 of admin ADR-33), and a
-  mapping that repeats a key, whose values the grammar combines, holds
-  the key twice.
+  writes the walk's tree for 850 in every runtime; it refuses 6 itself,
+  merge sources that repeat a key the grammar merged (below), and the
+  host's tree contract refuses the other 57, which a host reads whole: a
+  stream of several documents is a second root (ruling 5 of admin
+  ADR-33), and a mapping that repeats a key, whose values the grammar
+  combines, holds the key twice.
   - **Aliases are replayed.** The lexer reads `&name` and hands it to
     the val that claims it, so no pass carries it. That val names it in
     its counters instead (`nameAnchors` in `ts/src/yaml.ts`, and its
@@ -356,18 +357,22 @@ repository, through any runtime's `translate()`:
     held in its state, under `max_metadata_bytes`, past which the run
     fails with `RESOURCE_LIMIT_EXCEEDED` naming it.
   - **A merge key's members are held.** A plain `<<` in a mapping is no
-    member: the part keeps its value's events until its pair closes, the
-    members of the mapping it names or of each mapping a sequence of
-    them holds, the first of a name. The grammar folds the members in at
-    the map's close, after the passes, keeping the mapping's own keys
-    wherever they stand, and names each key it merged in the map's
-    counters, the counter `<<key`, on its close pass (`mergeMember`, and
-    its twins); the part writes those members as the mapping's last. A
-    mapping with two plain `<<`, or a plain and a quoted one, whose
-    values the grammar combines, is refused in the part's own words
-    (`fail :unstreamable`, STREAMABILITY_UNKNOWN), read whole the same
-    way. A sequence's mapping (`- <<: *a`) is not merged, by the
-    grammar or the part.
+    member: the part keeps its value's events until the mapping closes.
+    The grammar folds the members in at the map's close, after the
+    passes, keeping the mapping's own keys wherever they stand, and
+    names each key it merged in the map's counters, the counter `<<key`,
+    on its close pass, whose value is the number of the source it took
+    the key from: 1 for the mapping the `<<` names, and for a sequence,
+    the place of the mapping among the sequence's mappings, from 1
+    (`mergeMember`, and its twins). The part finds the members of the
+    kept value with one sort, not a search per member, and writes those
+    the counters name as the mapping's last. A source that repeats a key
+    the grammar merged, whose values the grammar combines before it
+    merges, and a mapping with two plain `<<`, or a plain and a quoted
+    one, whose values the grammar combines, are refused in the part's
+    own words (`fail :unstreamable`, STREAMABILITY_UNKNOWN), read whole
+    the same way. A sequence's mapping (`- <<: *a`) is not merged, by
+    the grammar or the part.
 
   Admin's descriptor task keeps the object and checks its shape.
   A host that streams through the part also empties the engine's
@@ -456,7 +461,8 @@ Keep the naming rule when you change the render.
   transducer part reads no anchor and no merge from the tokens, so the
   val that claims an anchor sets `&name` and `yamlAnchored` to its own
   instance number, and the map that merges sets `<<key` for each key it
-  merged, on its close pass. They are part of the passes' contract with
+  merged, on its close pass, to the number of the source it took the key
+  from. They are part of the passes' contract with
   the part: rename one and the part writes an alias or a merge wrong,
   which the `counters` tests in all three runtimes catch first. A counter
   passes to the rules below its rule, so only the val whose

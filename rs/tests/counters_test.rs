@@ -8,7 +8,8 @@ use tabnas::RuleState;
 
 /// What `src`'s passes name: the anchors each val names as its own on its
 /// open pass, in the order the vals open, and the keys each map names as
-/// merged on its close pass, sorted, in the order the maps close.
+/// merged on its close pass, each with the number of its source, as
+/// `key=source`, sorted, in the order the maps close.
 fn named(src: &str) -> (Vec<String>, Vec<Vec<String>>) {
     let mut parser = tabnas_yaml::make();
     let anchors = Arc::new(Mutex::new(Vec::new()));
@@ -33,9 +34,9 @@ fn named(src: &str) -> (Vec<String>, Vec<Vec<String>>) {
         if rule.name.as_ref() == "map" && done.state == RuleState::Close {
             let mut keys: Vec<String> = rule
                 .n
-                .keys()
-                .filter(|k| k.starts_with("<<"))
-                .map(|k| k[2..].to_string())
+                .iter()
+                .filter(|(k, _)| k.starts_with("<<"))
+                .map(|(k, v)| format!("{}={v}", &k[2..]))
                 .collect();
             if !keys.is_empty() {
                 keys.sort();
@@ -87,15 +88,20 @@ fn the_anchored_val_names_the_anchor_on_its_close_pass_too() {
 }
 
 #[test]
-fn a_map_names_the_keys_its_merge_brought_and_only_those() {
+fn a_map_names_the_keys_its_merge_brought_and_only_those_with_their_sources() {
     for (src, want) in [
         (
             "a: &a {x: 1, y: 1}\nb:\n  y: 2\n  <<: *a\n",
-            vec![vec!["x"]],
+            vec![vec!["x=1"]],
         ),
         (
             "a: &a {x: 1}\nb: &b {y: 2, x: 3}\nc: {<<: [*a, *b], z: 3}\n",
-            vec![vec!["x", "y"]],
+            vec![vec!["x=1", "y=2"]],
+        ),
+        // Only a sequence's mappings are sources, and only they are counted.
+        (
+            "a: &a {x: 1}\nb: &b {y: 2, x: 3}\nc: {<<: [1, {}, *a, [w], *b]}\n",
+            vec![vec!["x=2", "y=3"]],
         ),
         ("a: &a {x: 1}\nb:\n  x: 2\n  <<: *a\n", vec![]),
         ("\"<<\": {x: 1}\nb: 2\n", vec![]),

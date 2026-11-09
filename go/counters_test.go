@@ -1,6 +1,7 @@
 package tabnasyaml
 
 import (
+	"fmt"
 	"reflect"
 	"sort"
 	"strings"
@@ -14,8 +15,8 @@ import (
 
 // named parses src and answers what its passes name: the anchors each val
 // names as its own on its open pass, in the order the vals open, and the
-// keys each map names as merged on its close pass, sorted, in the order
-// the maps close.
+// keys each map names as merged on its close pass, each with the number
+// of its source, as "key=source", sorted, in the order the maps close.
 func named(t *testing.T, src string) ([]string, [][]string) {
 	t.Helper()
 	anchors := []string{}
@@ -37,9 +38,9 @@ func named(t *testing.T, src string) ([]string, [][]string) {
 		}
 		if rule.Name == "map" && done.State == tabnas.CLOSE {
 			var keys []string
-			for k := range rule.N {
+			for k, v := range rule.N {
 				if strings.HasPrefix(k, "<<") {
-					keys = append(keys, k[2:])
+					keys = append(keys, fmt.Sprintf("%s=%d", k[2:], v))
 				}
 			}
 			if len(keys) > 0 {
@@ -86,13 +87,15 @@ func TestTheAnchoredValNamesTheAnchorOnItsClosePassToo(t *testing.T) {
 	}
 }
 
-func TestAMapNamesTheKeysItsMergeBroughtAndOnlyThose(t *testing.T) {
+func TestAMapNamesTheKeysItsMergeBroughtAndOnlyThoseWithTheirSources(t *testing.T) {
 	for _, c := range []struct {
 		src  string
 		want [][]string
 	}{
-		{"a: &a {x: 1, y: 1}\nb:\n  y: 2\n  <<: *a\n", [][]string{{"x"}}},
-		{"a: &a {x: 1}\nb: &b {y: 2, x: 3}\nc: {<<: [*a, *b], z: 3}\n", [][]string{{"x", "y"}}},
+		{"a: &a {x: 1, y: 1}\nb:\n  y: 2\n  <<: *a\n", [][]string{{"x=1"}}},
+		{"a: &a {x: 1}\nb: &b {y: 2, x: 3}\nc: {<<: [*a, *b], z: 3}\n", [][]string{{"x=1", "y=2"}}},
+		// Only a sequence's mappings are sources, and only they are counted.
+		{"a: &a {x: 1}\nb: &b {y: 2, x: 3}\nc: {<<: [1, {}, *a, [w], *b]}\n", [][]string{{"x=2", "y=3"}}},
 		{"a: &a {x: 1}\nb:\n  x: 2\n  <<: *a\n", [][]string{}},
 		{"\"<<\": {x: 1}\nb: 2\n", [][]string{}},
 		{"- <<: {x: 1}\n  b: 2\n", [][]string{}},

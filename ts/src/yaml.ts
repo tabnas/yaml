@@ -383,13 +383,15 @@ function copyAnchored(val: any): any {
 }
 
 // A member a merge key brings, stored, and named in the mapping's counters
-// as the counter `<<key`, so that the map's close pass names every key it
-// merged: a host that reads the rule passes (YAML's transducer part)
-// writes those members of the merge sources, and no other, as the
-// mapping's last.
-function mergeMember(rule: Rule, ctx: Context, key: string, value: any) {
+// as the counter `<<key`, whose value is the number of the source it came
+// from: 1 for the mapping a `<<` names, and for a sequence, the place of
+// the mapping among the sequence's mappings, counted from 1. So the map's
+// close pass names every key it merged and where it took it: a host that
+// reads the rule passes (YAML's transducer part) writes those members of
+// those sources, and no other, as the mapping's last.
+function mergeMember(rule: Rule, ctx: Context, key: string, value: any, source: number) {
   storeMember(rule, ctx, key, value)
-  rule.n['<<' + key] = 1
+  rule.n['<<' + key] = source
 }
 
 // A member this grammar removes (the `<<` of a merge), taken out of the
@@ -3177,16 +3179,18 @@ name an anchor defined earlier.`,
         let mergeVal = rule.node['<<']
         deleteMember(rule.node, '<<')
         if (Array.isArray(mergeVal)) {
+          let source = 0
           for (let m of mergeVal) {
             if (typeof m === 'object' && m !== null && !Array.isArray(m)) {
+              source++
               for (let k of Object.keys(m)) {
-                if (!(k in rule.node)) mergeMember(rule, ctx, k, m[k])
+                if (!(k in rule.node)) mergeMember(rule, ctx, k, m[k], source)
               }
             }
           }
         } else if (typeof mergeVal === 'object' && mergeVal !== null) {
           for (let k of Object.keys(mergeVal)) {
-            if (!(k in rule.node)) mergeMember(rule, ctx, k, mergeVal[k])
+            if (!(k in rule.node)) mergeMember(rule, ctx, k, mergeVal[k], 1)
           }
         }
       }

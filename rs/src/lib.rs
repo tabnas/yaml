@@ -1314,13 +1314,14 @@ fn wire_rules(parser: &mut Tabnas) {
         spec.add_ac(|rule, context| {
             if !state::map_take(context, state::LITERAL_MERGE, &cell_address(rule)) {
                 // Each key a merge brings is named in the map's counters
-                // as `<<key`, so the map's close pass names every key it
-                // merged: a host that reads the rule passes (YAML's
-                // transducer part) writes those members of the merge
-                // sources, and no other, as the mapping's last, as
+                // as `<<key`, whose value is the number of the source it
+                // came from, so the map's close pass names every key it
+                // merged and where it took it: a host that reads the rule
+                // passes (YAML's transducer part) writes those members of
+                // those sources, and no other, as the mapping's last, as
                 // `mergeMember` does in the canonical source.
-                for key in apply_merge_keys(rule) {
-                    rule.n_mut().insert(format!("<<{key}"), 1);
+                for (key, source) in apply_merge_keys(rule) {
+                    rule.n_mut().insert(format!("<<{key}"), source);
                 }
             }
         });
@@ -1457,8 +1458,11 @@ fn cell_address(rule: &Rule) -> String {
 
 /// Resolve a `<<` merge key in place: the merged entries are appended
 /// after the explicit ones, and an explicit key always wins. It answers
-/// the keys it merged, in the order it merged them.
-fn apply_merge_keys(rule: &mut Rule) -> Vec<String> {
+/// the keys it merged, in the order it merged them, each with the number
+/// of the source it came from: 1 for the mapping a `<<` names, and for a
+/// sequence, the place of the mapping among the sequence's mappings,
+/// counted from 1.
+fn apply_merge_keys(rule: &mut Rule) -> Vec<(String, i32)> {
     let mut merged = Vec::new();
     let mut node = rule.node.borrow_mut();
     let Some(entries) = map_entries(&node) else {
@@ -1481,10 +1485,12 @@ fn apply_merge_keys(rule: &mut Rule) -> Vec<String> {
         }
         _ => {}
     }
+    let mut number = 0;
     for source in sources {
         let Some(source_entries) = map_entries(&source) else {
             continue;
         };
+        number += 1;
         let additions: Vec<(String, Value)> = source_entries
             .iter()
             .filter(|(key, _)| {
@@ -1493,7 +1499,7 @@ fn apply_merge_keys(rule: &mut Rule) -> Vec<String> {
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect();
         for (key, value) in additions {
-            merged.push(key.clone());
+            merged.push((key.clone(), number));
             map_insert(&mut node, key, value);
         }
     }
