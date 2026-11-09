@@ -294,6 +294,23 @@ function yamlTagFloat(raw: string): number {
 // walks where the document put it, and not after every recorded one. The
 // record is the engine's `recordKeyOrder`, which @tabnas/parser exports
 // after 0.12.12; its text is here until the floor moves.
+// `pruneHold`, in the parse context's bag: how many anchored values are
+// open. A host that streams a document through transduce's
+// ParserEventSource empties each array behind the stream once its rule's
+// close pass has gone by, and an anchor is recorded only when its value
+// closes, after the arrays inside it have closed, so the record would hold
+// them emptied: an alias used as a key would then name the emptied text
+// (tabnas/yaml#138). While the count is above zero, a source that honours
+// the hold empties no array. The key is transduce's, the same in every
+// runtime.
+const PRUNE_HOLD = 'pruneHold'
+
+// Raise or lower `pruneHold` by `by`, one open anchored value at a time.
+function holdPruning(ctx: Context, by: number): void {
+  const now = 'number' === typeof ctx.u[PRUNE_HOLD] ? ctx.u[PRUNE_HOLD] : 0
+  ctx.u[PRUNE_HOLD] = Math.max(0, now + by)
+}
+
 const KEY_ORDER = Symbol.for('tabnas.keyOrder')
 
 function storeMember(rule: Rule, ctx: Context, key: string, value: any) {
@@ -2820,11 +2837,15 @@ name an anchor defined earlier.`,
   // val rule: claim pending anchors (ao), handle empty (bc),
   //          resolve aliases and record anchors (ac).
   tabnas.rule('val', (rulespec: RuleSpec) => {
-    rulespec.ao((rule: Rule) => {
+    rulespec.ao((rule: Rule, ctx: Context) => {
       if (pendingAnchors.length > 0) {
         rule.u.yamlAnchors = [...pendingAnchors]
         rule.u.yamlAnchorOpenNode = rule.node
         pendingAnchors.length = 0
+        // The arrays inside the anchored value are kept, behind a stream
+        // that empties them, until the anchor is recorded at this val's
+        // close (holdPruning).
+        holdPruning(ctx, 1)
       }
     })
     rulespec.bc((rule: Rule) => {
@@ -2832,7 +2853,7 @@ name an anchor defined earlier.`,
         rule.node = undefined
       }
     })
-    rulespec.ac((rule: Rule) => {
+    rulespec.ac((rule: Rule, ctx: Context) => {
       // Resolve alias markers to actual values.
       if (rule.node && typeof rule.node === 'object' &&
           rule.node.__yamlAlias) {
@@ -2860,6 +2881,8 @@ name an anchor defined earlier.`,
           }
           anchors[anchor.name] = val
         }
+        // Recorded: the hold this val raised at its open is released.
+        holdPruning(ctx, -1)
       }
     })
   })

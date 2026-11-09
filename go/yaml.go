@@ -762,6 +762,26 @@ func isJSDecimalLiteral(body string) bool {
 	return i == len(body)
 }
 
+// pruneHold, in the parse context's bag: how many anchored values are open.
+// A host that streams a document through transduce's ParserEventSource
+// empties each list behind the stream once its rule's close pass has gone
+// by, and an anchor is recorded only when its value closes, after the lists
+// inside it have closed, so the record would hold them emptied: an alias
+// used as a key would then name the emptied text (tabnas/yaml#138). While
+// the count is above zero, a source that honours the hold empties no list.
+// The key is transduce's, the same in every runtime.
+const pruneHold = "pruneHold"
+
+// holdPruning raises or lowers pruneHold by by, one open anchored value at a
+// time.
+func holdPruning(ctx *tabnas.Context, by int) {
+	if ctx.U == nil {
+		ctx.U = map[string]any{}
+	}
+	now, _ := ctx.U[pruneHold].(int)
+	ctx.U[pruneHold] = max(0, now+by)
+}
+
 // deepCopy performs a structural deep copy of a value, preserving both the
 // concrete container type and, for insertion-ordered *tabnas.OrderedMap
 // objects, their source key order. Anchors deep-copy their value so a later
@@ -4558,6 +4578,10 @@ func configureGrammarRules(j *tabnas.Tabnas, IN, EL tabnas.Tin, KEY []tabnas.Tin
 				r.EnsureU()["yamlAnchors"] = anchorsCopy
 				r.EnsureU()["yamlAnchorOpenNode"] = r.Node
 				*pendingAnchors = (*pendingAnchors)[:0]
+				// The lists inside the anchored value are kept, behind a
+				// stream that empties them, until the anchor is recorded at
+				// this val's close (holdPruning).
+				holdPruning(ctx, 1)
 			}
 		})
 		rs.AddBC(func(r *tabnas.Rule, ctx *tabnas.Context) {
@@ -4622,6 +4646,8 @@ func configureGrammarRules(j *tabnas.Tabnas, IN, EL tabnas.Tin, KEY []tabnas.Tin
 						anchors[anchor.name] = val
 					}
 				}
+				// Recorded: the hold this val raised at its open is released.
+				holdPruning(ctx, -1)
 			}
 		})
 	})

@@ -342,6 +342,20 @@ repository, through any runtime's `translate()`:
   folds in after the passes; a stream of several documents is a second
   root to the host's tree contract, read whole the same way.
   Admin's descriptor task keeps the object and checks its shape.
+  A host that streams through the part also empties the engine's
+  arrays behind the stream (transduce's prune), and an anchor is
+  recorded only when its value closes, after the arrays inside it have
+  closed. So while an anchored value is open the grammar raises
+  `pruneHold` in the parse context's bag (`Context::u` in Rust,
+  `Context.U` in Go, `ctx.u` in TypeScript), a count of the open
+  anchored values, and lowers it once the anchor is recorded; a source
+  that honours the hold empties no array while it is above zero, so an
+  alias used as a key names the anchored sequence's text whether the
+  tree is pruned or not
+  ([tabnas/yaml#138](https://github.com/tabnas/yaml/issues/138)).
+  `rs/tests/prune_hold_test.rs`, `ts/test/prune-hold.test.ts` and
+  `go/prune_hold_test.go` empty arrays as such a host does and hold the
+  keys to the whole parse's.
 
 Every runtime hands all three over: `translate()` in TypeScript
 (`ts/src/translate.ts`), `Translate()` in Go (`go/translate.go`, with the
