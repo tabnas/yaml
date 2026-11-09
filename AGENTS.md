@@ -346,8 +346,9 @@ repository, through any runtime's `translate()`:
     the val that claims it, so no pass carries it. That val names it in
     its counters instead (`nameAnchors` in `ts/src/yaml.ts`, and its
     twins): the counter `&name`, whose value is the val's own instance
-    number `i`, which the counter keeps as it passes to the rules below.
-    The part keeps the events of the value of the val whose `&name` is
+    number `i`, and `yamlAnchored`, of the same value, which marks the
+    val; a counter keeps its value as it passes to the rules below. The
+    part keeps the events of the value of the val whose `yamlAnchored` is
     its own `i`, from its open pass to its close, records a mapping's or
     a sequence's under the name, and writes them again at an alias to a
     collection, whose token carries the value the grammar resolved
@@ -453,13 +454,13 @@ Keep the naming rule when you change the render.
   `key-before-value` tests in all three runtimes hold this.
 - **The passes name anchors and merged keys in counters.** YAML's
   transducer part reads no anchor and no merge from the tokens, so the
-  val that claims an anchor sets `&name` to its own instance number, and
-  the map that merges sets `<<key` for each key it merged, on its close
-  pass. They are part of the passes' contract with the part: rename one
-  and the part writes an alias or a merge wrong, which the `counters`
-  tests in all three runtimes catch first. A counter passes to the rules
-  below its rule, so only the val whose `&name` is its own `i` is the
-  anchored one.
+  val that claims an anchor sets `&name` and `yamlAnchored` to its own
+  instance number, and the map that merges sets `<<key` for each key it
+  merged, on its close pass. They are part of the passes' contract with
+  the part: rename one and the part writes an alias or a merge wrong,
+  which the `counters` tests in all three runtimes catch first. A counter
+  passes to the rules below its rule, so only the val whose
+  `yamlAnchored` is its own `i` is the anchored one.
 - **An alias is the anchored node again.** The value an anchor records,
   and the one an alias resolves to, is a copy (`copyAnchored` in
   TypeScript, `deepCopy` in Go, `deep_copy` in Rust) that rebuilds every

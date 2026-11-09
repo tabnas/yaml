@@ -313,18 +313,21 @@ function holdPruning(ctx: Context, by: number): void {
 
 // Name, in the val's counters, each anchor it claims that its close may
 // record as its node: the counter `&name`, whose value is the val's own
-// instance number. A counter passes to every rule below the val, with the
-// val's number, so a host that reads the rule passes (YAML's transducer
-// part) knows the anchored val as the one whose `&name` is its own `i`,
-// keeps the events of its value, and writes them again at an alias of the
-// name. An inline anchor on a val that opened on a scalar records that
-// scalar or nothing (the val's ac), so it is not named.
+// instance number, and the counter `yamlAnchored`, of the same value,
+// which marks the val. A counter passes to every rule below the val, with
+// the val's number, so a host that reads the rule passes (YAML's
+// transducer part) knows the anchored val as the one whose `yamlAnchored`
+// is its own `i`, with one lookup on each val's pass, keeps the events of
+// its value, and writes them again at an alias of a name. An inline anchor
+// on a val that opened on a scalar records that scalar or nothing (the
+// val's ac), so it is not named.
 function nameAnchors(rule: Rule): void {
   const open = rule.u.yamlAnchorOpenNode
   const scalar = null != open && 'object' !== typeof open
   for (const anchor of rule.u.yamlAnchors) {
     if (anchor.inline && scalar) continue
     rule.n['&' + anchor.name] = rule.i
+    rule.n.yamlAnchored = rule.i
   }
 }
 

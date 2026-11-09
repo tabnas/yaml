@@ -35,8 +35,10 @@
 ; Anchors and aliases. The lexer reads `&name` and hands it to the val
 ; that claims it, so no pass carries it; the grammar names it instead in
 ; that val's counters, `&name`, whose value is the val's own instance
-; number. A counter passes to the rules below the val with the val's
-; number, so the anchored val is the one whose `&name` is its own `:i`.
+; number, and marks the val with the counter `yamlAnchored`, of the same
+; value. A counter passes to the rules below the val with the val's
+; number, so the anchored val is the one whose `yamlAnchored` is its own
+; `:i`, and its anchors are the `&name` counters of that value.
 ; From that val's open pass to its close the part keeps the events of its
 ; value, each with its depth in the value, as they are written; at the
 ; close a mapping's or a sequence's are recorded under the name, in place
@@ -242,28 +244,33 @@ def yaml-transduce-plain [piece]
 ; Anchors
 ; ---------------------------------------------------------------------
 
-; The anchors a val's pass names as its own: each counter `&name` whose
-; value is the val's instance number.
-def yaml-transduce-anchor-names [rule]
+; Whether a pass is an anchored val's: its `yamlAnchored` is its own
+; instance number.
+def yaml-transduce-anchored-val [rule]
   match (get :name rule)
     case "val"
       match (get :n rule)
-        case missing []
-        case n
-          map (fn [k] (get-path (path 1) (first-split "&" k)))
-            filter (fn [k] (if (starts-with "&" k) (equal (get k n) (get :i rule)) false)) (keys n)
-    case _ []
+        case missing false
+        case n (equal (get "yamlAnchored" n) (get :i rule))
+    case _ false
+
+; The anchors an anchored val's pass names: each counter `&name` whose
+; value is the val's instance number.
+def yaml-transduce-anchor-names [rule]
+  let [n (get :n rule)]
+    map (fn [k] (get-path (path 1) (first-split "&" k)))
+      filter (fn [k] (if (starts-with "&" k) (equal (get k n) (get :i rule)) false)) (keys n)
 
 ; An anchored val opens: a recorder of its value, in the innermost level.
 def yaml-transduce-record-open [held rule]
-  match (yaml-transduce-anchor-names rule)
-    case [] held
-    case names
+  match (yaml-transduce-anchored-val rule)
+    case false held
+    case _
       match held
         case [levels anchors merges]
           match (top levels)
             case [sink recorders]
-              [(push [sink (push [(get :i rule) names yaml-transduce-collector] recorders)] (pop levels)) anchors merges]
+              [(push [sink (push [(get :i rule) (yaml-transduce-anchor-names rule) yaml-transduce-collector] recorders)] (pop levels)) anchors merges]
 
 def yaml-transduce-unnamed [names name]
   match (count (filter (fn [n] (equal n name)) names))
@@ -287,9 +294,9 @@ def yaml-transduce-anchored [anchors names coll]
 ; An anchored val closes, after what its close writes: its recorder, the
 ; innermost of the innermost level, is recorded.
 def yaml-transduce-record-close [state rule]
-  match (yaml-transduce-anchor-names rule)
-    case [] state
-    case names
+  match (yaml-transduce-anchored-val rule)
+    case false state
+    case _
       match state
         case [stack carry rooted pending [levels anchors merges]]
           match (top levels)
@@ -360,9 +367,9 @@ def yaml-transduce-routed [routed]
   match routed
     case [state outputs] (transition state outputs)
 
-; A pass's pieces, in order: at most four, a key, an implicit list's
-; start, and a value's one or two.
-def yaml-transduce-emit [state pieces]
+; A pass's pieces, routed in order: at most four, a key, an implicit
+; list's start, and a value's one or two.
+def yaml-transduce-routes [state pieces]
   match pieces
     case [] (transition state [])
     case [a] (yaml-transduce-routed (yaml-transduce-route [state []] a))
@@ -619,7 +626,10 @@ def yaml-transduce-yield [rest carry pending held rule pieces]
 def yaml-transduce-leaf [rest carry pending held rule]
   match (get :value rule)
     case missing (yaml-transduce-undefined rest carry pending held)
-    case value (yaml-transduce-yield rest carry pending held rule [(scalar value)])
+    case value
+      match (yaml-transduce-replaces rule)
+        case "list" (transition [rest true true missing held] (yaml-transduce-value pending [array-start (scalar value)]))
+        case _ (transition [rest carry true missing held] (yaml-transduce-value pending [(scalar value)]))
 
 def yaml-transduce-unrecorded [rest carry pending held shape]
   match shape
@@ -666,26 +676,45 @@ def yaml-transduce-close [stack carry rooted pending held rule]
 
 ; An open pass: an anchored val's recorder opens before its value's first
 ; event.
-def yaml-transduce-opened [state rule]
-  match state
-    case [stack carry rooted pending held]
-      match (yaml-transduce-open stack carry rooted pending (yaml-transduce-record-open held rule) rule)
-        case (transition next pieces) (yaml-transduce-emit next pieces)
+def yaml-transduce-routed-pass [result]
+  match result
+    case (transition state pieces) (yaml-transduce-routes state pieces)
 
-; A close pass: an anchored val's recorder closes after its value's last
-; event.
-def yaml-transduce-closed [state rule]
-  match state
-    case [stack carry rooted pending held]
-      match (yaml-transduce-close stack carry rooted pending held rule)
-        case (transition next pieces)
-          match (yaml-transduce-emit next pieces)
-            case (transition routed outputs) (transition (yaml-transduce-record-close routed rule) outputs)
+; Nothing held: no anchored value has been recorded or is open, and no
+; merge key's mapping is open.
+def yaml-transduce-unheld [[[:out []]] [] []]
 
+; An open pass with something held, or of an anchored val: its pieces are
+; routed through the innermost level.
+def yaml-transduce-kept-open [stack carry rooted pending held rule]
+  yaml-transduce-routed-pass (yaml-transduce-open stack carry rooted pending (yaml-transduce-record-open held rule) rule)
+
+def yaml-transduce-kept-close [stack carry rooted pending held rule]
+  match (yaml-transduce-routed-pass (yaml-transduce-close stack carry rooted pending held rule))
+    case (transition routed outputs) (transition (yaml-transduce-record-close routed rule) outputs)
+
+; An open pass with nothing held: its pieces are its events, unless it is
+; an anchored val's.
+def yaml-transduce-unheld-open [stack carry rooted pending rule]
+  match (get :name rule)
+    case "val"
+      match (equal (get "yamlAnchored" (get :n rule)) (get :i rule))
+        case true (yaml-transduce-kept-open stack carry rooted pending yaml-transduce-unheld rule)
+        case _ (yaml-transduce-val-open stack carry pending yaml-transduce-unheld rule)
+    case _ (yaml-transduce-open stack carry rooted pending yaml-transduce-unheld rule)
+
+; A pass with nothing held writes its pieces, which are events, as they
+; are; with something held, each piece is routed.
 def yaml-transduce-step [state pass]
-  match pass
-    case (open rule) (yaml-transduce-opened state rule)
-    case (close rule) (yaml-transduce-closed state rule)
+  match state
+    case [stack carry rooted pending [[[:out []]] [] []]]
+      match pass
+        case (open rule) (yaml-transduce-unheld-open stack carry rooted pending rule)
+        case (close rule) (yaml-transduce-close stack carry rooted pending yaml-transduce-unheld rule)
+    case [stack carry rooted pending held]
+      match pass
+        case (open rule) (yaml-transduce-kept-open stack carry rooted pending held rule)
+        case (close rule) (yaml-transduce-kept-close stack carry rooted pending held rule)
 
 def yaml-transduce-finish [state]
   match state

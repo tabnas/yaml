@@ -834,10 +834,11 @@ func openedOnScalar(open any) bool {
 
 // nameAnchors names, in the val's counters, each anchor it claims that its
 // close may record as its node: the counter `&name`, whose value is the
-// val's own instance number. A host that reads the rule passes (YAML's
-// transducer part) knows the anchored val as the one whose `&name` is its
-// own `i`, keeps the events of its value, and writes them again at an
-// alias of the name. An inline anchor on a val that opened on a scalar
+// val's own instance number, and the counter `yamlAnchored`, of the same
+// value, which marks the val. A host that reads the rule passes (YAML's
+// transducer part) knows the anchored val as the one whose `yamlAnchored`
+// is its own `i`, keeps the events of its value, and writes them again at
+// an alias of a name. An inline anchor on a val that opened on a scalar
 // records that scalar or nothing (the val's AC), so it is not named.
 // Mirrors nameAnchors in src/yaml.ts.
 func nameAnchors(r *tabnas.Rule, anchors []anchorInfo, open any) {
@@ -845,7 +846,9 @@ func nameAnchors(r *tabnas.Rule, anchors []anchorInfo, open any) {
 		if anchor.inline && openedOnScalar(open) {
 			continue
 		}
-		r.EnsureN()["&"+anchor.name] = r.I
+		n := r.EnsureN()
+		n["&"+anchor.name] = r.I
+		n["yamlAnchored"] = r.I
 	}
 }
 

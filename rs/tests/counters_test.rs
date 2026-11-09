@@ -22,6 +22,11 @@ fn named(src: &str) -> (Vec<String>, Vec<Vec<String>>) {
                 .filter(|(k, v)| k.starts_with('&') && usize::try_from(**v).ok() == Some(rule.i))
                 .map(|(k, _)| k[1..].to_string())
                 .collect();
+            let marked = rule
+                .n
+                .get("yamlAnchored")
+                .is_some_and(|v| usize::try_from(*v).ok() == Some(rule.i));
+            assert_eq!(marked, !own.is_empty(), "val {}: {:?}", rule.i, rule.n);
             own.sort();
             seen_anchors.lock().unwrap().extend(own);
         }
@@ -65,10 +70,11 @@ fn the_anchored_val_names_the_anchor_on_its_close_pass_too() {
     let passes = Arc::new(Mutex::new(Vec::new()));
     let seen = Arc::clone(&passes);
     parser.subscribe_rule_done(move |rule, _context, done| {
-        let own = rule
-            .n
-            .get("&x")
-            .is_some_and(|v| usize::try_from(*v).ok() == Some(rule.i));
+        let own = ["&x", "yamlAnchored"].iter().all(|k| {
+            rule.n
+                .get(*k)
+                .is_some_and(|v| usize::try_from(*v).ok() == Some(rule.i))
+        });
         if rule.name.as_ref() == "val" && own {
             seen.lock().unwrap().push(done.state);
         }

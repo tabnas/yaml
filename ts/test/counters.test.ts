@@ -16,9 +16,10 @@ import { Yaml } from '../dist/yaml'
 // To write an alias's value again, the part keeps the events of the
 // anchored value, so the val that claims an anchor names it in its
 // counters: `&name`, whose value is the val's own instance number
-// (`rule.i`), on its open and its close pass. A counter passes to the
-// rules below the val with the val's number, so the anchored val is the
-// one whose `&name` is its own `i`. And a merge key's members are folded
+// (`rule.i`), and `yamlAnchored`, of the same value, which marks the val,
+// on its open and its close pass. A counter passes to the rules below the
+// val with the val's number, so the anchored val is the one whose
+// `yamlAnchored` is its own `i`. And a merge key's members are folded
 // into its mapping at the map's close, after the passes: the map names
 // each key it merged in its counters, `<<key`, on its close pass, so the
 // part writes those members of the merge's sources, and no other, as the
@@ -37,9 +38,9 @@ function named(src: string): { anchors: string[], merged: string[][] } {
       const n = rule.n
       const counters = Object.keys(n)
       if ('val' === rule.name && 'o' === done.state) {
-        for (const k of counters) {
-          if (k.startsWith('&') && n[k] === rule.i) anchors.push(k.slice(1))
-        }
+        const own = counters.filter((k) => k.startsWith('&') && n[k] === rule.i).map((k) => k.slice(1))
+        assert.strictEqual(n.yamlAnchored === rule.i, 0 < own.length, `val ${rule.i}: ${JSON.stringify(n)}`)
+        anchors.push(...own)
       }
       if ('map' === rule.name && 'c' === done.state) {
         const keys = counters.filter((k) => k.startsWith('<<')).map((k) => k.slice(2))
@@ -66,7 +67,7 @@ describe('counters', () => {
     const passes: string[] = []
     j.sub({
       ruleDone: (rule: any, _ctx: any, done: any) => {
-        if ('val' === rule.name && rule.i === rule.n['&x']) passes.push(done.state)
+        if ('val' === rule.name && rule.i === rule.n['&x'] && rule.i === rule.n.yamlAnchored) passes.push(done.state)
       },
     })
     j.parse('a: &x {p: [1]}\nb: *x\n')

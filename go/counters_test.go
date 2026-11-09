@@ -29,6 +29,9 @@ func named(t *testing.T, src string) ([]string, [][]string) {
 					own = append(own, k[1:])
 				}
 			}
+			if marked, ok := rule.N["yamlAnchored"]; (ok && marked == rule.I) != (len(own) > 0) {
+				t.Errorf("%q: val %d: %v", src, rule.I, rule.N)
+			}
 			sort.Strings(own)
 			anchors = append(anchors, own...)
 		}
@@ -71,7 +74,7 @@ func TestTheAnchoredValNamesTheAnchorOnItsClosePassToo(t *testing.T) {
 	var passes []tabnas.RuleState
 	j := MakeJsonic()
 	j.SubRuleDone(func(rule *tabnas.Rule, _ *tabnas.Context, done tabnas.RuleDone) {
-		if v, ok := rule.N["&x"]; ok && rule.Name == "val" && v == rule.I {
+		if v, ok := rule.N["&x"]; ok && rule.Name == "val" && v == rule.I && rule.N["yamlAnchored"] == rule.I {
 			passes = append(passes, done.State)
 		}
 	})

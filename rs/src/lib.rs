@@ -1373,12 +1373,13 @@ fn store_elem_pair(rule: &mut Rule, context: &mut Context) {
 
 /// Name, in the val's counters, each anchor it claims that its close may
 /// record as its node: the counter `&name`, whose value is the val's own
-/// instance number. A host that reads the rule passes (YAML's transducer
-/// part) knows the anchored val as the one whose `&name` is its own `i`,
-/// keeps the events of its value, and writes them again at an alias of the
-/// name. An inline anchor on a val that opened on a scalar records that
-/// scalar or nothing (the val's after-close), so it is not named. Mirrors
-/// `nameAnchors` in the canonical source.
+/// instance number, and the counter `yamlAnchored`, of the same value,
+/// which marks the val. A host that reads the rule passes (YAML's
+/// transducer part) knows the anchored val as the one whose `yamlAnchored`
+/// is its own `i`, keeps the events of its value, and writes them again at
+/// an alias of a name. An inline anchor on a val that opened on a scalar
+/// records that scalar or nothing (the val's after-close), so it is not
+/// named. Mirrors `nameAnchors` in the canonical source.
 fn name_anchors(rule: &mut Rule, anchors: &[Value], open_node: &Value) {
     let scalar = !matches!(open_node, Value::Undefined | Value::Null) && !is_container(open_node);
     // A parse of more rules than an `i32` counts names no anchor, so an
@@ -1398,6 +1399,7 @@ fn name_anchors(rule: &mut Rule, anchors: &[Value], open_node: &Value) {
             continue;
         }
         rule.n_mut().insert(format!("&{name}"), instance);
+        rule.n_mut().insert("yamlAnchored".to_string(), instance);
     }
 }
 
