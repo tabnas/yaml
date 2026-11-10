@@ -13,6 +13,7 @@ and this file only covers what is specific to this crate.
 | `src/lex.rs` | the YAML lexer matcher: indentation, block sequence markers, document frames, anchors, aliases, tags, explicit keys, both quoted forms, flow punctuation |
 | `src/text.rs` | what the canonical port puts in `options.text.check`: block scalars and plain scalars, plus the typed-tag handler `lex.rs` calls |
 | `src/state.rs` | the per-parse state, in the context's `u` bag |
+| `src/source.rs` | the source as the matcher and the text check read it, by source position: `Src`, the view every scan reads through, and `Kept`, the copy of the source a parse from a reader keeps (below) |
 | `tests/parity_test.rs` | every `../test/spec/*.tsv` fixture through `tabnas_support::Runner`, plus a census of the files |
 | `tests/yaml_test_suite_test.rs` | the whole vendored YAML Test Suite, its two ledgers and the bucket census |
 | `tests/yaml_test.rs` | in-language behaviour, mirroring `ts/test/yaml.test.ts` and the two Go unit files |
@@ -28,6 +29,7 @@ and this file only covers what is specific to this crate.
 | `tests/grammar_test.rs` | the embedded grammar is still the file on disk, in all three runtimes |
 | `tests/translate_test.rs` | the translation parts: the render the embedded manifest names is the one `render_text()` embeds, the transducer it names is the one `translate()` carries under the entry `yaml-transduce`, the embed it names is the one `translate()` carries (none, for YAML), the manifest's shapes and loss lines, and every render definition named `yaml-...` |
 | `tests/perf_test.rs` | `parse` reuses its instance; parse time grows about linearly |
+| `tests/window_test.rs` | a parse from a reader: `make()` declares `lex.window`; every fixture row, suite case and schema input, long tokens and a long document, from a reader as whole, under small windows too; and a reader read no further than the window needs |
 | `tests/version_test.rs` | `Cargo.toml` == `VERSION` == `ts/package.json` == `go/yaml.go` |
 | `tests/install_test.rs` | `README.md`'s install section names every sibling checkout the path-dependency closure reaches, and every crate a consumer lists |
 | `tests/common/mod.rs` | shared helpers: the spec directory, the repository root, value conversion |
@@ -71,6 +73,24 @@ is nothing to reset, which is what
 
 The bag holds engine `Value`s, so a pending token is stored as an object
 and rebuilt on the way out (`lex::encode_token` and `decode_token`).
+
+## A reader is read through the window
+
+`make()` and `make_with()` declare `lex.window`, so `parse_reader` reads
+a window of the source at a time. The scans read the source through
+`source::Src`, by source position: the whole text, or from a reader the
+copy `source::Kept` keeps in the bag, the text from the eighth-last line
+break before the cursor to as far as the window has read, brought up to
+the window at every cut and trimmed as the cursor moves on. A scan never
+reads the source on: a read at the end of what has been read is noted,
+and the matcher (or the text check) then asks the engine to cut the token
+again over a wider window, by `Lexer::advance_chars` past its end, as the
+engine's own matchers ask. The cut made again restores the bag's state
+the first began with (`Kept::save`, `Kept::restore`, and the anchors set,
+taken back from `state::UNDO`). The line breaks passed answer where a
+line starts, and the flow colon's question (`source::Lines`) is answered
+from the source as it went by, so no scan reads back further than the
+lines kept.
 
 ## The virtual cursor is load-bearing
 

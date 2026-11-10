@@ -256,6 +256,19 @@ const grammarText = `
 const FLOW_SCAN_CHARS = new Uint8Array(126)
 for (const c of '"\'\\#{}[]|>') FLOW_SCAN_CHARS[c.charCodeAt(0)] = 1
 
+// The tags whose value is the structure that follows: !!seq, !!map, and
+// the rest.
+const STRUCT_TAG = /^!!(seq|map|omap|set|pairs|binary|ordered|python\/[^\s]*)\b/
+
+// How much of the text from the cursor STRUCT_TAG reads, `F(i)` being its
+// i-th character: past the `!!`, the run of characters that are not white
+// space, and the one that ends it, where its `\b` is decided.
+function structTagReach(F: (i: number) => string): number {
+  let k = 2
+  while (F(k) !== undefined && !/\s/.test(F(k))) k++
+  return F(k) === undefined ? k : k + 1
+}
+
 
 // The value a `!!int` tag gives its text: YAML's core-schema hex (0x1f)
 // and octal (0o17) forms, then a decimal parse. A text no form reads
@@ -471,13 +484,20 @@ name an anchor defined earlier.`,
   let declaredAnchors: Set<string> = new Set()
   const pendAnchor = (name: string, inline: boolean) => {
     pendingAnchors.push({ name, inline })
-    declaredAnchors.add(name)
+    if (!declaredAnchors.has(name)) {
+      declaredAnchors.add(name)
+      if (windowed) undoLog.push([0, name, false, undefined])
+    }
+  }
+  // An anchor the lexer records itself (an inline scalar's, a tagged
+  // value's), noted so that a cut made again can take it back.
+  const setAnchor = (name: string, val: any) => {
+    if (windowed) undoLog.push([1, name, name in anchors, anchors[name]])
+    anchors[name] = val
   }
   let pendingExplicitCL = false
   // Flag to tell the number matcher to skip, so text.check handles the value.
   let skipNumberMatch = false
-  // Queue for tokens that need to be emitted across multiple lex calls.
-  let pendingTokens: any[] = []
   // TAG directive handle mappings (e.g. %TAG !! tag:example.com/).
   // When !! is redefined, built-in type conversion is skipped.
   let tagHandles: Record<string, string> = {}
@@ -486,6 +506,7 @@ name an anchor defined earlier.`,
   let yamlStreamMeta: DocMeta[] = []
   let yamlStreamCurMeta: DocMeta | null = null
   // Incremental flow-depth cache for text.check (avoids O(n²) rescan).
+  // Positions are the source's, so they hold across a window's moves.
   let _flowDepth = 0
   let _flowScanPos = 0
   let _flowScanUpTo = 0
@@ -493,7 +514,371 @@ name an anchor defined earlier.`,
   let _inSingleQuote = false
   let _inDoubleQuote = false
 
-  // Bring _flowDepth up to date with `upTo` by scanning lex.src incrementally.
+  // ---- Reading the source ----
+  //
+  // The matcher and text.check read the source by position. In a parse of
+  // a whole text `lex.src` is that text. In a parse from a reader a window
+  // at a time (`lex.window`, admin ADR-30), `lex.src` is the window: the
+  // source from the oldest token the parser holds to as far as it has been
+  // read, and while a token is cut the cursor counts from the window's
+  // start. Every read here goes through `srcAt`, which reads the source on
+  // (`lex.fill`) past the window's end, so a scan sees what the whole text
+  // holds, and reads `hist`, this plugin's own copy of the lines before the
+  // cursor, behind the window's start: the backward scans read the line a
+  // token starts on and the two before it, which the window may have
+  // dropped. Positions kept from one token to the next (the flow scan, the
+  // line breaks) are the source's, `viewBase` + a window position.
+  let view: Lex = null as any
+  let viewBase = 0
+  // Whether the lexer reads a window of a source read from a reader. A
+  // whole text needs neither `hist` nor the cuts' state kept, since the
+  // engine cuts a token of it once.
+  let windowed = false
+  // The source position `histSync` has brought `hist`, `breaks` and the
+  // flow colon's question up to.
+  let syncEnd = 0
+  // The source behind the window, from a reader: positions [histLow,
+  // syncEnd), histLen of them.
+  let hist = new Uint16Array(256)
+  let histLow = 0
+  let histLen = 0
+  // The source positions of the line breaks `histSync` has passed, the
+  // last few kept: `hist` keeps the text after the HIST_BREAKS-th last of
+  // them.
+  let breaks: number[] = []
+  // The flow colon's question, kept as the text goes by: the last
+  // character before the cursor that is neither blank nor in a comment
+  // (`jSig`, a char code, -1 for none). A comment is a `#` that starts its
+  // line or follows a blank, outside a quoted scalar opened on that line;
+  // `jQuote` is the quote open, `jSkip` that the next character is escaped
+  // or the second of a doubled single quote, `jComment` that the rest of
+  // the line is a comment, `jPrev` the character before, -1 at a line's
+  // start.
+  let jSig = -1
+  let jQuote = 0
+  let jSkip = false
+  let jComment = false
+  let jPrev = -1
+  // The cut the matcher last began: its lexer, its source position, and how
+  // many tokens the parser had taken by then. The engine cuts a token again
+  // over a wider window when a read reached the window's end, from the same
+  // place, before the parser takes another: such a cut starts from the
+  // state the first began with (`snapshot`, `restore`).
+  let cutLex: Lex | null = null
+  let cutPos = -1
+  let cutTaken = -1
+  // What a cut changed of the anchors it is undone by, newest last:
+  // [0, name] an anchor declared, [1, name, had, old] an anchor recorded.
+  let undoLog: [number, string, boolean, any][] = []
+  // The state a cut began with.
+  let s_pending = 0
+  let s_explicitCL = false
+  let s_skipNumber = false
+  let s_flow = [0, 0, 0, 0, 0]
+  let s_syncEnd = 0
+  let s_histLen = 0
+  let s_breaks = 0
+  let s_j = [0, 0, 0, 0, 0]
+
+  // Whether a read past the window's end reads the source on. The matcher
+  // runs first in a cut, and reads on. The text check runs after the
+  // engine's own matchers, and a read of its past the window's end notes
+  // it instead (`lex.touchEnd`), so that the engine cuts the token again
+  // over a wider window: those matchers read only the window, and a number
+  // or a comment cut short at its end, which they leave for a later
+  // matcher, would otherwise be read on as text, and the window then end
+  // where the source does, the engine taking the cut as it stands.
+  let readOn = true
+
+  // The character at `x`, a window position (lex.src[x] as the whole text
+  // gives it), undefined past the source's end and before its start. Typed
+  // as a string, as `lex.src[x]` is.
+  function srcAt(x: number): string {
+    const s = view.src as string
+    if (x < s.length) {
+      return 0 <= x ? s[x] : histAt(viewBase + x)
+    }
+    if (!readOn) {
+      view.touchEnd()
+      return undefined as any
+    }
+    view.fill(x - view.pnt.sI + 1)
+    const t = view.src as string
+    return x < t.length ? t[x] : (undefined as any)
+  }
+
+  // The text from window position `x` to `y`, as `substring` takes it:
+  // the source read on to the further of the two first.
+  function srcSub(x: number, y: number): string {
+    const far = x < y ? y : x
+    if (0 < far) srcAt(far - 1)
+    return (view.src as string).substring(x, y)
+  }
+
+  // The character at source position `a`.
+  function absAt(a: number): string {
+    return srcAt(a - viewBase)
+  }
+
+  // The char code at source position `a`, -1 outside the source.
+  function absCode(a: number): number {
+    const c = srcAt(a - viewBase)
+    return undefined === c ? -1 : c.charCodeAt(0)
+  }
+
+  // The character at source position `a`, behind the window's start: from
+  // `hist`. The scans never read behind the lines `hist` keeps, so a read
+  // that would is a fault of this plugin's, and fails the parse loudly
+  // rather than read a different text.
+  function histAt(a: number): string {
+    if (a < 0) return undefined as any
+    const i = a - histLow
+    if (0 <= i && i < histLen) return String.fromCharCode(hist[i])
+    throw new Error('yaml: source position ' + a + ' lies behind the text kept (' +
+      histLow + ' to ' + (histLow + histLen) + ')')
+  }
+
+  // Read the lexer `lex` through the window: its window starts at source
+  // position `viewBase`.
+  function viewOf(lex: Lex): void {
+    view = lex
+    viewBase = lex.lengthRead() - (lex.src as string).length
+  }
+
+  // Copy the source up to position `to`, which the window holds, onto the
+  // end of `hist`, noting each line break and the flow colon's character
+  // as it goes.
+  function histSync(to: number): void {
+    let a = syncEnd
+    if (to <= a) return
+    if (a < viewBase) {
+      throw new Error('yaml: source position ' + a + ' was dropped before it was kept')
+    }
+    if (windowed && hist.length < histLen + (to - a)) {
+      let size = hist.length
+      while (size < histLen + (to - a)) size *= 2
+      const grown = new Uint16Array(size)
+      grown.set(hist.subarray(0, histLen))
+      hist = grown
+    }
+    // The window holds the text up to `to`, which the cursor has reached.
+    srcAt(to - 1 - viewBase)
+    const src = view.src as string
+    syncEnd = to
+    for (; a < to; a++) {
+      const c = src.charCodeAt(a - viewBase)
+      if (windowed) hist[histLen++] = c
+      if (10 === c || 13 === c) {
+        breaks.push(a)
+        // Line breaks are lines' ends in every scan here, and neither is
+        // blank or in a comment to the flow colon.
+        jQuote = 0
+        jSkip = false
+        jComment = false
+        jPrev = -1
+        continue
+      }
+      if (jComment) continue
+      const blank = 32 === c || 9 === c
+      if (jSkip) {
+        jSkip = false
+      } else if (0 !== jQuote) {
+        if (34 === jQuote && 92 === c) {
+          jSkip = true
+        } else if (c === jQuote) {
+          if (39 === jQuote && 39 === absCode(a + 1)) jSkip = true
+          else jQuote = 0
+        }
+      } else if (34 === c || 39 === c) {
+        jQuote = c
+      } else if (35 === c && (-1 === jPrev || 32 === jPrev || 9 === jPrev)) {
+        jComment = true
+        continue
+      }
+      if (!blank) jSig = c
+      jPrev = c
+    }
+  }
+
+  // The lines `hist` keeps: the text after the HIST_BREAKS-th last line
+  // break. A backward scan reads the line a token starts on and at most
+  // the two before it, each ended by one or two breaks (`\r\n`). The text
+  // before is dropped once it is as long as what is kept, so that the copy
+  // costs a constant per character.
+  const HIST_BREAKS = 8
+  function histTrim(): void {
+    if (breaks.length < HIST_BREAKS) return
+    if (2 * HIST_BREAKS < breaks.length) {
+      breaks.splice(0, breaks.length - HIST_BREAKS)
+    }
+    if (!windowed) return
+    const keep = breaks[breaks.length - HIST_BREAKS] + 1
+    const dead = keep - histLow
+    if (dead <= 0 || dead < histLen - dead) return
+    hist.copyWithin(0, dead, histLen)
+    histLen -= dead
+    histLow = keep
+  }
+
+  // The source position of the start of the line that holds source
+  // position `a`: the source's start, or the position after a line break
+  // (`\n` or `\r`), as a scan back from `a` would find it. The breaks
+  // `histSync` has passed answer it at once, where a scan back over a long
+  // line reads each of its characters; past them, a scan back to them; and
+  // before the oldest of them kept, the scan.
+  function lineStartOf(a: number): number {
+    if (a > syncEnd) {
+      for (let k = a; k > syncEnd; k--) {
+        const c = absCode(k - 1)
+        if (10 === c || 13 === c) return k
+      }
+      a = syncEnd
+    }
+    let lo = 0
+    let hi = breaks.length
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1
+      if (breaks[mid] < a) lo = mid + 1
+      else hi = mid
+    }
+    if (0 < lo) return breaks[lo - 1] + 1
+    // No break before the position `histSync` has reached: a list trimmed
+    // keeps HIST_BREAKS of them.
+    if (0 === breaks.length) return 0
+    while (a > 0 && absAt(a - 1) !== '\n' && absAt(a - 1) !== '\r') a--
+    return a
+  }
+
+  // How many tokens the parser has taken from the lexer, ignored ones
+  // aside: those it has consumed, and the lookahead it holds.
+  function taken(ctx: Context): number {
+    let n = ctx.vAbs
+    const t = ctx.t
+    const NO = ctx.NOTOKEN
+    for (let i = 0; i < t.length; i++) {
+      if (null != t[i] && NO !== t[i]) n++
+    }
+    return n
+  }
+
+  // Begin the matcher's call: read the lexer through its window, and either
+  // begin a cut, bringing `hist` and the flow scan up to the cursor and
+  // keeping the state the cut begins with, or, where the engine makes the
+  // last cut again (the same place, and no token taken since), begin it
+  // from that state again.
+  function beginCut(lex: Lex): void {
+    viewOf(lex)
+    const pos = viewBase + lex.pnt.sI
+    if (windowed) {
+      const took = taken(lex.ctx)
+      if (lex === cutLex && pos === cutPos && took === cutTaken) {
+        restore()
+        return
+      }
+      cutLex = lex
+      cutPos = pos
+      cutTaken = took
+    }
+    histSync(pos)
+    updateFlowState(pos)
+    histTrim()
+    if (windowed) snapshot()
+  }
+
+  function snapshot(): void {
+    undoLog.length = 0
+    s_pending = pendingAnchors.length
+    s_explicitCL = pendingExplicitCL
+    s_skipNumber = skipNumberMatch
+    s_flow[0] = _flowDepth
+    s_flow[1] = _flowScanPos
+    s_flow[2] = _flowScanUpTo
+    s_flow[3] = _inSingleQuote ? 1 : 0
+    s_flow[4] = _inDoubleQuote ? 1 : 0
+    s_syncEnd = syncEnd
+    s_histLen = histLen
+    s_breaks = breaks.length
+    s_j[0] = jSig
+    s_j[1] = jQuote
+    s_j[2] = jSkip ? 1 : 0
+    s_j[3] = jComment ? 1 : 0
+    s_j[4] = jPrev
+  }
+
+  function restore(): void {
+    for (let i = undoLog.length - 1; 0 <= i; i--) {
+      const [kind, name, had, old] = undoLog[i]
+      if (0 === kind) declaredAnchors.delete(name)
+      else if (had) anchors[name] = old
+      else delete anchors[name]
+    }
+    undoLog.length = 0
+    pendingAnchors.length = s_pending
+    pendingExplicitCL = s_explicitCL
+    skipNumberMatch = s_skipNumber
+    _flowDepth = s_flow[0]
+    _flowScanPos = s_flow[1]
+    _flowScanUpTo = s_flow[2]
+    _inSingleQuote = 1 === s_flow[3]
+    _inDoubleQuote = 1 === s_flow[4]
+    syncEnd = s_syncEnd
+    histLen = s_histLen
+    breaks.length = s_breaks
+    jSig = s_j[0]
+    jQuote = s_j[1]
+    jSkip = 1 === s_j[2]
+    jComment = 1 === s_j[3]
+    jPrev = s_j[4]
+  }
+
+  // A parse begins, over the lexer `lex`: nothing kept of the last.
+  function resetView(lex: Lex): void {
+    windowed = lex.windowed
+    syncEnd = 0
+    histLow = 0
+    histLen = 0
+    breaks = []
+    jSig = -1
+    jQuote = 0
+    jSkip = false
+    jComment = false
+    jPrev = -1
+    cutLex = null
+    cutPos = -1
+    cutTaken = -1
+    undoLog.length = 0
+  }
+
+  // Whether the source holds nothing but white space and comment lines, as
+  // `src.replace(/^[ \t]*#[^\n]*(\n|$)/gm, '').trim() === ''` asks of the
+  // whole text. It reads from the source's start and stops at the first
+  // character that is neither, so only the leading space and comments are
+  // read. A line starts after a line terminator, as `^` takes one under the
+  // `m` flag, and white space is what `trim` removes.
+  function sourceBlank(): boolean {
+    let a = 0
+    let lineStart = true
+    for (;;) {
+      if (lineStart) {
+        let q = a
+        while (' ' === absAt(q) || '\t' === absAt(q)) q++
+        if ('#' === absAt(q)) {
+          while (undefined !== absAt(q) && '\n' !== absAt(q)) q++
+          if (undefined === absAt(q)) return true
+          a = q + 1
+          continue
+        }
+      }
+      const c = absAt(a)
+      if (undefined === c) return true
+      if (!/\s/.test(c)) return false
+      a++
+      lineStart = '\n' === c || '\r' === c || ' ' === c || ' ' === c
+    }
+  }
+
+  // Bring _flowDepth up to date with `upTo`, a source position, by scanning
+  // the source incrementally.
   //
   // The scan has to read the source the way the lexer does, or text is
   // counted as syntax. A quoted region is skipped, and so are the regions
@@ -506,8 +891,10 @@ name an anchor defined earlier.`,
   // was read as flow (a `{` failed the parse), or left a quote open, so a
   // later `[1, 2]` was read as the one string "1, 2]".
   // The scan may run past `upTo` (to the end of a comment or a block
-  // scalar), since the lexer never stops inside either.
-  function updateFlowState(src: string, upTo: number) {
+  // scalar), since the lexer never stops inside either. Each call goes on
+  // from where the last stopped, so calling it at every cut, as
+  // `beginCut` does, reads each character once, as one call would.
+  function updateFlowState(upTo: number) {
     if (upTo < _flowScanUpTo) {
       _flowDepth = 0; _flowScanPos = 0
       _inSingleQuote = false; _inDoubleQuote = false
@@ -515,10 +902,14 @@ name an anchor defined earlier.`,
     _flowScanUpTo = upTo
     let fi = _flowScanPos
     for (; fi < upTo; fi++) {
-      // Fast path: only these ten characters matter in any state.
-      let cc = src.charCodeAt(fi)
+      // Fast path: only these ten characters matter in any state. The
+      // window's text read at the call stays a prefix of the window's
+      // after any read past its end.
+      const s = view.src as string
+      const x = fi - viewBase
+      let cc = 0 <= x && x < s.length ? s.charCodeAt(x) : absCode(fi)
       if (cc > 125 || 0 === FLOW_SCAN_CHARS[cc]) continue
-      let fc = src[fi]
+      let fc = absAt(fi)
       if (_inDoubleQuote) {
         if (fc === '\\') fi++
         else if (fc === '"') _inDoubleQuote = false
@@ -526,13 +917,14 @@ name an anchor defined earlier.`,
       }
       if (_inSingleQuote) {
         if (fc === "'") {
-          if (src[fi + 1] === "'") fi++
+          if (absAt(fi + 1) === "'") fi++
           else _inSingleQuote = false
         }
         continue
       }
-      if (fc === '#' && (fi === 0 || isYamlSpace(src[fi - 1]))) {
-        while (fi + 1 < src.length && src[fi + 1] !== '\n' && src[fi + 1] !== '\r') fi++
+      if (fc === '#' && (fi === 0 || isYamlSpace(absAt(fi - 1)))) {
+        while (absAt(fi + 1) !== undefined && absAt(fi + 1) !== '\n' &&
+               absAt(fi + 1) !== '\r') fi++
         continue
       }
       if (_flowDepth > 0) {
@@ -540,7 +932,7 @@ name an anchor defined earlier.`,
         else if (fc === '}' || fc === ']') _flowDepth--
         else if (fc === '"') _inDoubleQuote = true
         else if (fc === "'") {
-          let pc = fi > 0 ? src.charCodeAt(fi - 1) : 0
+          let pc = fi > 0 ? absCode(fi - 1) : 0
           if (!((pc >= 65 && pc <= 90) || (pc >= 97 && pc <= 122) || (pc >= 48 && pc <= 57))) {
             _inSingleQuote = true
           }
@@ -550,16 +942,16 @@ name an anchor defined earlier.`,
       // Block context: only a node's first character opens anything.
       if (fc === '{' || fc === '[' || fc === '"' || fc === "'" ||
           fc === '|' || fc === '>') {
-        if (!startsYamlNode(src, fi)) {
+        if (!startsYamlNode(fi)) {
           // Inside a plain scalar, which nothing can open until it ends at
           // `: `, ` #` or the end of the line: skip to there.
-          fi = plainScalarRest(src, fi) - 1
+          fi = plainScalarRest(fi) - 1
         }
         else if (fc === '{' || fc === '[') _flowDepth++
         else if (fc === '"') _inDoubleQuote = true
         else if (fc === "'") _inSingleQuote = true
         else {
-          let end = blockScalarEnd(src, fi)
+          let end = blockScalarEnd(fi)
           if (end > fi) fi = end - 1
         }
       }
@@ -567,24 +959,24 @@ name an anchor defined earlier.`,
     _flowScanPos = fi
   }
 
-  // Whether a quoted scalar opens at `i` and is a block mapping key: its
-  // closing quote is followed, on the same line, by `:` and then whitespace
-  // or the end of the line.
-  function quotedKeyAt(src: string, i: number): boolean {
-    let q = src[i]
+  // Whether a quoted scalar opens at source position `i` and is a block
+  // mapping key: its closing quote is followed, on the same line, by `:` and
+  // then whitespace or the end of the line.
+  function quotedKeyAt(i: number): boolean {
+    let q = absAt(i)
     let j = i + 1
-    while (j < src.length && src[j] !== '\n' && src[j] !== '\r') {
-      if (q === '"' && src[j] === '\\') { j += 2; continue }
-      if (src[j] === q) {
-        if (q === "'" && src[j + 1] === "'") { j += 2; continue }
+    while (absAt(j) !== undefined && absAt(j) !== '\n' && absAt(j) !== '\r') {
+      if (q === '"' && absAt(j) === '\\') { j += 2; continue }
+      if (absAt(j) === q) {
+        if (q === "'" && absAt(j + 1) === "'") { j += 2; continue }
         break
       }
       j++
     }
-    if (src[j] !== q) return false
+    if (absAt(j) !== q) return false
     j++
-    while (src[j] === ' ' || src[j] === '\t') j++
-    return src[j] === ':' && (j + 1 >= src.length || isYamlSpace(src[j + 1]))
+    while (absAt(j) === ' ' || absAt(j) === '\t') j++
+    return absAt(j) === ':' && (absAt(j + 1) === undefined || isYamlSpace(absAt(j + 1)))
   }
 
   // The single-character escapes of a double-quoted scalar, YAML 1.2's
@@ -652,58 +1044,58 @@ name an anchor defined earlier.`,
     return /^[0-9a-fA-F]+$/.test(digits) ? parseInt(digits, 16) : -1
   }
 
-  // Whether offset `i` begins a line: the source start, just after a line
-  // break, or just after the byte order mark that opens the stream.
-  function atLineStart(src: string, i: number): boolean {
-    return 0 === i || src[i - 1] === '\n' || src[i - 1] === '\r' ||
-      (1 === i && 0xFEFF === src.charCodeAt(0))
+  // Whether source position `i` begins a line: the source start, just after
+  // a line break, or just after the byte order mark that opens the stream.
+  function atLineStart(i: number): boolean {
+    return 0 === i || absAt(i - 1) === '\n' || absAt(i - 1) === '\r' ||
+      (1 === i && 0xFEFF === absCode(0))
   }
 
   function isYamlSpace(c: string | undefined): boolean {
     return c === ' ' || c === '\t' || c === '\n' || c === '\r'
   }
 
-  // Whether the character at `i` (block context) is the first character of
-  // a node: first on its line, or after a `: ` / `- ` / `? ` indicator, a
-  // `---` marker, or a node property (`&anchor`, `!tag`) that itself starts
-  // a node. Anything else is inside a plain scalar.
-  function startsYamlNode(src: string, i: number): boolean {
+  // Whether the character at source position `i` (block context) is the
+  // first character of a node: first on its line, or after a `: ` / `- ` /
+  // `? ` indicator, a `---` marker, or a node property (`&anchor`, `!tag`)
+  // that itself starts a node. Anything else is inside a plain scalar.
+  function startsYamlNode(i: number): boolean {
     // Char codes throughout: this runs for every bracket and quote in block
-    // text, and indexing a string allocates a one-character string. A byte
-    // order mark opening the stream counts as a line start.
+    // text. A byte order mark opening the stream counts as a line start.
     let p = i - 1
-    let c = p >= 0 ? src.charCodeAt(p) : -1
+    let c = p >= 0 ? absCode(p) : -1
     if (c === 10 || c === 13 || c < 0 || (0 === p && 0xFEFF === c)) return true
     if (c !== 32 && c !== 9) return false
-    while (c === 32 || c === 9) c = --p >= 0 ? src.charCodeAt(p) : -1
+    while (c === 32 || c === 9) c = --p >= 0 ? absCode(p) : -1
     if (c === 10 || c === 13 || c < 0 || (0 === p && 0xFEFF === c)) return true
     if (c === 58) return true // `:`
     if (c === 45 || c === 63) { // `-` / `?`
-      if (c === 45 && src.charCodeAt(p - 1) === 45 && src.charCodeAt(p - 2) === 45 &&
-          (p - 3 < 0 || src.charCodeAt(p - 3) === 10 || src.charCodeAt(p - 3) === 13)) return true
-      return startsYamlNode(src, p)
+      if (c === 45 && absCode(p - 1) === 45 && absCode(p - 2) === 45 &&
+          (p - 3 < 0 || absCode(p - 3) === 10 || absCode(p - 3) === 13)) return true
+      return startsYamlNode(p)
     }
     let w = p
-    while (w > 0 && !isYamlSpaceCode(src.charCodeAt(w - 1))) w--
-    c = src.charCodeAt(w)
-    if (c === 38 || c === 33) return startsYamlNode(src, w) // `&` / `!`
+    while (w > 0 && !isYamlSpaceCode(absCode(w - 1))) w--
+    c = absCode(w)
+    if (c === 38 || c === 33) return startsYamlNode(w) // `&` / `!`
     return false
   }
 
-  // From `i` inside a block-context plain scalar, the offset where it can
-  // end: the next line break, a `:` followed by whitespace or the end, or a
-  // `#` after whitespace.
-  function plainScalarRest(src: string, i: number): number {
+  // From source position `i` inside a block-context plain scalar, the
+  // position where it can end: the next line break, a `:` followed by
+  // whitespace or the end, or a `#` after whitespace.
+  function plainScalarRest(i: number): number {
     let j = i + 1
-    for (; j < src.length; j++) {
-      let c = src.charCodeAt(j)
+    for (;; j++) {
+      let c = absCode(j)
+      if (c < 0) break
       if (c === 10 || c === 13) break
       if (c === 58) { // `:`
-        let n = j + 1 < src.length ? src.charCodeAt(j + 1) : -1
+        let n = absCode(j + 1)
         if (n < 0 || isYamlSpaceCode(n)) break
       }
       else if (c === 35) { // `#`
-        let b = src.charCodeAt(j - 1)
+        let b = absCode(j - 1)
         if (b === 32 || b === 9) break
       }
     }
@@ -714,34 +1106,42 @@ name an anchor defined earlier.`,
     return c === 32 || c === 9 || c === 10 || c === 13
   }
 
+  // Whether the source at position `i` holds `word`.
+  function holdsAt(i: number, word: string): boolean {
+    for (let k = 0; k < word.length; k++) {
+      if (absAt(i + k) !== word[k]) return false
+    }
+    return true
+  }
+
   // A block scalar indicator (`|` or `>`, optional chomping/indentation
-  // indicators, then only a comment) at `i`: the offset just past its content
-  // lines, or `i` when it is not one. Content runs while lines are blank or
-  // indented at least as far as the first content line, which must be deeper
-  // than the indicator's line (column 0 is allowed for a document's root).
-  function blockScalarEnd(src: string, i: number): number {
+  // indicators, then only a comment) at source position `i`: the position
+  // just past its content lines, or `i` when it is not one. Content runs
+  // while lines are blank or indented at least as far as the first content
+  // line, which must be deeper than the indicator's line (column 0 is
+  // allowed for a document's root).
+  function blockScalarEnd(i: number): number {
     let j = i + 1
     let explicit = 0
     for (let k = 0; k < 2; k++) {
-      if (src[j] === '+' || src[j] === '-') j++
-      else if (src[j] >= '1' && src[j] <= '9') { explicit = +src[j]; j++ }
+      if (absAt(j) === '+' || absAt(j) === '-') j++
+      else if (absAt(j) >= '1' && absAt(j) <= '9') { explicit = +absAt(j); j++ }
     }
-    while (src[j] === ' ' || src[j] === '\t') j++
-    if (src[j] === '#') {
-      while (j < src.length && src[j] !== '\n' && src[j] !== '\r') j++
+    while (absAt(j) === ' ' || absAt(j) === '\t') j++
+    if (absAt(j) === '#') {
+      while (absAt(j) !== undefined && absAt(j) !== '\n' && absAt(j) !== '\r') j++
     }
-    if (j < src.length && src[j] !== '\n' && src[j] !== '\r') return i
-    let ls = i
-    while (ls > 0 && src[ls - 1] !== '\n' && src[ls - 1] !== '\r') ls--
-    if (0 === ls && 0xFEFF === src.charCodeAt(0)) ls = 1
+    if (absAt(j) !== undefined && absAt(j) !== '\n' && absAt(j) !== '\r') return i
+    let ls = lineStartOf(i)
+    if (0 === ls && 0xFEFF === absCode(0)) ls = 1
     let lineIndent = 0
-    while (src[ls + lineIndent] === ' ') lineIndent++
+    while (absAt(ls + lineIndent) === ' ') lineIndent++
     let isRoot = ls + lineIndent === i ||
-      (src[ls] === '-' && src[ls + 1] === '-' && src[ls + 2] === '-')
+      (absAt(ls) === '-' && absAt(ls + 1) === '-' && absAt(ls + 2) === '-')
     let parentIndent = isRoot && lineIndent === 0 ? -1 : lineIndent
     let pos = j
-    if (src[pos] === '\r') pos++
-    if (src[pos] === '\n') pos++
+    if (absAt(pos) === '\r') pos++
+    if (absAt(pos) === '\n') pos++
     let blockIndent = -1
     if (explicit > 0) {
       // As the block scalar handler does: after a key on the same line
@@ -750,35 +1150,35 @@ name an anchor defined earlier.`,
       let base = Math.max(parentIndent, 0)
       let hasColon = false
       for (let ci = ls + lineIndent; ci < i; ci++) {
-        if (src[ci] === ':' && (src[ci + 1] === ' ' || src[ci + 1] === '\t')) { hasColon = true; break }
+        if (absAt(ci) === ':' && (absAt(ci + 1) === ' ' || absAt(ci + 1) === '\t')) { hasColon = true; break }
       }
       if (hasColon) {
         let si = ls + lineIndent
-        while (si < i && src[si] === '-' && (src[si + 1] === ' ' || src[si + 1] === '\t')) {
+        while (si < i && absAt(si) === '-' && (absAt(si + 1) === ' ' || absAt(si + 1) === '\t')) {
           base += 2
           si += 2
-          while (si < i && src[si] === ' ') { base++; si++ }
+          while (si < i && absAt(si) === ' ') { base++; si++ }
         }
       }
       blockIndent = base + explicit
     }
     let end = pos
-    while (pos < src.length) {
+    while (absAt(pos) !== undefined) {
       let n = 0
-      while (src[pos + n] === ' ') n++
-      let c = src[pos + n]
+      while (absAt(pos + n) === ' ') n++
+      let c = absAt(pos + n)
       let lineEnd = pos + n
-      while (lineEnd < src.length && src[lineEnd] !== '\n' && src[lineEnd] !== '\r') lineEnd++
+      while (absAt(lineEnd) !== undefined && absAt(lineEnd) !== '\n' && absAt(lineEnd) !== '\r') lineEnd++
       let next = lineEnd
-      if (src[next] === '\r') next++
-      if (src[next] === '\n') next++
+      if (absAt(next) === '\r') next++
+      if (absAt(next) === '\n') next++
       if (c === undefined || c === '\n' || c === '\r') { pos = next; continue }
       if (blockIndent < 0) {
         if (n <= parentIndent) break
         blockIndent = n
       }
       if (n < blockIndent) break
-      if (n === 0 && (src.startsWith('---', pos) || src.startsWith('...', pos))) break
+      if (n === 0 && (holdsAt(pos, '---') || holdsAt(pos, '...'))) break
       end = lineEnd
       pos = next
     }
@@ -818,10 +1218,16 @@ name an anchor defined earlier.`,
     // for YAML plain scalar values.
     text: {
       check: (lex: any) => {
+        viewOf(lex)
+        readOn = false
         let pnt = lex.pnt
-        let fwd = lex.fwd
+        // The text from the cursor on: F(i) is the character i past it,
+        // read through the window, and FS(a, b) the text between.
+        const fwdAt = pnt.sI
+        const F = (i: number): string => srcAt(fwdAt + i)
+        const FS = (a: number, b: number): string => srcSub(fwdAt + a, fwdAt + b)
 
-        let ch = fwd[0]
+        let ch = F(0)
         // Block scalar: | or > (with optional chomping indicator)
         if (ch === '|' || ch === '>') {
           let fold = ch === '>'
@@ -831,22 +1237,22 @@ name an anchor defined earlier.`,
           // Parse optional chomping and indentation indicators in either order.
           // Valid: |, |+, |-, |2, |+2, |-2, |2+, |2-
           for (let pi = 0; pi < 2; pi++) {
-            if (fwd[idx] === '+') { chomp = 'keep'; idx++ }
-            else if (fwd[idx] === '-') { chomp = 'strip'; idx++ }
-            else if (fwd[idx] >= '1' && fwd[idx] <= '9') { explicitIndent = parseInt(fwd[idx]); idx++ }
+            if (F(idx) === '+') { chomp = 'keep'; idx++ }
+            else if (F(idx) === '-') { chomp = 'strip'; idx++ }
+            else if (F(idx) >= '1' && F(idx) <= '9') { explicitIndent = parseInt(F(idx)); idx++ }
           }
 
           // Must be followed by newline (possibly with trailing spaces/comment)
-          while (fwd[idx] === ' ') idx++
-          if (fwd[idx] === '#') {
-            while (idx < fwd.length && fwd[idx] !== '\n' && fwd[idx] !== '\r') idx++
+          while (F(idx) === ' ') idx++
+          if (F(idx) === '#') {
+            while (F(idx) !== undefined && F(idx) !== '\n' && F(idx) !== '\r') idx++
           }
-          if (fwd[idx] !== '\n' && fwd[idx] !== '\r' && fwd[idx] !== undefined) {
+          if (F(idx) !== '\n' && F(idx) !== '\r' && F(idx) !== undefined) {
             // Not a block scalar — fall through to normal text handling.
           } else {
             // Skip the indicator line.
-            if (fwd[idx] === '\r') idx++
-            if (fwd[idx] === '\n') idx++
+            if (F(idx) === '\r') idx++
+            if (F(idx) === '\n') idx++
 
             // Determine block indent from first content line,
             // or use explicit indent indicator if provided.
@@ -854,15 +1260,15 @@ name an anchor defined earlier.`,
             if (explicitIndent === 0) {
               // Auto-detect: skip blank lines, find first content line.
               let tempIdx = idx
-              while (tempIdx < fwd.length) {
+              while (F(tempIdx) !== undefined) {
                 let lineSpaces = 0
-                while (tempIdx + lineSpaces < fwd.length && fwd[tempIdx + lineSpaces] === ' ') lineSpaces++
+                while (F(tempIdx + lineSpaces) === ' ') lineSpaces++
                 let afterSpaces = tempIdx + lineSpaces
-                if (afterSpaces >= fwd.length || fwd[afterSpaces] === '\n' || fwd[afterSpaces] === '\r') {
+                if (F(afterSpaces) === undefined || F(afterSpaces) === '\n' || F(afterSpaces) === '\r') {
                   // Blank line — skip it.
                   tempIdx = afterSpaces
-                  if (fwd[tempIdx] === '\r') tempIdx++
-                  if (fwd[tempIdx] === '\n') tempIdx++
+                  if (F(tempIdx) === '\r') tempIdx++
+                  if (F(tempIdx) === '\n') tempIdx++
                   continue
                 }
                 blockIndent = lineSpaces
@@ -877,19 +1283,21 @@ name an anchor defined earlier.`,
             let containingIndent = 0
             let isDocStart = false
             let isDocRoot = false
+            // The indicator's source position: the scans back from it read
+            // the source's own lines, whatever the window holds.
+            const here = viewBase + pnt.sI
             {
               // Walk back from the indicator to the start of its own line.
-              // Start at pnt.sI, not pnt.sI - 1: when the indicator IS the
-              // first character of its line, sI - 1 is the preceding newline
-              // and the scan would land on the PREVIOUS line, mis-reading both
-              // containingIndent and the --- check.
-              let li = pnt.sI
-              while (li > 0 && lex.src[li - 1] !== '\n' && lex.src[li - 1] !== '\r') li--
-              if (0 === li && 0xFEFF === lex.src.charCodeAt(0)) li = 1
+              // Start at the indicator, not one before it: when the indicator
+              // IS the first character of its line, one before is the
+              // preceding newline and the scan would land on the PREVIOUS
+              // line, mis-reading both containingIndent and the --- check.
+              let li = lineStartOf(here)
+              if (0 === li && 0xFEFF === absCode(0)) li = 1
               let lineStart = li
-              while (li < pnt.sI && lex.src[li] === ' ') { containingIndent++; li++ }
+              while (li < here && absAt(li) === ' ') { containingIndent++; li++ }
               // Check if this line starts with --- (document start marker).
-              if (lex.src[lineStart] === '-' && lex.src[lineStart+1] === '-' && lex.src[lineStart+2] === '-') {
+              if (absAt(lineStart) === '-' && absAt(lineStart+1) === '-' && absAt(lineStart+2) === '-') {
                 isDocStart = true
               }
               // The indicator is the first thing on a column-0 line, so nothing
@@ -897,7 +1305,7 @@ name an anchor defined earlier.`,
               // gives the root node parent indent -1, so content at column 0 is
               // "more indented" and the block is not empty. (yaml-test-suite
               // M7A3: a bare `|` document whose content starts at column 0.)
-              isDocRoot = 0 === containingIndent && li === pnt.sI
+              isDocRoot = 0 === containingIndent && li === here
             }
             // Apply explicit indent relative to containing indent.
             // Per YAML spec, the content indentation = block scalar's indent
@@ -905,18 +1313,17 @@ name an anchor defined earlier.`,
             // indent of the containing block (e.g., the mapping key), which
             // may differ from the line's leading spaces (e.g., after "- ").
             if (explicitIndent > 0) {
-              // Find the line containing the block indicator. Start at pnt.sI
-              // (not pnt.sI - 1) for the same reason as the containingIndent
-              // scan above: an indicator that begins its own line would
-              // otherwise resolve to the PREVIOUS line.
-              let li = pnt.sI
-              while (li > 0 && lex.src[li - 1] !== '\n' && lex.src[li - 1] !== '\r') li--
+              // Find the line containing the block indicator. Start at the
+              // indicator (not one before it) for the same reason as the
+              // containingIndent scan above: an indicator that begins its
+              // own line would otherwise resolve to the PREVIOUS line.
+              let li = lineStartOf(here)
               // li is now at the start of the line. Find the colon position.
               let keyCol = containingIndent
               // Check if there's a colon on the SAME line as the block indicator.
               let hasColonOnLine = false
-              for (let ci = li + containingIndent; ci < pnt.sI; ci++) {
-                if (lex.src[ci] === ':' && (lex.src[ci+1] === ' ' || lex.src[ci+1] === '\t')) {
+              for (let ci = li + containingIndent; ci < here; ci++) {
+                if (absAt(ci) === ':' && (absAt(ci+1) === ' ' || absAt(ci+1) === '\t')) {
                   hasColonOnLine = true
                   break
                 }
@@ -925,11 +1332,11 @@ name an anchor defined earlier.`,
                 // Block indicator on same line as colon (e.g., "key: |2").
                 // Check for sequence indicators: each "- " adds to the effective indent.
                 let scanI = li + containingIndent
-                while (scanI < pnt.sI && lex.src[scanI] === '-' &&
-                       (lex.src[scanI+1] === ' ' || lex.src[scanI+1] === '\t')) {
+                while (scanI < here && absAt(scanI) === '-' &&
+                       (absAt(scanI+1) === ' ' || absAt(scanI+1) === '\t')) {
                   keyCol += 2
                   scanI += 2
-                  while (scanI < pnt.sI && lex.src[scanI] === ' ') { keyCol++; scanI++ }
+                  while (scanI < here && absAt(scanI) === ' ') { keyCol++; scanI++ }
                 }
                 blockIndent = keyCol + explicitIndent
               } else {
@@ -941,19 +1348,19 @@ name an anchor defined earlier.`,
                 let searchI = li - 1
                 while (searchI > 0) {
                   // Find start of previous line.
-                  if (lex.src[searchI] === '\n') searchI--
-                  if (lex.src[searchI] === '\r') searchI--
+                  if (absAt(searchI) === '\n') searchI--
+                  if (absAt(searchI) === '\r') searchI--
                   let prevLineEnd = searchI + 1
-                  while (searchI > 0 && lex.src[searchI - 1] !== '\n' && lex.src[searchI - 1] !== '\r') searchI--
+                  while (searchI > 0 && absAt(searchI - 1) !== '\n' && absAt(searchI - 1) !== '\r') searchI--
                   let prevLineStart = searchI
                   // Check if this line has a colon (mapping key).
                   for (let ci = prevLineStart; ci < prevLineEnd; ci++) {
-                    if (lex.src[ci] === ':' && (lex.src[ci+1] === ' ' || lex.src[ci+1] === '\t' ||
-                        lex.src[ci+1] === '\n' || lex.src[ci+1] === '\r' || ci+1 >= prevLineEnd)) {
+                    if (absAt(ci) === ':' && (absAt(ci+1) === ' ' || absAt(ci+1) === '\t' ||
+                        absAt(ci+1) === '\n' || absAt(ci+1) === '\r' || ci+1 >= prevLineEnd)) {
                       // Found the parent key line. Get its indent.
                       parentIndent = 0
                       let pi = prevLineStart
-                      while (pi < prevLineEnd && lex.src[pi] === ' ') { parentIndent++; pi++ }
+                      while (pi < prevLineEnd && absAt(pi) === ' ') { parentIndent++; pi++ }
                       break
                     }
                   }
@@ -966,16 +1373,16 @@ name an anchor defined earlier.`,
               }
             }
             if (blockIndent <= containingIndent && !isDocStart && !isDocRoot &&
-                idx < fwd.length) {
+                F(idx) !== undefined) {
               // Content is not indented enough — empty block scalar.
               // For keep chomping, count trailing blank lines.
               let val: string
               if (chomp === 'keep') {
                 let blankCount = 0
                 let bi = idx
-                while (bi < fwd.length) {
-                  if (fwd[bi] === '\n') { blankCount++; bi++ }
-                  else if (fwd[bi] === '\r') { bi++; if (bi < fwd.length && fwd[bi] === '\n') bi++; blankCount++ }
+                while (F(bi) !== undefined) {
+                  if (F(bi) === '\n') { blankCount++; bi++ }
+                  else if (F(bi) === '\r') { bi++; if (F(bi) === '\n') bi++; blankCount++ }
                   else break
                 }
                 val = '\n'.repeat(blankCount > 0 ? blankCount : 1)
@@ -983,7 +1390,7 @@ name an anchor defined earlier.`,
               } else {
                 val = chomp === 'strip' ? '' : ''
               }
-              let src = fwd.substring(0, idx)
+              let src = FS(0, idx)
               let tkn = lex.token('#TX', val, src, pnt)
               pnt.sI += idx
               pnt.rI += 1
@@ -996,24 +1403,24 @@ name an anchor defined earlier.`,
             let pos = idx
             let rows = 1 // Already consumed one newline
             let lastNewlinePos = idx // Track position before last consumed newline
-            while (pos < fwd.length) {
+            while (F(pos) !== undefined) {
               // Check indent of current line.
               let lineIndent = 0
-              while (pos + lineIndent < fwd.length && fwd[pos + lineIndent] === ' ') lineIndent++
+              while (F(pos + lineIndent) === ' ') lineIndent++
 
               // Blank line (only whitespace before newline or end).
               let afterSpaces = pos + lineIndent
-              if (afterSpaces >= fwd.length || fwd[afterSpaces] === '\n' || fwd[afterSpaces] === '\r') {
+              if (F(afterSpaces) === undefined || F(afterSpaces) === '\n' || F(afterSpaces) === '\r') {
                 // Preserve spaces beyond block indent on blank lines.
                 if (lineIndent > blockIndent) {
-                  lines.push(fwd.substring(pos + blockIndent, afterSpaces))
+                  lines.push(FS(pos + blockIndent, afterSpaces))
                 } else {
                   lines.push('')
                 }
                 lastNewlinePos = afterSpaces
                 pos = afterSpaces
-                if (fwd[pos] === '\r') pos++
-                if (fwd[pos] === '\n') pos++
+                if (F(pos) === '\r') pos++
+                if (F(pos) === '\n') pos++
                 rows++
                 continue
               }
@@ -1023,20 +1430,20 @@ name an anchor defined earlier.`,
 
               // Stop at document markers (--- or ...) at indent 0.
               if (lineIndent === 0 &&
-                  ((fwd[pos] === '-' && fwd[pos+1] === '-' && fwd[pos+2] === '-' &&
-                    (fwd[pos+3] === '\n' || fwd[pos+3] === '\r' || fwd[pos+3] === ' ' || fwd[pos+3] === undefined)) ||
-                   (fwd[pos] === '.' && fwd[pos+1] === '.' && fwd[pos+2] === '.' &&
-                    (fwd[pos+3] === '\n' || fwd[pos+3] === '\r' || fwd[pos+3] === ' ' || fwd[pos+3] === undefined)))) break
+                  ((F(pos) === '-' && F(pos+1) === '-' && F(pos+2) === '-' &&
+                    (F(pos+3) === '\n' || F(pos+3) === '\r' || F(pos+3) === ' ' || F(pos+3) === undefined)) ||
+                   (F(pos) === '.' && F(pos+1) === '.' && F(pos+2) === '.' &&
+                    (F(pos+3) === '\n' || F(pos+3) === '\r' || F(pos+3) === ' ' || F(pos+3) === undefined)))) break
 
               // Consume the line content (strip block indent).
               let lineStart = pos + blockIndent
               let lineEnd = lineStart
-              while (lineEnd < fwd.length && fwd[lineEnd] !== '\n' && fwd[lineEnd] !== '\r') lineEnd++
-              lines.push(fwd.substring(lineStart, lineEnd))
+              while (F(lineEnd) !== undefined && F(lineEnd) !== '\n' && F(lineEnd) !== '\r') lineEnd++
+              lines.push(FS(lineStart, lineEnd))
               lastNewlinePos = lineEnd
               pos = lineEnd
-              if (fwd[pos] === '\r') pos++
-              if (fwd[pos] === '\n') pos++
+              if (F(pos) === '\r') pos++
+              if (F(pos) === '\n') pos++
               rows++
             }
 
@@ -1117,21 +1524,21 @@ name an anchor defined earlier.`,
             // continue properly.
             let endPos = pos
             let endRows = rows
-            if (pos < fwd.length && pos > lastNewlinePos) {
+            if (F(pos) !== undefined && pos > lastNewlinePos) {
               // Check if the next content is a doc marker (--- or ...).
               let nextLineIndent = 0
               let ni = pos
-              while (ni < fwd.length && fwd[ni] === ' ') { nextLineIndent++; ni++ }
+              while (F(ni) === ' ') { nextLineIndent++; ni++ }
               let isDocMarker = nextLineIndent === 0 &&
-                ((fwd[ni] === '-' && fwd[ni+1] === '-' && fwd[ni+2] === '-') ||
-                 (fwd[ni] === '.' && fwd[ni+1] === '.' && fwd[ni+2] === '.'))
+                ((F(ni) === '-' && F(ni+1) === '-' && F(ni+2) === '-') ||
+                 (F(ni) === '.' && F(ni+1) === '.' && F(ni+2) === '.'))
               if (!isDocMarker) {
                 // Regular content follows — back up to the newline position.
                 endPos = lastNewlinePos
                 endRows = rows - 1
               }
             }
-            let src = fwd.substring(0, endPos)
+            let src = FS(0, endPos)
             let tkn = lex.token('#TX', val, src, pnt)
             pnt.sI += endPos
             pnt.rI += endRows
@@ -1141,43 +1548,43 @@ name an anchor defined earlier.`,
         }
 
         // YAML tags: !!type value
-        if (ch === '!' && fwd[1] === '!') {
+        if (ch === '!' && F(1) === '!') {
           let tagEnd = 2
-          while (tagEnd < fwd.length && fwd[tagEnd] !== ' ' && fwd[tagEnd] !== '\n' &&
-                 fwd[tagEnd] !== '\r') tagEnd++
-          let tag = fwd.substring(2, tagEnd)
+          while (F(tagEnd) !== undefined && F(tagEnd) !== ' ' && F(tagEnd) !== '\n' &&
+                 F(tagEnd) !== '\r') tagEnd++
+          let tag = FS(2, tagEnd)
           // For !!seq and !!map, these are handled in the yamlMatcher.
           if (tag === 'seq' || tag === 'map') {
             return null  // Don't advance pnt — let yamlMatcher handle it.
           }
           // For value tags, parse the value after the tag.
           let valStart = tagEnd
-          if (fwd[valStart] === ' ') valStart++
+          if (F(valStart) === ' ') valStart++
           // Get the raw value string.
           let rawVal = ''
           let valEnd = valStart
-          if (fwd[valStart] === '"' || fwd[valStart] === "'") {
+          if (F(valStart) === '"' || F(valStart) === "'") {
             // Quoted value — find matching close quote.
-            let q = fwd[valStart]
+            let q = F(valStart)
             valEnd = valStart + 1
-            while (valEnd < fwd.length && fwd[valEnd] !== q) {
-              if (fwd[valEnd] === '\\' && q === '"') valEnd++  // Skip escape in double quotes.
+            while (F(valEnd) !== undefined && F(valEnd) !== q) {
+              if (F(valEnd) === '\\' && q === '"') valEnd++  // Skip escape in double quotes.
               valEnd++
             }
-            if (fwd[valEnd] === q) valEnd++
-            rawVal = fwd.substring(valStart + 1, valEnd - 1)
+            if (F(valEnd) === q) valEnd++
+            rawVal = FS(valStart + 1, valEnd - 1)
           } else {
             // Unquoted value — to end of line, stopping at `: ` and ` #`.
             // A `#` straight after the tag's space starts a comment, so
             // the value is empty (`!!str #c` is "").
-            while (valEnd < fwd.length && fwd[valEnd] !== '\n' && fwd[valEnd] !== '\r') {
-              if (valEnd === valStart && valStart > tagEnd && fwd[valEnd] === '#') break
-              if (fwd[valEnd] === ':' && (fwd[valEnd+1] === ' ' || fwd[valEnd+1] === '\n' ||
-                  fwd[valEnd+1] === '\r' || fwd[valEnd+1] === undefined)) break
-              if (fwd[valEnd] === ' ' && fwd[valEnd+1] === '#') break
+            while (F(valEnd) !== undefined && F(valEnd) !== '\n' && F(valEnd) !== '\r') {
+              if (valEnd === valStart && valStart > tagEnd && F(valEnd) === '#') break
+              if (F(valEnd) === ':' && (F(valEnd+1) === ' ' || F(valEnd+1) === '\n' ||
+                  F(valEnd+1) === '\r' || F(valEnd+1) === undefined)) break
+              if (F(valEnd) === ' ' && F(valEnd+1) === '#') break
               valEnd++
             }
-            rawVal = fwd.substring(valStart, valEnd).replace(/\s+$/, '')
+            rawVal = FS(valStart, valEnd).replace(/\s+$/, '')
           }
           // Apply tag conversion.
           let result: any
@@ -1188,7 +1595,7 @@ name an anchor defined earlier.`,
           else if (tag === 'null') result = null
           else result = rawVal  // Unknown tag — keep as string.
 
-          let src = fwd.substring(0, valEnd)
+          let src = FS(0, valEnd)
           let tknTin = typeof result === 'string' ? '#TX' :
                        typeof result === 'number' ? '#NR' :
                        '#VL'
@@ -1209,51 +1616,39 @@ name an anchor defined earlier.`,
         }
         // Colon only starts a key-value separator if followed by space/tab/newline/eof.
         // Otherwise it can start a plain scalar (e.g. ::vector).
-        if (ch === ':' && (fwd[1] === ' ' || fwd[1] === '\t' || fwd[1] === '\n' ||
-            fwd[1] === '\r' || fwd[1] === undefined)) {
+        if (ch === ':' && (F(1) === ' ' || F(1) === '\t' || F(1) === '\n' ||
+            F(1) === '\r' || F(1) === undefined)) {
           return null
         }
 
         // Match text to end of line, stopping at `: `, `:\n`, ` #`, or newline.
         // This handles YAML plain scalars with multiline continuation.
-        updateFlowState(lex.src as string, pnt.sI)
+        const here = viewBase + pnt.sI
+        updateFlowState(here)
         let inFlowCtx = _flowDepth > 0
         // Find key indent and determine context for multiline scalars.
-        let lineStart = pnt.sI
-        while (lineStart > 0 && lex.src[lineStart - 1] !== '\n' && lex.src[lineStart - 1] !== '\r') lineStart--
-        if (0 === lineStart && 0xFEFF === lex.src.charCodeAt(0)) lineStart = 1
+        let lineStart = lineStartOf(here)
+        if (0 === lineStart && 0xFEFF === absCode(0)) lineStart = 1
 
         // Current line indent (indent of the line where text starts).
         let currentLineIndent = 0
         {
           let ci = lineStart
-          while (ci < pnt.sI && lex.src[ci] === ' ') { currentLineIndent++; ci++ }
+          while (ci < here && absAt(ci) === ' ') { currentLineIndent++; ci++ }
         }
 
         // Check if text is preceded by ": " on the same line (map value context).
         let isMapValue = false
         {
-          let ci = pnt.sI - 1
+          let ci = here - 1
           // Skip whitespace before text
-          while (ci >= lineStart && (lex.src[ci] === ' ' || lex.src[ci] === '\t')) ci--
-          if (ci >= lineStart && lex.src[ci] === ':') isMapValue = true
-        }
-
-        // For map values: continuation requires indent > key indent (parent line's indent).
-        // For standalone scalars: continuation requires indent >= current line indent.
-        let keyIndent = 0
-        let prevLineStart = lineStart
-        if (prevLineStart > 0) {
-          let pi = prevLineStart - 1
-          if (pi >= 0 && lex.src[pi] === '\n') pi--
-          if (pi >= 0 && lex.src[pi] === '\r') pi--
-          while (pi > 0 && lex.src[pi - 1] !== '\n' && lex.src[pi - 1] !== '\r') pi--
-          while (pi < prevLineStart && lex.src[pi] === ' ') { keyIndent++; pi++ }
+          while (ci >= lineStart && (absAt(ci) === ' ' || absAt(ci) === '\t')) ci--
+          if (ci >= lineStart && absAt(ci) === ':') isMapValue = true
         }
 
         // The minimum indent for continuation lines.
-        // For map values, continuation indent is based on the colon's line indent,
-        // not the previous line's indent (which may be a key continuation line).
+        // For map values: continuation requires indent > the colon's line
+        // indent; for standalone scalars, indent >= the current line's.
         let minContinuationIndent = isMapValue ? currentLineIndent + 1 : currentLineIndent
         let text = ''
         let i = 0
@@ -1261,12 +1656,12 @@ name an anchor defined earlier.`,
         let rows = 0
         let scanLine = () => {
           let line = ''
-          while (i < fwd.length) {
-            let c = fwd[i]
+          while (F(i) !== undefined) {
+            let c = F(i)
             if (c === '\n' || c === '\r') break
-            if (c === ':' && (fwd[i + 1] === ' ' || fwd[i + 1] === '\t' || fwd[i + 1] === '\n' ||
-                fwd[i + 1] === '\r' || fwd[i + 1] === undefined)) break
-            if ((c === ' ' || c === '\t') && fwd[i + 1] === '#') break
+            if (c === ':' && (F(i + 1) === ' ' || F(i + 1) === '\t' || F(i + 1) === '\n' ||
+                F(i + 1) === '\r' || F(i + 1) === undefined)) break
+            if ((c === ' ' || c === '\t') && F(i + 1) === '#') break
             if (inFlowCtx && (c === ']' || c === '}')) break
             if (c === ',' && inFlowCtx) break
             line += c
@@ -1280,17 +1675,17 @@ name an anchor defined earlier.`,
 
         // Check for continuation lines (multiline plain scalars).
         // Blank lines (whitespace-only) within a scalar become newlines.
-        while (i < fwd.length && (fwd[i] === '\n' || fwd[i] === '\r')) {
+        while (F(i) === '\n' || F(i) === '\r') {
           let nlPos = i
           // Count blank lines (lines with only whitespace).
           let blankLines = 0
-          while (i < fwd.length && (fwd[i] === '\n' || fwd[i] === '\r')) {
-            if (fwd[i] === '\r') i++
-            if (fwd[i] === '\n') i++
+          while (F(i) === '\n' || F(i) === '\r') {
+            if (F(i) === '\r') i++
+            if (F(i) === '\n') i++
             // Count indent of next line.
             let li = 0
-            while (i + li < fwd.length && (fwd[i + li] === ' ' || fwd[i + li] === '\t')) li++
-            if (i + li >= fwd.length || fwd[i + li] === '\n' || fwd[i + li] === '\r') {
+            while (F(i + li) === ' ' || F(i + li) === '\t') li++
+            if (F(i + li) === undefined || F(i + li) === '\n' || F(i + li) === '\r') {
               // Blank line — count it and skip.
               blankLines++
               i += li
@@ -1300,32 +1695,32 @@ name an anchor defined earlier.`,
           }
           // Count indent of the content line after blank lines.
           let lineIndent = 0
-          while (i < fwd.length && (fwd[i] === ' ' || fwd[i] === '\t')) { lineIndent++; i++ }
+          while (F(i) === ' ' || F(i) === '\t') { lineIndent++; i++ }
           // In flow context, continuation is allowed regardless of indent
           // (as long as the next line doesn't start a flow indicator or comment).
           // In block context, must be more indented than the key.
           // Check for document markers (--- or ...) at column 0.
           let isDocMarker = lineIndent === 0 &&
-            ((fwd[i] === '-' && fwd[i+1] === '-' && fwd[i+2] === '-' &&
-              (fwd[i+3] === ' ' || fwd[i+3] === '\t' || fwd[i+3] === '\n' ||
-               fwd[i+3] === '\r' || fwd[i+3] === undefined)) ||
-             (fwd[i] === '.' && fwd[i+1] === '.' && fwd[i+2] === '.' &&
-              (fwd[i+3] === ' ' || fwd[i+3] === '\t' || fwd[i+3] === '\n' ||
-               fwd[i+3] === '\r' || fwd[i+3] === undefined)))
+            ((F(i) === '-' && F(i+1) === '-' && F(i+2) === '-' &&
+              (F(i+3) === ' ' || F(i+3) === '\t' || F(i+3) === '\n' ||
+               F(i+3) === '\r' || F(i+3) === undefined)) ||
+             (F(i) === '.' && F(i+1) === '.' && F(i+2) === '.' &&
+              (F(i+3) === ' ' || F(i+3) === '\t' || F(i+3) === '\n' ||
+               F(i+3) === '\r' || F(i+3) === undefined)))
           // Check for sequence marker "- ". Only treat as a new sequence
           // entry when the indent matches an enclosing sequence's level.
           // Find the nearest "- " sequence marker preceding the text on
           // the first line to determine the relevant sequence indent.
           let isSeqMarker = false
-          if (fwd[i] === '-' &&
-              (fwd[i+1] === ' ' || fwd[i+1] === '\t' || fwd[i+1] === '\n' ||
-               fwd[i+1] === '\r' || fwd[i+1] === undefined)) {
+          if (F(i) === '-' &&
+              (F(i+1) === ' ' || F(i+1) === '\t' || F(i+1) === '\n' ||
+               F(i+1) === '\r' || F(i+1) === undefined)) {
             // Determine the sequence indent from the first line's context.
-            // Look backward from pnt.sI to find "- " markers before the text.
+            // Look backward from the text's start to find "- " markers before it.
             let seqIndent = -1
-            let si = pnt.sI - 1
+            let si = here - 1
             while (si >= lineStart) {
-              if (lex.src[si] === '-' && (lex.src[si+1] === ' ' || lex.src[si+1] === '\t')) {
+              if (absAt(si) === '-' && (absAt(si+1) === ' ' || absAt(si+1) === '\t')) {
                 seqIndent = si - lineStart
                 break
               }
@@ -1337,24 +1732,24 @@ name an anchor defined earlier.`,
                           (seqIndent < 0 && lineIndent <= currentLineIndent)
           }
           let canContinue = inFlowCtx
-            ? (i < fwd.length && fwd[i] !== '\n' && fwd[i] !== '\r' &&
-               fwd[i] !== '#' && fwd[i] !== '{' && fwd[i] !== '}' &&
-               fwd[i] !== '[' && fwd[i] !== ']')
-            : (lineIndent >= minContinuationIndent && i < fwd.length &&
-               fwd[i] !== '\n' && fwd[i] !== '\r' && fwd[i] !== '#' &&
+            ? (F(i) !== undefined && F(i) !== '\n' && F(i) !== '\r' &&
+               F(i) !== '#' && F(i) !== '{' && F(i) !== '}' &&
+               F(i) !== '[' && F(i) !== ']')
+            : (lineIndent >= minContinuationIndent && F(i) !== undefined &&
+               F(i) !== '\n' && F(i) !== '\r' && F(i) !== '#' &&
                !isDocMarker && !isSeqMarker)
           if (canContinue) {
             // Check if this line is a key-value pair (contains ": ").
             let peekJ = i
             let isKV = false
-            while (peekJ < fwd.length && fwd[peekJ] !== '\n' && fwd[peekJ] !== '\r') {
-              if (fwd[peekJ] === ':' && (fwd[peekJ + 1] === ' ' || fwd[peekJ + 1] === '\t' ||
-                  fwd[peekJ + 1] === '\n' || fwd[peekJ + 1] === '\r' ||
-                  fwd[peekJ + 1] === undefined)) {
+            while (F(peekJ) !== undefined && F(peekJ) !== '\n' && F(peekJ) !== '\r') {
+              if (F(peekJ) === ':' && (F(peekJ + 1) === ' ' || F(peekJ + 1) === '\t' ||
+                  F(peekJ + 1) === '\n' || F(peekJ + 1) === '\r' ||
+                  F(peekJ + 1) === undefined)) {
                 isKV = true
                 break
               }
-              if (fwd[peekJ] === '}' || fwd[peekJ] === ']' || fwd[peekJ] === ',') {
+              if (F(peekJ) === '}' || F(peekJ) === ']' || F(peekJ) === ',') {
                 break
               }
               peekJ++
@@ -1416,7 +1811,7 @@ name an anchor defined earlier.`,
         }
 
         // Plain text — consume to end of meaningful content.
-        let src = fwd.substring(0, totalConsumed)
+        let src = FS(0, totalConsumed)
         let tkn = lex.token('#TX', text, src, pnt)
         pnt.sI += totalConsumed
         pnt.rI += rows
@@ -1472,14 +1867,15 @@ name an anchor defined earlier.`,
               // Document-frame syntax (--- / ... / %YAML / %TAG) is no longer
               // mutated out of lex.src here — it flows through as #DS / #DE /
               // #DR tokens consumed by the `stream` rule.
+              let first = false
               if (!seenLex.has(lex)) {
                 seenLex.add(lex)
+                first = true
                 anchors = Object.create(null)
                 pendingAnchors = []
                 declaredAnchors = new Set()
                 pendingExplicitCL = false
                 skipNumberMatch = false
-                pendingTokens = []
                 tagHandles = {}
                 yamlStreamDocs = []
                 yamlStreamMeta = []
@@ -1489,46 +1885,78 @@ name an anchor defined earlier.`,
                 _flowScanUpTo = 0
                 _inSingleQuote = false
                 _inDoubleQuote = false
-                // Empty / whitespace-only / comments-only source: emit one
-                // null #VL so the parser yields `null` rather than an error.
-                let src = '' + lex.src
-                let stripped = src.replace(/^[ \t]*#[^\n]*(\n|$)/gm, '').trim()
-                if (src.trim() === '' || stripped === '') {
-                  lex.pnt.len = 0
-                  let tkn = lex.token('#VL', null, '', lex.pnt)
-                  lex.pnt.sI = 0
-                  return tkn
-                }
-                // A byte order mark opening the stream is not content: step
-                // over it without counting a column. atLineStart and the
-                // flow scan treat the offset after it as a line start.
-                if (0 === lex.pnt.sI && 0xFEFF === src.charCodeAt(0)) {
-                  lex.pnt.sI = 1
-                  lex.refwd()
-                }
+                resetView(lex)
               }
-              // Drain any queued tokens first (from multi-token explicit keys).
-              if (pendingTokens.length > 0) {
-                return pendingTokens.shift()
+              readOn = true
+              beginCut(lex)
+              // Empty / whitespace-only / comments-only source: emit one
+              // null #VL so the parser yields `null` rather than an error.
+              // The source has been read to its end when it is so.
+              if (first && sourceBlank()) {
+                lex.pnt.len = 0
+                let tkn = lex.token('#VL', null, '', lex.pnt)
+                lex.pnt.sI = 0
+                if (lex.windowed) {
+                  // The window's length is the source's again once the
+                  // cut is made: the end is the next token, at the start.
+                  lex.pnt.end = lex.token('#ZZ', undefined, '', lex.pnt)
+                }
+                return tkn
+              }
+              const tkn = yamlMatch(lex)
+              // What this call stepped over without a token of its own (an
+              // anchor, a tag) is the window's to drop at the next cut, so
+              // `hist` takes it now.
+              histSync(viewBase + lex.pnt.sI)
+              return tkn
+            }
+          }
+        }
+      }
+    }
+  })
+
+  // The YAML matcher's body, run with the source read through the window.
+  function yamlMatch(lex: Lex): Token | undefined {
+              // A byte order mark opening the stream is not content: step
+              // over it without counting a column. atLineStart and the
+              // flow scan treat the offset after it as a line start. Only
+              // the source's start can hold it, and every cut made there
+              // steps over it, the engine's own again over a wider window
+              // among them.
+              if (0 === viewBase + lex.pnt.sI && 0xFEFF === absCode(0)) {
+                lex.pnt.sI = 1
               }
 
               let pnt = lex.pnt
-              let fwd = lex.fwd
+              // The text from the cursor on: F(i) is the character i past
+              // `fwdAt`, the cursor as it stood when last taken, read through
+              // the window, and FS(a, b) the text between.
+              let fwdAt = pnt.sI
+              const F = (i: number): string => srcAt(fwdAt + i)
+              const FS = (a: number, b: number): string => srcSub(fwdAt + a, fwdAt + b)
 
               // Loop to restart matching after consuming flow whitespace.
               yamlMatchLoop: while (true) {
 
               // Skip blank lines that contain only tabs (and maybe spaces).
               // YAML treats these as blank lines, but jsonic errors on bare tabs.
-              if (fwd[0] === '\t' || fwd[0] === ' ') {
-                let lineEnd = fwd.indexOf('\n')
-                let lineContent = lineEnd >= 0 ? fwd.substring(0, lineEnd) : fwd
-                if (lineContent.indexOf('\t') >= 0 && /^[ \t]+$/.test(lineContent)) {
-                  let skip = lineEnd >= 0 ? lineEnd + 1 : lineContent.length
+              // The line is what lies before the next line feed: blank when
+              // the run of tabs and spaces at the cursor, a tab among them,
+              // reaches it or the source's end.
+              if (F(0) === '\t' || F(0) === ' ') {
+                let k = 0
+                let tab = false
+                while (F(k) === ' ' || F(k) === '\t') {
+                  if (F(k) === '\t') tab = true
+                  k++
+                }
+                if (tab && (F(k) === '\n' || F(k) === undefined)) {
+                  let skip = F(k) === '\n' ? k + 1 : k
                   pnt.sI += skip
                   pnt.rI++
                   pnt.cI = 0
-                  fwd = lex.refwd()
+                  fwdAt = pnt.sI
                   continue yamlMatchLoop
                 }
               }
@@ -1544,20 +1972,20 @@ name an anchor defined earlier.`,
               // YAML alias: *name — emit a VL token with alias name.
               // Resolution happens at grammar time (val.ac) since the anchor
               // may not be recorded yet due to lexer pre-fetching.
-              if (fwd[0] === '*') {
+              if (F(0) === '*') {
                 let nameEnd = 1
-                while (nameEnd < fwd.length && fwd[nameEnd] !== ' ' && fwd[nameEnd] !== '\t' &&
-                       fwd[nameEnd] !== '\n' && fwd[nameEnd] !== '\r' && fwd[nameEnd] !== ',' &&
-                       fwd[nameEnd] !== '{' && fwd[nameEnd] !== '}' && fwd[nameEnd] !== '[' &&
-                       fwd[nameEnd] !== ']') {
+                while (F(nameEnd) !== undefined && F(nameEnd) !== ' ' && F(nameEnd) !== '\t' &&
+                       F(nameEnd) !== '\n' && F(nameEnd) !== '\r' && F(nameEnd) !== ',' &&
+                       F(nameEnd) !== '{' && F(nameEnd) !== '}' && F(nameEnd) !== '[' &&
+                       F(nameEnd) !== ']') {
                   // Colon terminates only when followed by space/tab (key-value separator).
                   // Otherwise colon is a valid anchor-name character per YAML spec.
-                  if (fwd[nameEnd] === ':' &&
-                      (fwd[nameEnd+1] === ' ' || fwd[nameEnd+1] === '\t')) break
+                  if (F(nameEnd) === ':' &&
+                      (F(nameEnd+1) === ' ' || F(nameEnd+1) === '\t')) break
                   nameEnd++
                 }
-                let name = fwd.substring(1, nameEnd)
-                let src = fwd.substring(0, nameEnd)
+                let name = FS(1, nameEnd)
+                let src = FS(0, nameEnd)
                 // YAML 1.2.2, 7.1: "It is an error for an alias node to use
                 // an anchor that does not previously occur in the document."
                 // Checked here, as a key or as a value, because an alias read
@@ -1567,11 +1995,11 @@ name an anchor defined earlier.`,
                 }
                 // Check if this alias is used as a map key (followed by ` :` or `:`).
                 let afterAlias = nameEnd
-                while (afterAlias < fwd.length && (fwd[afterAlias] === ' ' || fwd[afterAlias] === '\t')) afterAlias++
-                let isKey = afterAlias < fwd.length && fwd[afterAlias] === ':' &&
-                  (fwd[afterAlias+1] === ' ' || fwd[afterAlias+1] === '\t' ||
-                   fwd[afterAlias+1] === '\n' || fwd[afterAlias+1] === '\r' ||
-                   fwd[afterAlias+1] === undefined)
+                while (F(afterAlias) === ' ' || F(afterAlias) === '\t') afterAlias++
+                let isKey = F(afterAlias) === ':' &&
+                  (F(afterAlias+1) === ' ' || F(afterAlias+1) === '\t' ||
+                   F(afterAlias+1) === '\n' || F(afterAlias+1) === '\r' ||
+                   F(afterAlias+1) === undefined)
                 if (isKey && anchors[name] !== undefined) {
                   // Resolve alias immediately as a key string.
                   let resolved = String(anchors[name])
@@ -1603,23 +2031,23 @@ name an anchor defined earlier.`,
 
               // YAML anchor: &name — store value. Skip the anchor marker,
               // let the value be parsed, and record it post-parse via grammar rules.
-              if (fwd[0] === '&') {
+              if (F(0) === '&') {
                 let nameEnd = 1
-                while (nameEnd < fwd.length && fwd[nameEnd] !== ' ' && fwd[nameEnd] !== '\t' &&
-                       fwd[nameEnd] !== '\n' && fwd[nameEnd] !== '\r' && fwd[nameEnd] !== ',' &&
-                       fwd[nameEnd] !== '{' && fwd[nameEnd] !== '}' && fwd[nameEnd] !== '[' &&
-                       fwd[nameEnd] !== ']') nameEnd++
-                let anchorName = fwd.substring(1, nameEnd)
+                while (F(nameEnd) !== undefined && F(nameEnd) !== ' ' && F(nameEnd) !== '\t' &&
+                       F(nameEnd) !== '\n' && F(nameEnd) !== '\r' && F(nameEnd) !== ',' &&
+                       F(nameEnd) !== '{' && F(nameEnd) !== '}' && F(nameEnd) !== '[' &&
+                       F(nameEnd) !== ']') nameEnd++
+                let anchorName = FS(1, nameEnd)
                 let skip = nameEnd
-                if (fwd[skip] === ' ' || fwd[skip] === '\t') skip++
+                if (F(skip) === ' ' || F(skip) === '\t') skip++
                 // Check if anchor is standalone (first content on its line).
                 // Look backward to see if only whitespace precedes & on this line.
                 let isStandalone = true
                 let anchorIndent = 0
                 {
-                  let bi = pnt.sI - 1
-                  while (bi >= 0 && lex.src[bi] !== '\n' && lex.src[bi] !== '\r') {
-                    if (lex.src[bi] !== ' ' && lex.src[bi] !== '\t') {
+                  let bi = viewBase + pnt.sI - 1
+                  while (bi >= 0 && absAt(bi) !== '\n' && absAt(bi) !== '\r') {
+                    if (absAt(bi) !== ' ' && absAt(bi) !== '\t') {
                       isStandalone = false
                       break
                     }
@@ -1634,9 +2062,9 @@ name an anchor defined earlier.`,
                 // anchor's scalar value. The following newline is handled next.
                 {
                   let ci = pnt.sI
-                  while (lex.src[ci] === ' ' || lex.src[ci] === '\t') ci++
-                  if (lex.src[ci] === '#') {
-                    while (ci < lex.src.length && lex.src[ci] !== '\n' && lex.src[ci] !== '\r') ci++
+                  while (srcAt(ci) === ' ' || srcAt(ci) === '\t') ci++
+                  if (srcAt(ci) === '#') {
+                    while (srcAt(ci) !== undefined && srcAt(ci) !== '\n' && srcAt(ci) !== '\r') ci++
                     pnt.cI += (ci - pnt.sI)
                     pnt.sI = ci
                   }
@@ -1644,47 +2072,48 @@ name an anchor defined earlier.`,
                 // Determine if anchor is inline (content follows on same line)
                 // or standalone (only newline follows).
                 let anchorInline = !(isStandalone &&
-                    (lex.src[pnt.sI] === '\r' || lex.src[pnt.sI] === '\n' ||
-                     pnt.sI >= lex.src.length))
+                    (srcAt(pnt.sI) === '\r' || srcAt(pnt.sI) === '\n' ||
+                     srcAt(pnt.sI) === undefined))
                 // For inline anchors before scalar values, record the anchor
                 // immediately so aliases in later pairs can resolve them.
                 if (anchorInline) {
-                  let peek = lex.refwd()
-                  let pch = peek[0]
+                  const peekAt = pnt.sI
+                  const P = (i: number): string => srcAt(peekAt + i)
+                  let pch = P(0)
                   if (pch !== '[' && pch !== '{' && pch !== '>' && pch !== '|' &&
                       pch !== '\n' && pch !== '\r' && pch !== undefined) {
                     let scalarVal: string | undefined
                     if (pch === '"') {
                       let ei = 1
-                      while (ei < peek.length && peek[ei] !== '"') {
-                        if (peek[ei] === '\\') ei++
+                      while (P(ei) !== undefined && P(ei) !== '"') {
+                        if (P(ei) === '\\') ei++
                         ei++
                       }
-                      scalarVal = peek.substring(1, ei)
+                      scalarVal = srcSub(peekAt + 1, peekAt + ei)
                         .replace(/\\n/g, '\n').replace(/\\t/g, '\t')
                         .replace(/\\\\/g, '\\').replace(/\\"/g, '"')
                     } else if (pch === "'") {
                       let ei = 1
-                      while (ei < peek.length && peek[ei] !== "'") {
-                        if (peek[ei] === "'" && peek[ei+1] === "'") ei++
+                      while (P(ei) !== undefined && P(ei) !== "'") {
+                        if (P(ei) === "'" && P(ei+1) === "'") ei++
                         ei++
                       }
-                      scalarVal = peek.substring(1, ei).replace(/''/g, "'")
+                      scalarVal = srcSub(peekAt + 1, peekAt + ei).replace(/''/g, "'")
                     } else {
                       let ei = 0
-                      while (ei < peek.length && peek[ei] !== '\n' && peek[ei] !== '\r' &&
-                             peek[ei] !== ',' && peek[ei] !== '}' && peek[ei] !== ']') {
-                        if (peek[ei] === ':' && (peek[ei+1] === ' ' || peek[ei+1] === '\t' ||
-                            peek[ei+1] === '\n' || peek[ei+1] === '\r' ||
-                            peek[ei+1] === undefined)) break
-                        if (peek[ei] === ' ' && peek[ei+1] === '#') break
+                      while (P(ei) !== undefined && P(ei) !== '\n' && P(ei) !== '\r' &&
+                             P(ei) !== ',' && P(ei) !== '}' && P(ei) !== ']') {
+                        if (P(ei) === ':' && (P(ei+1) === ' ' || P(ei+1) === '\t' ||
+                            P(ei+1) === '\n' || P(ei+1) === '\r' ||
+                            P(ei+1) === undefined)) break
+                        if (P(ei) === ' ' && P(ei+1) === '#') break
                         ei++
                       }
-                      let raw = peek.substring(0, ei).trim()
+                      let raw = srcSub(peekAt, peekAt + ei).trim()
                       if (raw.length > 0) scalarVal = raw
                     }
                     if (scalarVal !== undefined) {
-                      anchors[anchorName] = scalarVal
+                      setAnchor(anchorName, scalarVal)
                     }
                   }
                 }
@@ -1694,7 +2123,7 @@ name an anchor defined earlier.`,
                 // emit its opener here: we've advanced past the anchor marker,
                 // so jsonic's fixed-token matcher would mis-lex it as #BD.
                 {
-                  let ac = lex.src[pnt.sI]
+                  let ac = srcAt(pnt.sI)
                   if (ac === '[' || ac === '{') {
                     let tkn = lex.token(ac === '[' ? '#OS' : '#OB', undefined, ac, pnt)
                     pnt.sI += 1
@@ -1707,13 +2136,13 @@ name an anchor defined earlier.`,
                 // is emitted. Only consume when next line indent >= anchor indent,
                 // otherwise let the normal indent handler manage the transition.
                 if (isStandalone &&
-                    (lex.src[pnt.sI] === '\r' || lex.src[pnt.sI] === '\n')) {
+                    (srcAt(pnt.sI) === '\r' || srcAt(pnt.sI) === '\n')) {
                   let nl = pnt.sI
-                  if (lex.src[nl] === '\r') nl++
-                  if (lex.src[nl] === '\n') nl++
+                  if (srcAt(nl) === '\r') nl++
+                  if (srcAt(nl) === '\n') nl++
                   let spaces = 0
-                  while (nl + spaces < lex.src.length && lex.src[nl + spaces] === ' ') spaces++
-                  let nextCh = lex.src[nl + spaces]
+                  while (srcAt(nl + spaces) === ' ') spaces++
+                  let nextCh = srcAt(nl + spaces)
                   if (nextCh !== undefined && nextCh !== '\n' && nextCh !== '\r' &&
                       spaces >= anchorIndent) {
                     pnt.sI = nl + spaces
@@ -1722,7 +2151,7 @@ name an anchor defined earlier.`,
                   }
                 }
                 // Update fwd and continue matching.
-                fwd = lex.refwd()
+                fwdAt = pnt.sI
                 continue yamlMatchLoop
               }
 
@@ -1730,10 +2159,10 @@ name an anchor defined earlier.`,
               // #DR token whose val is the raw directive text. The stream rule
               // applies the directive (e.g. %TAG handle registration) at parse
               // time via the @apply-directive action.
-              if (fwd[0] === '%' && atLineStart(lex.src, pnt.sI)) {
+              if (F(0) === '%' && atLineStart(viewBase + pnt.sI)) {
                 let pos = 0
-                while (pos < fwd.length && fwd[pos] !== '\n' && fwd[pos] !== '\r') pos++
-                let directiveSrc = fwd.substring(0, pos)
+                while (F(pos) !== undefined && F(pos) !== '\n' && F(pos) !== '\r') pos++
+                let directiveSrc = FS(0, pos)
                 pnt.sI += pos
                 pnt.cI += pos
                 let tkn = lex.token('#DR', directiveSrc, directiveSrc, lex.pnt)
@@ -1742,14 +2171,14 @@ name an anchor defined earlier.`,
 
               // YAML non-specific tag (! value) or local tag (!name value):
               // skip the tag and let the value be parsed normally.
-              if (fwd[0] === '!' && fwd[1] !== '!' && fwd[1] !== undefined) {
-                if (fwd[1] === ' ') {
+              if (F(0) === '!' && F(1) !== '!' && F(1) !== undefined) {
+                if (F(1) === ' ') {
                   // Non-specific tag: ! value → treat value as string.
                   let valStart = 2
                   let valEnd = valStart
-                  while (valEnd < fwd.length && fwd[valEnd] !== '\n' && fwd[valEnd] !== '\r') valEnd++
-                  let rawVal = fwd.substring(valStart, valEnd).replace(/\s+$/, '')
-                  let src = fwd.substring(0, valEnd)
+                  while (F(valEnd) !== undefined && F(valEnd) !== '\n' && F(valEnd) !== '\r') valEnd++
+                  let rawVal = FS(valStart, valEnd).replace(/\s+$/, '')
+                  let src = FS(0, valEnd)
                   let tkn = lex.token('#TX', rawVal, src, lex.pnt)
                   pnt.sI += valEnd
                   pnt.cI += valEnd
@@ -1757,21 +2186,20 @@ name an anchor defined earlier.`,
                 }
                 // Local tag: !name value → skip the tag, continue with value.
                 let tagEnd = 1
-                while (tagEnd < fwd.length && fwd[tagEnd] !== ' ' && fwd[tagEnd] !== '\n' &&
-                       fwd[tagEnd] !== '\r') tagEnd++
-                if (fwd[tagEnd] === ' ') tagEnd++ // skip space after tag
+                while (F(tagEnd) !== undefined && F(tagEnd) !== ' ' && F(tagEnd) !== '\n' &&
+                       F(tagEnd) !== '\r') tagEnd++
+                if (F(tagEnd) === ' ') tagEnd++ // skip space after tag
                 pnt.sI += tagEnd
                 pnt.cI += tagEnd
                 // If tag is standalone (followed by newline), consume the
                 // newline and leading spaces so no extra #IN is emitted.
-                if (pnt.sI < lex.src.length &&
-                    (lex.src[pnt.sI] === '\n' || lex.src[pnt.sI] === '\r')) {
+                if (srcAt(pnt.sI) === '\n' || srcAt(pnt.sI) === '\r') {
                   // Check if tag is standalone on its line.
                   let tagStandalone = true
                   let tagLineIndent = 0
-                  let bi = pnt.sI - tagEnd - 1
-                  while (bi >= 0 && lex.src[bi] !== '\n' && lex.src[bi] !== '\r') {
-                    if (lex.src[bi] !== ' ' && lex.src[bi] !== '\t') {
+                  let bi = viewBase + pnt.sI - tagEnd - 1
+                  while (bi >= 0 && absAt(bi) !== '\n' && absAt(bi) !== '\r') {
+                    if (absAt(bi) !== ' ' && absAt(bi) !== '\t') {
                       tagStandalone = false
                       break
                     }
@@ -1780,35 +2208,36 @@ name an anchor defined earlier.`,
                   }
                   if (tagStandalone) {
                     let nl = pnt.sI
-                    if (lex.src[nl] === '\r') nl++
-                    if (lex.src[nl] === '\n') nl++
+                    if (srcAt(nl) === '\r') nl++
+                    if (srcAt(nl) === '\n') nl++
                     let spaces = 0
-                    while (nl + spaces < lex.src.length && lex.src[nl + spaces] === ' ') spaces++
+                    while (srcAt(nl + spaces) === ' ') spaces++
                     pnt.sI = nl + spaces
                     pnt.cI = spaces
                     pnt.rI++
                   }
                 }
-                fwd = lex.refwd()
+                fwdAt = pnt.sI
                 // Restart matching to parse the value.
                 continue yamlMatchLoop
               }
 
               // Skip !!seq, !!map, !!omap, !!set, !!binary, etc. tags — just
               // consume and return undefined so the next lex cycle handles the
-              // actual structure/value.
-              if (fwd[0] === '!' && fwd[1] === '!' &&
-                  /^!!(seq|map|omap|set|pairs|binary|ordered|python\/[^\s]*)\b/.test(fwd)) {
+              // actual structure/value. The pattern reads at most the run of
+              // characters that are not white space after the `!!`, and the
+              // one that ends it, which is all it is tried on.
+              if (F(0) === '!' && F(1) === '!' && STRUCT_TAG.test(FS(0, structTagReach(F)))) {
                 let skip = 2
-                while (skip < fwd.length && fwd[skip] !== ' ' && fwd[skip] !== '\n') skip++
-                while (skip < fwd.length && fwd[skip] === ' ') skip++
+                while (F(skip) !== undefined && F(skip) !== ' ' && F(skip) !== '\n') skip++
+                while (F(skip) === ' ') skip++
                 // Check if tag is standalone on its own line.
                 let tagIndent = 0
                 {
-                  let bi = pnt.sI - 1
+                  let bi = viewBase + pnt.sI - 1
                   let standalone = true
-                  while (bi >= 0 && lex.src[bi] !== '\n' && lex.src[bi] !== '\r') {
-                    if (lex.src[bi] !== ' ' && lex.src[bi] !== '\t') {
+                  while (bi >= 0 && absAt(bi) !== '\n' && absAt(bi) !== '\r') {
+                    if (absAt(bi) !== ' ' && absAt(bi) !== '\t') {
                       standalone = false
                       break
                     }
@@ -1817,26 +2246,25 @@ name an anchor defined earlier.`,
                   }
                   // If standalone and next line is at the same indent, consume
                   // the newline so no extra IN token is emitted.
-                  if (standalone && skip < fwd.length &&
-                      (fwd[skip] === '\n' || fwd[skip] === '\r')) {
+                  if (standalone && (F(skip) === '\n' || F(skip) === '\r')) {
                     let nl = skip
-                    if (fwd[nl] === '\r') nl++
-                    if (fwd[nl] === '\n') nl++
+                    if (F(nl) === '\r') nl++
+                    if (F(nl) === '\n') nl++
                     let spaces = 0
-                    while (nl + spaces < fwd.length && fwd[nl + spaces] === ' ') spaces++
+                    while (F(nl + spaces) === ' ') spaces++
                     if (spaces >= tagIndent) {
                       skip = nl + spaces
                       pnt.sI += skip
                       pnt.cI = spaces
                       pnt.rI++
-                      if (lex.src[pnt.sI] === '[' || lex.src[pnt.sI] === '{') {
-                        let oc = lex.src[pnt.sI]
+                      if (srcAt(pnt.sI) === '[' || srcAt(pnt.sI) === '{') {
+                        let oc = srcAt(pnt.sI)
                         let tkn = lex.token(oc === '[' ? '#OS' : '#OB', undefined, oc, pnt)
                         pnt.sI += 1
                         pnt.cI += 1
                         return tkn
                       }
-                      fwd = lex.refwd()
+                      fwdAt = pnt.sI
                       continue yamlMatchLoop
                     }
                   }
@@ -1847,9 +2275,9 @@ name an anchor defined earlier.`,
                 // so the `#` is not mis-lexed as #BD.
                 {
                   let ci = pnt.sI
-                  while (lex.src[ci] === ' ' || lex.src[ci] === '\t') ci++
-                  if (lex.src[ci] === '#') {
-                    while (ci < lex.src.length && lex.src[ci] !== '\n' && lex.src[ci] !== '\r') ci++
+                  while (srcAt(ci) === ' ' || srcAt(ci) === '\t') ci++
+                  if (srcAt(ci) === '#') {
+                    while (srcAt(ci) !== undefined && srcAt(ci) !== '\n' && srcAt(ci) !== '\r') ci++
                     pnt.cI += (ci - pnt.sI)
                     pnt.sI = ci
                   }
@@ -1857,53 +2285,53 @@ name an anchor defined earlier.`,
                 // A tagged flow collection (!!map {..} / !!seq [..]): emit the
                 // opener here — we've advanced past the tag, so jsonic would
                 // otherwise mis-lex it as #BD (see anchor handler above).
-                if (lex.src[pnt.sI] === '[' || lex.src[pnt.sI] === '{') {
-                  let oc = lex.src[pnt.sI]
+                if (srcAt(pnt.sI) === '[' || srcAt(pnt.sI) === '{') {
+                  let oc = srcAt(pnt.sI)
                   let tkn = lex.token(oc === '[' ? '#OS' : '#OB', undefined, oc, pnt)
                   pnt.sI += 1
                   pnt.cI += 1
                   return tkn
                 }
                 // Don't return a token — let the next lex cycle see the actual value.
-                fwd = lex.refwd()
+                fwdAt = pnt.sI
                 continue yamlMatchLoop
               }
 
               // Handle other !!type tags (!!str, !!int, !!float, !!bool, !!null).
               // These apply a type to the following value. For !!str, the value
               // is always a string. For others, convert accordingly.
-              if (fwd[0] === '!' && fwd[1] === '!') {
+              if (F(0) === '!' && F(1) === '!') {
                 let tagEnd = 2
-                while (tagEnd < fwd.length && fwd[tagEnd] !== ' ' && fwd[tagEnd] !== '\n' &&
-                       fwd[tagEnd] !== '\r' && fwd[tagEnd] !== ',' &&
-                       fwd[tagEnd] !== '}' && fwd[tagEnd] !== ']' &&
-                       fwd[tagEnd] !== ':') tagEnd++
-                let tag = fwd.substring(2, tagEnd)
+                while (F(tagEnd) !== undefined && F(tagEnd) !== ' ' && F(tagEnd) !== '\n' &&
+                       F(tagEnd) !== '\r' && F(tagEnd) !== ',' &&
+                       F(tagEnd) !== '}' && F(tagEnd) !== ']' &&
+                       F(tagEnd) !== ':') tagEnd++
+                let tag = FS(2, tagEnd)
                 let valStart = tagEnd
-                if (fwd[valStart] === ' ') valStart++
+                if (F(valStart) === ' ') valStart++
                 let valEnd = valStart
                 // Skip and record anchor (&name) if present before value.
                 let tagAnchorName = ''
-                if (fwd[valStart] === '&') {
+                if (F(valStart) === '&') {
                   let anchorEnd = valStart + 1
-                  while (anchorEnd < fwd.length && fwd[anchorEnd] !== ' ' &&
-                         fwd[anchorEnd] !== '\n' && fwd[anchorEnd] !== '\r') anchorEnd++
-                  tagAnchorName = fwd.substring(valStart + 1, anchorEnd)
+                  while (F(anchorEnd) !== undefined && F(anchorEnd) !== ' ' &&
+                         F(anchorEnd) !== '\n' && F(anchorEnd) !== '\r') anchorEnd++
+                  tagAnchorName = FS(valStart + 1, anchorEnd)
                   pendAnchor(tagAnchorName, true)
-                  if (fwd[anchorEnd] === ' ') anchorEnd++
+                  if (F(anchorEnd) === ' ') anchorEnd++
                   valStart = anchorEnd
                   valEnd = valStart
                 }
                 // Check for quoted value.
-                if (fwd[valStart] === '"' || fwd[valStart] === "'") {
-                  let q = fwd[valStart]
+                if (F(valStart) === '"' || F(valStart) === "'") {
+                  let q = F(valStart)
                   valEnd = valStart + 1
-                  while (valEnd < fwd.length && fwd[valEnd] !== q) {
-                    if (fwd[valEnd] === '\\' && q === '"') valEnd++
+                  while (F(valEnd) !== undefined && F(valEnd) !== q) {
+                    if (F(valEnd) === '\\' && q === '"') valEnd++
                     valEnd++
                   }
-                  if (fwd[valEnd] === q) valEnd++
-                  let rawVal = fwd.substring(valStart + 1, valEnd - 1)
+                  if (F(valEnd) === q) valEnd++
+                  let rawVal = FS(valStart + 1, valEnd - 1)
                   let result: any = rawVal
                   if (!tagHandles['!!']) {
                     if (tag === 'int') result = yamlTagInt(rawVal)
@@ -1911,10 +2339,10 @@ name an anchor defined earlier.`,
                     else if (tag === 'bool') result = rawVal === 'true' || rawVal === 'True' || rawVal === 'TRUE'
                     else if (tag === 'null') result = null
                   }
-                  if (tagAnchorName) anchors[tagAnchorName] = result
+                  if (tagAnchorName) setAnchor(tagAnchorName, result)
                   let tknTin = typeof result === 'string' ? '#TX' :
                                typeof result === 'number' ? '#NR' : '#VL'
-                  let tkn = lex.token(tknTin, result, fwd.substring(0, valEnd), lex.pnt)
+                  let tkn = lex.token(tknTin, result, FS(0, valEnd), lex.pnt)
                   pnt.sI += valEnd
                   pnt.cI += valEnd
                   return tkn
@@ -1923,31 +2351,31 @@ name an anchor defined earlier.`,
                 // indented content), skip the tag and let the next lex cycle
                 // handle the value. If end-of-source or next line is not
                 // indented content, fall through to produce default value.
-                if ((fwd[valStart] === '\n' || fwd[valStart] === '\r') &&
-                    valStart < fwd.length - 1) {
+                if ((F(valStart) === '\n' || F(valStart) === '\r') &&
+                    F(valStart + 1) !== undefined) {
                   // Tag followed by newline — skip the tag and let the
                   // next lex cycle handle the value on the following line.
                   let nl = valStart
-                  if (fwd[nl] === '\r') nl++
-                  if (fwd[nl] === '\n') nl++
+                  if (F(nl) === '\r') nl++
+                  if (F(nl) === '\n') nl++
                   pnt.sI += nl
                   pnt.cI = 0
                   pnt.rI++
-                  fwd = lex.refwd()
+                  fwdAt = pnt.sI
                   continue yamlMatchLoop
                 }
                 // Unquoted: stop at `: `, ` #`, newline, flow indicators.
                 // A `#` straight after the tag's space starts a comment, so
                 // the value is empty (`!!str #c` is "").
-                while (valEnd < fwd.length && fwd[valEnd] !== '\n' && fwd[valEnd] !== '\r' &&
-                       fwd[valEnd] !== ',' && fwd[valEnd] !== '}' && fwd[valEnd] !== ']') {
-                  if (valEnd === valStart && valStart > tagEnd && fwd[valEnd] === '#') break
-                  if (fwd[valEnd] === ':' && (fwd[valEnd+1] === ' ' || fwd[valEnd+1] === '\n' ||
-                      fwd[valEnd+1] === '\r' || fwd[valEnd+1] === undefined)) break
-                  if (fwd[valEnd] === ' ' && fwd[valEnd+1] === '#') break
+                while (F(valEnd) !== undefined && F(valEnd) !== '\n' && F(valEnd) !== '\r' &&
+                       F(valEnd) !== ',' && F(valEnd) !== '}' && F(valEnd) !== ']') {
+                  if (valEnd === valStart && valStart > tagEnd && F(valEnd) === '#') break
+                  if (F(valEnd) === ':' && (F(valEnd+1) === ' ' || F(valEnd+1) === '\n' ||
+                      F(valEnd+1) === '\r' || F(valEnd+1) === undefined)) break
+                  if (F(valEnd) === ' ' && F(valEnd+1) === '#') break
                   valEnd++
                 }
-                let rawVal = fwd.substring(valStart, valEnd).replace(/\s+$/, '')
+                let rawVal = FS(valStart, valEnd).replace(/\s+$/, '')
                 let result: any = rawVal
                 // Only apply built-in type conversion when !! has not been
                 // redefined by a %TAG directive. Custom tag handles mean
@@ -1959,13 +2387,13 @@ name an anchor defined earlier.`,
                   else if (tag === 'bool') result = rawVal === 'true' || rawVal === 'True' || rawVal === 'TRUE'
                   else if (tag === 'null') result = null
                 }
-                if (tagAnchorName) anchors[tagAnchorName] = result
+                if (tagAnchorName) setAnchor(tagAnchorName, result)
                 // Use #ST for empty strings (jsonic handles #ST better than
                 // empty #TX in flow context), #NR for numbers, #VL for null.
                 let tknTin = (typeof result === 'string' && result === '') ? '#ST' :
                              typeof result === 'string' ? '#TX' :
                              typeof result === 'number' ? '#NR' : '#VL'
-                let tkn = lex.token(tknTin, result, fwd.substring(0, valEnd), lex.pnt)
+                let tkn = lex.token(tknTin, result, FS(0, valEnd), lex.pnt)
                 pnt.sI += valEnd
                 pnt.cI += valEnd
                 return tkn
@@ -1974,8 +2402,8 @@ name an anchor defined earlier.`,
               // Flow-context `?` explicit-key marker: emit a #QM token so
               // pair/elem rule alts can handle it. Block-context `?` falls
               // through to the heavyweight handler below.
-              if (fwd[0] === '?' && (fwd[1] === ' ' || fwd[1] === '\t')) {
-                updateFlowState(lex.src as string, pnt.sI)
+              if (F(0) === '?' && (F(1) === ' ' || F(1) === '\t')) {
+                updateFlowState(viewBase + pnt.sI)
                 if (_flowDepth > 0) {
                   let tkn = lex.token('#QM', undefined, '?', lex.pnt)
                   pnt.sI += 1; pnt.cI += 1
@@ -1988,18 +2416,18 @@ name an anchor defined earlier.`,
               //          ? key\n: value
               //          ? key\n# comment\n: value
               //          ? key1\n? key2 (consecutive explicit keys with null values)
-              if (fwd[0] === '?' && (fwd[1] === ' ' || fwd[1] === '\t' ||
-                  fwd[1] === '\n' || fwd[1] === '\r' || fwd[1] === undefined)) {
-                let start = (fwd[1] === ' ' || fwd[1] === '\t') ? 2 : 1
+              if (F(0) === '?' && (F(1) === ' ' || F(1) === '\t' ||
+                  F(1) === '\n' || F(1) === '\r' || F(1) === undefined)) {
+                let start = (F(1) === ' ' || F(1) === '\t') ? 2 : 1
                 // Collect key text (may be multiline via continuation).
                 let keyEnd = start
                 let key = ''
                 // First line of key.
-                while (keyEnd < fwd.length && fwd[keyEnd] !== '\n' && fwd[keyEnd] !== '\r') {
-                  if (fwd[keyEnd] === ' ' && fwd[keyEnd+1] === '#') break  // comment
+                while (F(keyEnd) !== undefined && F(keyEnd) !== '\n' && F(keyEnd) !== '\r') {
+                  if (F(keyEnd) === ' ' && F(keyEnd+1) === '#') break  // comment
                   keyEnd++
                 }
-                key = fwd.substring(start, keyEnd).replace(/\s+$/, '')
+                key = FS(start, keyEnd).replace(/\s+$/, '')
                 // Strip !!type tags from explicit keys and apply conversion.
                 let explicitKeyTag = ''
                 let tagMatch = key.match(/^!!(\w+)\s+(.*)$/)
@@ -2018,17 +2446,17 @@ name an anchor defined earlier.`,
                 // Track position before consuming newline (for !hasValue case).
                 let beforeNewline = consumed
                 // Skip comment at end of key line.
-                while (consumed < fwd.length && fwd[consumed] !== '\n' && fwd[consumed] !== '\r') consumed++
+                while (F(consumed) !== undefined && F(consumed) !== '\n' && F(consumed) !== '\r') consumed++
                 beforeNewline = consumed
                 // Consume newline after key line.
-                if (consumed < fwd.length && fwd[consumed] === '\r') consumed++
-                if (consumed < fwd.length && fwd[consumed] === '\n') consumed++
+                if (F(consumed) === '\r') consumed++
+                if (F(consumed) === '\n') consumed++
                 // Check for multiline key (continuation lines indented more than ?).
                 let qIndent = 0
                 {
-                  let li = pnt.sI
-                  while (li > 0 && lex.src[li-1] !== '\n' && lex.src[li-1] !== '\r') li--
-                  while (li < pnt.sI && lex.src[li] === ' ') { qIndent++; li++ }
+                  const here = viewBase + pnt.sI
+                  let li = lineStartOf(here)
+                  while (li < here && absAt(li) === ' ') { qIndent++; li++ }
                 }
                 // Count extra rows consumed (for multiline keys).
                 let extraRows = 0
@@ -2042,16 +2470,16 @@ name an anchor defined earlier.`,
                   // Collect block scalar content lines.
                   let blockLines: string[] = []
                   let contentIndent = 0
-                  while (consumed < fwd.length) {
+                  while (F(consumed) !== undefined) {
                     let lineIndent = 0
-                    while (consumed + lineIndent < fwd.length && fwd[consumed + lineIndent] === ' ') lineIndent++
+                    while (F(consumed + lineIndent) === ' ') lineIndent++
                     let afterSpaces = consumed + lineIndent
                     // Empty line or line with only spaces.
-                    if (afterSpaces >= fwd.length || fwd[afterSpaces] === '\n' || fwd[afterSpaces] === '\r') {
+                    if (F(afterSpaces) === undefined || F(afterSpaces) === '\n' || F(afterSpaces) === '\r') {
                       blockLines.push('')
                       consumed = afterSpaces
-                      if (consumed < fwd.length && fwd[consumed] === '\r') consumed++
-                      if (consumed < fwd.length && fwd[consumed] === '\n') consumed++
+                      if (F(consumed) === '\r') consumed++
+                      if (F(consumed) === '\n') consumed++
                       extraRows++
                       continue
                     }
@@ -2063,11 +2491,11 @@ name an anchor defined earlier.`,
                     if (lineIndent < contentIndent) break
                     // Collect line content.
                     let lineEnd = afterSpaces
-                    while (lineEnd < fwd.length && fwd[lineEnd] !== '\n' && fwd[lineEnd] !== '\r') lineEnd++
-                    blockLines.push(fwd.substring(consumed + contentIndent, lineEnd))
+                    while (F(lineEnd) !== undefined && F(lineEnd) !== '\n' && F(lineEnd) !== '\r') lineEnd++
+                    blockLines.push(FS(consumed + contentIndent, lineEnd))
                     consumed = lineEnd
-                    if (consumed < fwd.length && fwd[consumed] === '\r') consumed++
-                    if (consumed < fwd.length && fwd[consumed] === '\n') consumed++
+                    if (F(consumed) === '\r') consumed++
+                    if (F(consumed) === '\n') consumed++
                     extraRows++
                   }
                   // Apply chomping.
@@ -2085,38 +2513,38 @@ name an anchor defined earlier.`,
                   }
                 } else {
                 // Scan continuation lines for key (plain scalar multiline).
-                while (consumed < fwd.length) {
+                while (F(consumed) !== undefined) {
                   // Skip comment lines.
                   let lineIndent = 0
-                  while (consumed + lineIndent < fwd.length && fwd[consumed + lineIndent] === ' ') lineIndent++
+                  while (F(consumed + lineIndent) === ' ') lineIndent++
                   let afterSpaces = consumed + lineIndent
-                  if (afterSpaces < fwd.length && fwd[afterSpaces] === '#') {
+                  if (F(afterSpaces) === '#') {
                     // Comment line — skip it.
-                    while (afterSpaces < fwd.length && fwd[afterSpaces] !== '\n' && fwd[afterSpaces] !== '\r') afterSpaces++
+                    while (F(afterSpaces) !== undefined && F(afterSpaces) !== '\n' && F(afterSpaces) !== '\r') afterSpaces++
                     beforeNewline = afterSpaces
-                    if (afterSpaces < fwd.length && fwd[afterSpaces] === '\r') afterSpaces++
-                    if (afterSpaces < fwd.length && fwd[afterSpaces] === '\n') afterSpaces++
+                    if (F(afterSpaces) === '\r') afterSpaces++
+                    if (F(afterSpaces) === '\n') afterSpaces++
                     extraRows++
                     consumed = afterSpaces
                     continue
                   }
                   // Check if this is a continuation of the key (indented more than ?).
-                  if (lineIndent > qIndent && fwd[afterSpaces] !== ':' &&
-                      fwd[afterSpaces] !== '?' && fwd[afterSpaces] !== '-') {
+                  if (lineIndent > qIndent && F(afterSpaces) !== ':' &&
+                      F(afterSpaces) !== '?' && F(afterSpaces) !== '-') {
                     // Continuation line for multiline key.
                     let contEnd = afterSpaces
-                    while (contEnd < fwd.length && fwd[contEnd] !== '\n' && fwd[contEnd] !== '\r') {
-                      if (fwd[contEnd] === ' ' && fwd[contEnd+1] === '#') break
+                    while (F(contEnd) !== undefined && F(contEnd) !== '\n' && F(contEnd) !== '\r') {
+                      if (F(contEnd) === ' ' && F(contEnd+1) === '#') break
                       contEnd++
                     }
-                    let contText = fwd.substring(afterSpaces, contEnd).replace(/\s+$/, '')
+                    let contText = FS(afterSpaces, contEnd).replace(/\s+$/, '')
                     if (contText.length > 0) {
                       key += ' ' + contText
                     }
                     consumed = contEnd
                     beforeNewline = consumed
-                    if (consumed < fwd.length && fwd[consumed] === '\r') consumed++
-                    if (consumed < fwd.length && fwd[consumed] === '\n') consumed++
+                    if (F(consumed) === '\r') consumed++
+                    if (F(consumed) === '\n') consumed++
                     extraRows++
                     continue
                   }
@@ -2129,17 +2557,17 @@ name an anchor defined earlier.`,
                 {
                   let ci = consumed
                   // Skip leading spaces on the next line.
-                  while (ci < fwd.length && fwd[ci] === ' ') ci++
-                  if (ci < fwd.length && fwd[ci] === ':' &&
-                      (fwd[ci+1] === ' ' || fwd[ci+1] === '\t' || fwd[ci+1] === '\n' ||
-                       fwd[ci+1] === '\r' || fwd[ci+1] === undefined)) {
+                  while (F(ci) === ' ') ci++
+                  if (F(ci) === ':' &&
+                      (F(ci+1) === ' ' || F(ci+1) === '\t' || F(ci+1) === '\n' ||
+                       F(ci+1) === '\r' || F(ci+1) === undefined)) {
                     // Found `: ` — this key has a value.
                     hasValue = true
                     valConsumed = ci + 1
-                    if (fwd[valConsumed] === ' ' || fwd[valConsumed] === '\t') valConsumed++
+                    if (F(valConsumed) === ' ' || F(valConsumed) === '\t') valConsumed++
                   }
                 }
-                let src = fwd.substring(0, hasValue ? consumed : keyEnd)
+                let src = FS(0, hasValue ? consumed : keyEnd)
                 if (hasValue) {
                   pnt.sI += valConsumed
                   pnt.rI += 1 + extraRows
@@ -2147,7 +2575,7 @@ name an anchor defined earlier.`,
                   pnt.cI = indent + 1
                   // Check if there's inline content after `: ` on the same line
                   // that looks like a block mapping or sequence (needs #IN context).
-                  let nextCh = fwd[valConsumed]
+                  let nextCh = F(valConsumed)
                   let hasInlineContent = nextCh !== undefined &&
                     nextCh !== '\n' && nextCh !== '\r'
                   let needsIndent = false
@@ -2157,10 +2585,10 @@ name an anchor defined earlier.`,
                     if (!isQuotedOrFlowOrTag) {
                       // Scan line for mapping key indicator (`: ` or `:` at EOL).
                       let le = valConsumed
-                      while (le < fwd.length && fwd[le] !== '\n' && fwd[le] !== '\r') le++
+                      while (F(le) !== undefined && F(le) !== '\n' && F(le) !== '\r') le++
                       for (let ri = valConsumed; ri < le; ri++) {
-                        if (fwd[ri] === ':') {
-                          let nc = fwd[ri + 1]
+                        if (F(ri) === ':') {
+                          let nc = F(ri + 1)
                           if (nc === ' ' || nc === '\t' || nc === '\n' ||
                               nc === '\r' || nc === undefined || ri + 1 === le) {
                             needsIndent = true
@@ -2170,17 +2598,19 @@ name an anchor defined earlier.`,
                       }
                       // Also check for sequence indicator (`- `).
                       if (!needsIndent && nextCh === '-' &&
-                          (fwd[valConsumed + 1] === ' ' || fwd[valConsumed + 1] === '\t')) {
+                          (F(valConsumed + 1) === ' ' || F(valConsumed + 1) === '\t')) {
                         needsIndent = true
                       }
                     }
                   }
                   if (needsIndent) {
                     // Block mapping/sequence inline (e.g., `: get:\n    v: 1`).
-                    // Emit CL then IN to establish indent context.
+                    // Emit CL then IN to establish indent context. They are
+                    // the lexer's to hand over next, so that a cut made again
+                    // makes them again rather than twice.
                     let clTkn = lex.token('#CL', 1, ': ', lex.pnt)
                     let inTkn = lex.token('#IN', indent, '', lex.pnt)
-                    pendingTokens.push(clTkn, inTkn)
+                    lex.pnt.token.push(clTkn, inTkn)
                   } else {
                     // Simple scalar or value on next line.
                     // Just emit CL; the newline handler will emit IN if needed.
@@ -2194,7 +2624,7 @@ name an anchor defined earlier.`,
                   // Emit KEY, CL, null as queued tokens.
                   let clTkn = lex.token('#CL', 1, ': ', lex.pnt)
                   let vlTkn = lex.token('#VL', null, '', lex.pnt)
-                  pendingTokens.push(clTkn, vlTkn)
+                  lex.pnt.token.push(clTkn, vlTkn)
                 }
                 let tkn = lex.token(quotedKey ? '#ST' : '#TX', key, src, lex.pnt)
                 return tkn
@@ -2209,70 +2639,70 @@ name an anchor defined earlier.`,
               // (no spurious #IN gets emitted between #DS and the content).
               // Inline content on the same line as the marker (--- foo) is
               // left in place for the next call.
-              if (((fwd[0] === '-' && fwd[1] === '-' && fwd[2] === '-' &&
-                    (fwd[3] === '\n' || fwd[3] === '\r' ||
-                     fwd[3] === ' ' || fwd[3] === '\t' || fwd[3] === undefined)) ||
-                   (fwd[0] === '.' && fwd[1] === '.' && fwd[2] === '.' &&
-                    (fwd[3] === '\n' || fwd[3] === '\r' ||
-                     fwd[3] === ' ' || fwd[3] === '\t' || fwd[3] === undefined))) &&
-                  atLineStart(lex.src, pnt.sI)) {
-                let isEnd = fwd[0] === '.'
+              if (((F(0) === '-' && F(1) === '-' && F(2) === '-' &&
+                    (F(3) === '\n' || F(3) === '\r' ||
+                     F(3) === ' ' || F(3) === '\t' || F(3) === undefined)) ||
+                   (F(0) === '.' && F(1) === '.' && F(2) === '.' &&
+                    (F(3) === '\n' || F(3) === '\r' ||
+                     F(3) === ' ' || F(3) === '\t' || F(3) === undefined))) &&
+                  atLineStart(viewBase + pnt.sI)) {
+                let isEnd = F(0) === '.'
                 let pos = 3
-                while (pos < fwd.length && (fwd[pos] === ' ' || fwd[pos] === '\t')) pos++
-                let hasInline = pos < fwd.length &&
-                  fwd[pos] !== '\n' && fwd[pos] !== '\r' && fwd[pos] !== '#'
+                while (F(pos) === ' ' || F(pos) === '\t') pos++
+                let hasInline = F(pos) !== undefined &&
+                  F(pos) !== '\n' && F(pos) !== '\r' && F(pos) !== '#'
                 if (!hasInline) {
                   // Skip a trailing comment, then the line terminator.
-                  while (pos < fwd.length && fwd[pos] !== '\n' && fwd[pos] !== '\r') pos++
-                  if (fwd[pos] === '\r') pos++
-                  if (fwd[pos] === '\n') { pos++; pnt.rI++ }
+                  while (F(pos) !== undefined && F(pos) !== '\n' && F(pos) !== '\r') pos++
+                  if (F(pos) === '\r') pos++
+                  if (F(pos) === '\n') { pos++; pnt.rI++ }
                   pnt.cI = 1  // column 1 at start of next line
                 } else {
                   pnt.cI += pos
                 }
                 pnt.sI += pos
                 let tkn = lex.token(isEnd ? '#DE' : '#DS', undefined,
-                                    fwd.substring(0, 3), lex.pnt)
+                                    FS(0, 3), lex.pnt)
                 return tkn
               }
 
               // Non-specific tag.
-              if (fwd[0] === '!' && fwd[1] === ' ') {
+              if (F(0) === '!' && F(1) === ' ') {
                 let valStart = 2
                 let valEnd = valStart
-                while (valEnd < fwd.length && fwd[valEnd] !== '\n' && fwd[valEnd] !== '\r') valEnd++
-                let rawVal = fwd.substring(valStart, valEnd).replace(/\s+$/, '')
-                let src = fwd.substring(0, valEnd)
+                while (F(valEnd) !== undefined && F(valEnd) !== '\n' && F(valEnd) !== '\r') valEnd++
+                let rawVal = FS(valStart, valEnd).replace(/\s+$/, '')
+                let src = FS(0, valEnd)
                 let tkn = lex.token('#TX', rawVal, src, lex.pnt)
                 pnt.sI += valEnd
                 pnt.cI += valEnd
                 return tkn
               }
               // Anchor after ---.
-              if (fwd[0] === '&') {
+              if (F(0) === '&') {
                 let nameEnd = 1
-                while (nameEnd < fwd.length && fwd[nameEnd] !== ' ' && fwd[nameEnd] !== '\t' &&
-                       fwd[nameEnd] !== '\n' && fwd[nameEnd] !== '\r' && fwd[nameEnd] !== ',' &&
-                       fwd[nameEnd] !== '{' && fwd[nameEnd] !== '}' && fwd[nameEnd] !== '[' &&
-                       fwd[nameEnd] !== ']') nameEnd++
-                let anchorName = fwd.substring(1, nameEnd)
+                while (F(nameEnd) !== undefined && F(nameEnd) !== ' ' && F(nameEnd) !== '\t' &&
+                       F(nameEnd) !== '\n' && F(nameEnd) !== '\r' && F(nameEnd) !== ',' &&
+                       F(nameEnd) !== '{' && F(nameEnd) !== '}' && F(nameEnd) !== '[' &&
+                       F(nameEnd) !== ']') nameEnd++
+                let anchorName = FS(1, nameEnd)
                 let skip = nameEnd
-                if (fwd[skip] === ' ') skip++
+                if (F(skip) === ' ') skip++
                 pnt.sI += skip
                 pnt.cI += skip
                 pendAnchor(anchorName, true)
-                fwd = lex.refwd()
+                fwdAt = pnt.sI
               }
 
               // YAML double-quoted string: backslash escapes + multiline folding.
-              if (fwd[0] === '"') {
+              if (F(0) === '"') {
                 let i = 1
                 let val = ''
                 let escapedUpTo = 0 // val chars up to this index are from escapes (non-trimmable)
-                while (i < fwd.length && fwd[i] !== '"') {
-                  if (fwd[i] === '\\') {
+                while (F(i) !== undefined && F(i) !== '"') {
+                  if (F(i) === '\\') {
                     i++
-                    let esc = fwd[i]
+                    let esc = F(i)
                     if (esc === 'n') { val += '\n'; i++; escapedUpTo = val.length }
                     else if (esc === 't') { val += '\t'; i++; escapedUpTo = val.length }
                     else if (esc === 'r') { val += '\r'; i++; escapedUpTo = val.length }
@@ -2287,28 +2717,28 @@ name an anchor defined earlier.`,
                     else if (esc === '0') { val += '\0'; i++; escapedUpTo = val.length }
                     else if (esc === '\t') { val += '\t'; i++; escapedUpTo = val.length }
                     else if (esc === ' ') { val += ' '; i++; escapedUpTo = val.length }
-                    else if (esc === '_') { val += '\u00a0'; i++; escapedUpTo = val.length }
+                    else if (esc === '_') { val += ' '; i++; escapedUpTo = val.length }
                     else if (esc === 'N') { val += '\u0085'; i++; escapedUpTo = val.length }
-                    else if (esc === 'L') { val += '\u2028'; i++; escapedUpTo = val.length }
-                    else if (esc === 'P') { val += '\u2029'; i++; escapedUpTo = val.length }
+                    else if (esc === 'L') { val += ' '; i++; escapedUpTo = val.length }
+                    else if (esc === 'P') { val += ' '; i++; escapedUpTo = val.length }
                     else if (esc === 'x') {
-                      val += String.fromCharCode(parseInt(fwd.substring(i+1, i+3), 16))
+                      val += String.fromCharCode(parseInt(FS(i+1, i+3), 16))
                       i += 3; escapedUpTo = val.length
                     }
                     else if (esc === 'u') {
-                      val += String.fromCharCode(parseInt(fwd.substring(i+1, i+5), 16))
+                      val += String.fromCharCode(parseInt(FS(i+1, i+5), 16))
                       i += 5; escapedUpTo = val.length
                     }
                     else if (esc === 'U') {
-                      val += String.fromCodePoint(parseInt(fwd.substring(i+1, i+9), 16))
+                      val += String.fromCodePoint(parseInt(FS(i+1, i+9), 16))
                       i += 9; escapedUpTo = val.length
                     }
                     else if (esc === '\n' || esc === '\r') {
                       // Escaped newline: line continuation (join directly).
-                      if (esc === '\r' && fwd[i+1] === '\n') i++
+                      if (esc === '\r' && F(i+1) === '\n') i++
                       i++
                       // Skip leading whitespace on next line.
-                      while (i < fwd.length && (fwd[i] === ' ' || fwd[i] === '\t')) i++
+                      while (F(i) === ' ' || F(i) === '\t') i++
                     }
                     else if (undefined === esc) {
                       // A backslash as the last character of the source: there
@@ -2318,18 +2748,18 @@ name an anchor defined earlier.`,
                       i++
                     }
                     else { val += esc; i++ }
-                  } else if (fwd[i] === '\n' || fwd[i] === '\r') {
+                  } else if (F(i) === '\n' || F(i) === '\r') {
                     // Flow scalar line folding for double-quoted strings.
                     // Only trim trailing whitespace that was NOT from escape sequences.
                     let trimTo = val.length
                     while (trimTo > escapedUpTo && (val[trimTo - 1] === ' ' || val[trimTo - 1] === '\t')) trimTo--
                     val = val.substring(0, trimTo)
                     let emptyLines = 0
-                    while (i < fwd.length && (fwd[i] === '\n' || fwd[i] === '\r')) {
-                      if (fwd[i] === '\r') i++
-                      if (fwd[i] === '\n') i++
+                    while (F(i) === '\n' || F(i) === '\r') {
+                      if (F(i) === '\r') i++
+                      if (F(i) === '\n') i++
                       emptyLines++
-                      while (i < fwd.length && (fwd[i] === ' ' || fwd[i] === '\t')) i++
+                      while (F(i) === ' ' || F(i) === '\t') i++
                     }
                     if (emptyLines > 1) {
                       for (let e = 1; e < emptyLines; e++) val += '\n'
@@ -2337,12 +2767,12 @@ name an anchor defined earlier.`,
                       val += ' '
                     }
                   } else {
-                    val += fwd[i]
+                    val += F(i)
                     i++
                   }
                 }
-                if (fwd[i] === '"') i++
-                let src = fwd.substring(0, i)
+                if (F(i) === '"') i++
+                let src = FS(0, i)
                 let tkn = lex.token('#ST', val, src, lex.pnt)
                 pnt.sI += i
                 pnt.cI += i
@@ -2352,12 +2782,12 @@ name an anchor defined earlier.`,
               // YAML single-quoted string: no backslash escape processing.
               // Only escape is '' (two single quotes) → literal single quote.
               // Newlines are folded: single newline → space, empty lines → \n.
-              if (fwd[0] === "'") {
+              if (F(0) === "'") {
                 let i = 1
                 let val = ''
-                while (i < fwd.length) {
-                  if (fwd[i] === "'") {
-                    if (fwd[i + 1] === "'") {
+                while (F(i) !== undefined) {
+                  if (F(i) === "'") {
+                    if (F(i + 1) === "'") {
                       // Escaped single quote.
                       val += "'"
                       i += 2
@@ -2366,18 +2796,22 @@ name an anchor defined earlier.`,
                       i++
                       break
                     }
-                  } else if (fwd[i] === '\n' || fwd[i] === '\r') {
+                  } else if (F(i) === '\n' || F(i) === '\r') {
                     // Flow scalar line folding.
-                    // Trim trailing whitespace from current content.
-                    val = val.replace(/[ \t]+$/, '')
+                    // Trim trailing whitespace from current content: from
+                    // its end, as `/[ \t]+$/` would, which tries every
+                    // blank in the value and so reads it all at each fold.
+                    let trimTo = val.length
+                    while (0 < trimTo && (' ' === val[trimTo - 1] || '\t' === val[trimTo - 1])) trimTo--
+                    if (trimTo < val.length) val = val.substring(0, trimTo)
                     // Count empty lines (newlines with only whitespace).
                     let emptyLines = 0
-                    while (i < fwd.length && (fwd[i] === '\n' || fwd[i] === '\r')) {
-                      if (fwd[i] === '\r') i++
-                      if (fwd[i] === '\n') i++
+                    while (F(i) === '\n' || F(i) === '\r') {
+                      if (F(i) === '\r') i++
+                      if (F(i) === '\n') i++
                       emptyLines++
                       // Skip leading whitespace on next line.
-                      while (i < fwd.length && (fwd[i] === ' ' || fwd[i] === '\t')) i++
+                      while (F(i) === ' ' || F(i) === '\t') i++
                     }
                     if (emptyLines > 1) {
                       // Each extra empty line becomes a \n.
@@ -2387,11 +2821,11 @@ name an anchor defined earlier.`,
                       val += ' '
                     }
                   } else {
-                    val += fwd[i]
+                    val += F(i)
                     i++
                   }
                 }
-                let src = fwd.substring(0, i)
+                let src = FS(0, i)
                 let tkn = lex.token('#ST', val, src, lex.pnt)
                 pnt.sI += i
                 pnt.cI += i
@@ -2404,22 +2838,22 @@ name an anchor defined earlier.`,
               // jsonic's number matcher grabs just the digits.
               // A sign before the digit counts too: `+190:20:30` is one plain
               // scalar, where the number matcher would take `+190`.
-              if ((fwd[0] >= '0' && fwd[0] <= '9') ||
-                  ((fwd[0] === '+' || fwd[0] === '-') && fwd[1] >= '0' && fwd[1] <= '9')) {
-                updateFlowState(lex.src as string, pnt.sI)
+              if ((F(0) >= '0' && F(0) <= '9') ||
+                  ((F(0) === '+' || F(0) === '-') && F(1) >= '0' && F(1) <= '9')) {
+                updateFlowState(viewBase + pnt.sI)
                 let inFlow = _flowDepth > 0
                 let hasEmbeddedColon = false
                 let hasTrailingText = false
                 let hasBlockComma = false
                 let pi = 1
-                while (pi < fwd.length && fwd[pi] !== '\n' && fwd[pi] !== '\r') {
+                while (F(pi) !== undefined && F(pi) !== '\n' && F(pi) !== '\r') {
                   // An embedded colon (20:03:20) does not end the scan: the
                   // scalar can go on past a space ("09:00 AM"), and only the
                   // trailing-text branch below reads that as one scalar.
                   // Stopping here took "09:00" and left "AM" to fail the
                   // parse (tabnas/yaml#90).
-                  if (fwd[pi] === ':' && fwd[pi + 1] !== ' ' && fwd[pi + 1] !== '\t' &&
-                      fwd[pi + 1] !== '\n' && fwd[pi + 1] !== '\r' && fwd[pi + 1] !== undefined) {
+                  if (F(pi) === ':' && F(pi + 1) !== ' ' && F(pi + 1) !== '\t' &&
+                      F(pi + 1) !== '\n' && F(pi + 1) !== '\r' && F(pi + 1) !== undefined) {
                     hasEmbeddedColon = true
                     pi++
                     continue
@@ -2442,7 +2876,7 @@ name an anchor defined earlier.`,
                   // still reaches the trailing-text branch below, which handles
                   // spaces and multiline continuation that the token scan here
                   // cannot.
-                  if (fwd[pi] === ',') {
+                  if (F(pi) === ',') {
                     if (inFlow) {
                       break
                     }
@@ -2450,17 +2884,17 @@ name an anchor defined earlier.`,
                     pi++
                     continue
                   }
-                  if (fwd[pi] === ' ' || fwd[pi] === '\t') {
+                  if (F(pi) === ' ' || F(pi) === '\t') {
                     // Check if after the space there are non-separator characters,
                     // meaning this is a plain scalar like "64 characters, hexadecimal."
                     // not a standalone number.
                     let si = pi
-                    while (si < fwd.length && (fwd[si] === ' ' || fwd[si] === '\t')) si++
-                    if (si < fwd.length && fwd[si] !== '\n' && fwd[si] !== '\r' &&
-                        fwd[si] !== '#' && fwd[si] !== ':' && fwd[si] !== undefined) {
+                    while (F(si) === ' ' || F(si) === '\t') si++
+                    if (F(si) !== undefined && F(si) !== '\n' && F(si) !== '\r' &&
+                        F(si) !== '#' && F(si) !== ':') {
                       // Check it's not ": " (key-value separator).
-                      if (!(fwd[si] === ':' && (fwd[si + 1] === ' ' || fwd[si + 1] === '\t' ||
-                            fwd[si + 1] === '\n' || fwd[si + 1] === '\r' || fwd[si + 1] === undefined))) {
+                      if (!(F(si) === ':' && (F(si + 1) === ' ' || F(si + 1) === '\t' ||
+                            F(si + 1) === '\n' || F(si + 1) === '\r' || F(si + 1) === undefined))) {
                         hasTrailingText = true
                       }
                     }
@@ -2477,7 +2911,7 @@ name an anchor defined earlier.`,
                   // so the text.check handler can process it as a plain
                   // scalar (including multiline continuation support).
                   skipNumberMatch = true
-                  return null
+                  return null as any
                 }
 
                 // A `#` inside the scalar's token follows a non-blank
@@ -2496,14 +2930,14 @@ name an anchor defined earlier.`,
                 // number matcher took the digits and the parse failed on the
                 // bracket (tabnas/yaml#99).
                 let tokenEnd = 0
-                while (tokenEnd < fwd.length && fwd[tokenEnd] !== ' ' && fwd[tokenEnd] !== '\t' &&
-                       fwd[tokenEnd] !== '\n' && fwd[tokenEnd] !== '\r' &&
-                       !(inFlow && (fwd[tokenEnd] === ',' || fwd[tokenEnd] === ']' ||
-                         fwd[tokenEnd] === '}'))) tokenEnd++
-                const token = fwd.substring(0, tokenEnd)
+                while (F(tokenEnd) !== undefined && F(tokenEnd) !== ' ' && F(tokenEnd) !== '\t' &&
+                       F(tokenEnd) !== '\n' && F(tokenEnd) !== '\r' &&
+                       !(inFlow && (F(tokenEnd) === ',' || F(tokenEnd) === ']' ||
+                         F(tokenEnd) === '}'))) tokenEnd++
+                const token = FS(0, tokenEnd)
                 if (token.includes('#') || (!inFlow && /[[\]{}]/.test(token))) {
                   skipNumberMatch = true
-                  return null
+                  return null as any
                 }
 
                 if (hasEmbeddedColon || hasBlockComma) {
@@ -2511,10 +2945,10 @@ name an anchor defined earlier.`,
                   // eof, or in a flow collection its `,` `]` `}`: `[1, 12:30]`
                   // holds "12:30", not "12:30,").
                   let end = 0
-                  while (end < fwd.length && fwd[end] !== ' ' && fwd[end] !== '\t' &&
-                         fwd[end] !== '\n' && fwd[end] !== '\r' &&
-                         !(inFlow && (fwd[end] === ',' || fwd[end] === ']' || fwd[end] === '}'))) end++
-                  let text = fwd.substring(0, end)
+                  while (F(end) !== undefined && F(end) !== ' ' && F(end) !== '\t' &&
+                         F(end) !== '\n' && F(end) !== '\r' &&
+                         !(inFlow && (F(end) === ',' || F(end) === ']' || F(end) === '}'))) end++
+                  let text = FS(0, end)
                   let tkn = lex.token('#TX', text, text, lex.pnt)
                   pnt.sI += end
                   pnt.cI += end
@@ -2523,13 +2957,13 @@ name an anchor defined earlier.`,
               }
 
               // YAML element marker: "- " or "-\t" or "-\n" or "-" at end.
-              if (fwd[0] === '-' && (fwd[1] === ' ' || fwd[1] === '\t' || fwd[1] === '\n' ||
-                  fwd[1] === '\r' || fwd[1] === undefined)) {
+              if (F(0) === '-' && (F(1) === ' ' || F(1) === '\t' || F(1) === '\n' ||
+                  F(1) === '\r' || F(1) === undefined)) {
                 let tkn = lex.token('#EL', undefined, '- ', lex.pnt)
                 pnt.sI += 1
                 pnt.cI += 1
                 // Consume the space/tab after dash if present.
-                if (fwd[1] === ' ' || fwd[1] === '\t') {
+                if (F(1) === ' ' || F(1) === '\t') {
                   pnt.sI += 1
                   pnt.cI += 1
                 }
@@ -2541,59 +2975,26 @@ name an anchor defined earlier.`,
               // In flow context, detect by checking if the previous non-whitespace
               // token was a quoted string followed immediately by ':'.
               let isFlowColon = false
-              if (fwd[0] === ':' && fwd[1] !== ' ' && fwd[1] !== '\t' &&
-                  fwd[1] !== '\n' && fwd[1] !== '\r' && fwd[1] !== undefined) {
-                // JSON-compatible flow colon: only when preceded by a quoted string.
-                // Skip whitespace/newlines and any intervening line comments
-                // (`# ...` to end-of-line) so e.g. `"foo" # c\n :bar` works.
-                let prevI = pnt.sI - 1
-                while (prevI >= 0) {
-                  let pc = lex.src[prevI]
-                  if (pc === ' ' || pc === '\t' || pc === '\n' || pc === '\r') {
-                    prevI--; continue
-                  }
-                  // If on a line whose `#` is preceded by whitespace, that's a
-                  // comment — jump to before the `#` and keep walking back.
-                  let lineStart = prevI
-                  while (lineStart > 0 && lex.src[lineStart - 1] !== '\n' &&
-                         lex.src[lineStart - 1] !== '\r') lineStart--
-                  // Track quoting while scanning: a `#` inside a quoted scalar
-                  // is literal, not a comment start. Without this, the value in
-                  // {"d":"a #b","e":1} swallows the rest of the line and the
-                  // following key never lexes.
-                  let hashAt = -1
-                  let quote = ''
-                  for (let li = lineStart; li <= prevI; li++) {
-                    let qc = lex.src[li]
-                    if (quote) {
-                      // Double quotes escape with backslash, single quotes by
-                      // doubling the quote character.
-                      if ('"' === quote && '\\' === qc) { li++; continue }
-                      if (qc === quote) {
-                        if ("'" === quote && "'" === lex.src[li + 1]) { li++; continue }
-                        quote = ''
-                      }
-                      continue
-                    }
-                    if ('"' === qc || "'" === qc) { quote = qc; continue }
-                    if ('#' === qc &&
-                        (li === lineStart || lex.src[li - 1] === ' ' ||
-                         lex.src[li - 1] === '\t')) { hashAt = li; break }
-                  }
-                  if (hashAt >= 0) { prevI = hashAt - 1; continue }
-                  break
-                }
-                if (prevI >= 0 && (lex.src[prevI] === '"' || lex.src[prevI] === "'")) {
+              if (F(0) === ':' && F(1) !== ' ' && F(1) !== '\t' &&
+                  F(1) !== '\n' && F(1) !== '\r' && F(1) !== undefined) {
+                // JSON-compatible flow colon: only when preceded by a quoted
+                // string. Whitespace and line comments (`# ...` to the end of
+                // a line, a `#` inside a quoted scalar being literal) between
+                // are passed over, so e.g. `"foo" # c\n :bar` works: the last
+                // character before the colon that is neither, which `hist`
+                // keeps as the text goes by (`jSig`), however far back it is.
+                histSync(viewBase + pnt.sI)
+                if (34 === jSig || 39 === jSig) {
                   isFlowColon = true
                 }
               }
-              if (fwd[0] === ':' && (fwd[1] === ' ' || fwd[1] === '\t' || fwd[1] === '\n' ||
-                  fwd[1] === '\r' || fwd[1] === undefined || isFlowColon)) {
+              if (F(0) === ':' && (F(1) === ' ' || F(1) === '\t' || F(1) === '\n' ||
+                  F(1) === '\r' || F(1) === undefined || isFlowColon)) {
                 let tkn = lex.token('#CL', 1, ': ', lex.pnt)
                 pnt.sI += 1
-                if (fwd[1] === ' ' || fwd[1] === '\t') {
+                if (F(1) === ' ' || F(1) === '\t') {
                   pnt.cI += 2
-                } else if (fwd[1] === '\n' || fwd[1] === '\r') {
+                } else if (F(1) === '\n' || F(1) === '\r') {
                   // Don't consume newline — leave for #IN.
                 } else {
                   // End of input after colon.
@@ -2604,8 +3005,8 @@ name an anchor defined earlier.`,
 
               // Match any newline — YAML indentation is significant.
               // In flow context, newlines are just whitespace — don't emit #IN.
-              if (fwd[0] === '\n' || fwd[0] === '\r') {
-                updateFlowState(lex.src as string, pnt.sI)
+              if (F(0) === '\n' || F(0) === '\r') {
+                updateFlowState(viewBase + pnt.sI)
                 if (_flowDepth > 0) {
                   // Inside flow collection — consume whitespace, don't emit #IN.
                   // Track rows/last-newline so the point stays consistent: the
@@ -2614,14 +3015,13 @@ name an anchor defined earlier.`,
                   let pos = 0
                   let rows = 0
                   let lastNL = -1
-                  while (pos < fwd.length &&
-                    (fwd[pos] === '\n' || fwd[pos] === '\r' || fwd[pos] === ' ' || fwd[pos] === '\t')) {
-                    if (fwd[pos] === '\n') { rows++; lastNL = pos }
+                  while (F(pos) === '\n' || F(pos) === '\r' || F(pos) === ' ' || F(pos) === '\t') {
+                    if (F(pos) === '\n') { rows++; lastNL = pos }
                     pos++
                   }
                   // Also skip comment lines inside flow collections.
-                  if (pos < fwd.length && fwd[pos] === '#') {
-                    while (pos < fwd.length && fwd[pos] !== '\n' && fwd[pos] !== '\r') pos++
+                  if (F(pos) === '#') {
+                    while (F(pos) !== undefined && F(pos) !== '\n' && F(pos) !== '\r') pos++
                   }
                   // If the whitespace is immediately followed by flow
                   // punctuation ([ ] { } ,), emit that token here. We've
@@ -2629,7 +3029,7 @@ name an anchor defined earlier.`,
                   // jsonic's fixed-token matcher would mis-lex it as #BD (it
                   // never gets a clean shot at the advanced position). The
                   // yaml matcher itself does not otherwise produce these.
-                  let nextCh = fwd[pos]
+                  let nextCh = F(pos)
                   let punctTin = nextCh === '[' ? '#OS'
                     : nextCh === '{' ? '#OB'
                     : nextCh === ']' ? '#CS'
@@ -2648,23 +3048,23 @@ name an anchor defined earlier.`,
                     return tkn
                   }
                   // Re-run yamlMatcher from new position.
-                  fwd = lex.refwd()
+                  fwdAt = pnt.sI
                   continue yamlMatchLoop
                 }
               }
               // Must catch all newlines before the default line/space matchers.
-              if (fwd[0] === '\n' || fwd[0] === '\r') {
+              if (F(0) === '\n' || F(0) === '\r') {
                 // Consume all blank lines and comment-only lines,
                 // finding the last meaningful indent.
                 let pos = 0
                 let spaces = 0
                 let rows = 0
-                while (pos < fwd.length) {
+                while (F(pos) !== undefined) {
                   // Match \r\n or \n
-                  if (fwd[pos] === '\r' && fwd[pos + 1] === '\n') {
+                  if (F(pos) === '\r' && F(pos + 1) === '\n') {
                     pos += 2
                     rows++
-                  } else if (fwd[pos] === '\n') {
+                  } else if (F(pos) === '\n') {
                     pos += 1
                     rows++
                   } else {
@@ -2672,21 +3072,21 @@ name an anchor defined earlier.`,
                   }
                   // Count spaces after this newline.
                   spaces = 0
-                  while (pos < fwd.length && fwd[pos] === ' ') {
+                  while (F(pos) === ' ') {
                     pos++
                     spaces++
                   }
                   // If the line is a comment-only line, consume it too.
-                  if (fwd[pos] === '#') {
-                    while (pos < fwd.length && fwd[pos] !== '\n' && fwd[pos] !== '\r') pos++
+                  if (F(pos) === '#') {
+                    while (F(pos) !== undefined && F(pos) !== '\n' && F(pos) !== '\r') pos++
                     continue
                   }
                   // If the line is whitespace-only (tabs and/or spaces),
                   // treat it as a blank line and continue.
-                  if (fwd[pos] === '\t') {
+                  if (F(pos) === '\t') {
                     let tp = pos
-                    while (tp < fwd.length && (fwd[tp] === ' ' || fwd[tp] === '\t')) tp++
-                    if (tp >= fwd.length || fwd[tp] === '\n' || fwd[tp] === '\r') {
+                    while (F(tp) === ' ' || F(tp) === '\t') tp++
+                    if (F(tp) === undefined || F(tp) === '\n' || F(tp) === '\r') {
                       pos = tp
                       continue
                     }
@@ -2694,19 +3094,18 @@ name an anchor defined earlier.`,
                   // If the line is an anchor-only line (&name with nothing after),
                   // consume it (record the anchor) and continue to the next line
                   // so the indent is determined by actual content.
-                  if (fwd[pos] === '&') {
+                  if (F(pos) === '&') {
                     let ae = pos + 1
-                    while (ae < fwd.length && fwd[ae] !== ' ' && fwd[ae] !== '\t' &&
-                           fwd[ae] !== '\n' && fwd[ae] !== '\r') ae++
+                    while (F(ae) !== undefined && F(ae) !== ' ' && F(ae) !== '\t' &&
+                           F(ae) !== '\n' && F(ae) !== '\r') ae++
                     let afterAnchor = ae
-                    while (afterAnchor < fwd.length &&
-                           (fwd[afterAnchor] === ' ' || fwd[afterAnchor] === '\t')) afterAnchor++
-                    if (afterAnchor >= fwd.length || fwd[afterAnchor] === '\n' ||
-                        fwd[afterAnchor] === '\r' || fwd[afterAnchor] === '#') {
-                      pendAnchor(fwd.substring(pos + 1, ae), false)
+                    while (F(afterAnchor) === ' ' || F(afterAnchor) === '\t') afterAnchor++
+                    if (F(afterAnchor) === undefined || F(afterAnchor) === '\n' ||
+                        F(afterAnchor) === '\r' || F(afterAnchor) === '#') {
+                      pendAnchor(FS(pos + 1, ae), false)
                       // Skip to end of line (including any comment).
-                      while (afterAnchor < fwd.length &&
-                             fwd[afterAnchor] !== '\n' && fwd[afterAnchor] !== '\r') afterAnchor++
+                      while (F(afterAnchor) !== undefined &&
+                             F(afterAnchor) !== '\n' && F(afterAnchor) !== '\r') afterAnchor++
                       pos = afterAnchor
                       continue
                     }
@@ -2714,7 +3113,7 @@ name an anchor defined earlier.`,
                 }
 
                 // If we consumed everything (trailing newlines), advance and emit #ZZ.
-                if (pos >= fwd.length) {
+                if (F(pos) === undefined) {
                   pnt.sI += pos
                   pnt.rI += rows
                   pnt.cI = spaces + 1
@@ -2727,28 +3126,28 @@ name an anchor defined earlier.`,
                 // column 0, advance to it without emitting #IN. The next
                 // matcher call will emit the corresponding #DS / #DE token.
                 if (spaces === 0 &&
-                    ((fwd[pos] === '-' && fwd[pos+1] === '-' && fwd[pos+2] === '-' &&
-                      (fwd[pos+3] === '\n' || fwd[pos+3] === '\r' ||
-                       fwd[pos+3] === ' ' || fwd[pos+3] === '\t' ||
-                       fwd[pos+3] === undefined)) ||
-                     (fwd[pos] === '.' && fwd[pos+1] === '.' && fwd[pos+2] === '.' &&
-                      (fwd[pos+3] === '\n' || fwd[pos+3] === '\r' ||
-                       fwd[pos+3] === ' ' || fwd[pos+3] === '\t' ||
-                       fwd[pos+3] === undefined)))) {
+                    ((F(pos) === '-' && F(pos+1) === '-' && F(pos+2) === '-' &&
+                      (F(pos+3) === '\n' || F(pos+3) === '\r' ||
+                       F(pos+3) === ' ' || F(pos+3) === '\t' ||
+                       F(pos+3) === undefined)) ||
+                     (F(pos) === '.' && F(pos+1) === '.' && F(pos+2) === '.' &&
+                      (F(pos+3) === '\n' || F(pos+3) === '\r' ||
+                       F(pos+3) === ' ' || F(pos+3) === '\t' ||
+                       F(pos+3) === undefined)))) {
                   pnt.sI += pos
                   pnt.rI += rows
                   pnt.cI = 0
-                  fwd = lex.refwd()
+                  fwdAt = pnt.sI
                   continue yamlMatchLoop
                 }
 
                 // Likewise if the next line is a directive (%YAML / %TAG):
                 // advance and let the next call emit #DR.
-                if (spaces === 0 && fwd[pos] === '%') {
+                if (spaces === 0 && F(pos) === '%') {
                   pnt.sI += pos
                   pnt.rI += rows
                   pnt.cI = 0
-                  fwd = lex.refwd()
+                  fwdAt = pnt.sI
                   continue yamlMatchLoop
                 }
 
@@ -2760,18 +3159,18 @@ name an anchor defined earlier.`,
                 // like a plain key does. Without it a block sequence ending
                 // just before it swallowed the pair (tabnas/yaml#86).
                 if (spaces === 0 &&
-                    (fwd[pos] === '{' || fwd[pos] === '[' ||
-                     ((fwd[pos] === '"' || fwd[pos] === "'") &&
-                      !quotedKeyAt(fwd, pos)))) {
+                    (F(pos) === '{' || F(pos) === '[' ||
+                     ((F(pos) === '"' || F(pos) === "'") &&
+                      !quotedKeyAt(viewBase + fwdAt + pos)))) {
                   pnt.sI += pos
                   pnt.rI += rows
                   pnt.cI = 0
-                  fwd = lex.refwd()
+                  fwdAt = pnt.sI
                   continue yamlMatchLoop
                 }
 
                 // Emit #IN with val = indent level of the last non-blank line.
-                let src = fwd.substring(0, pos)
+                let src = FS(0, pos)
                 let tkn = lex.token('#IN', spaces, src, lex.pnt)
                 pnt.sI += pos
                 pnt.rI += rows
@@ -2781,12 +3180,8 @@ name an anchor defined earlier.`,
 
               break // End of yamlMatchLoop
               } // end while(true) yamlMatchLoop
-            }
-          }
-        }
-      }
-    }
-  })
+              return undefined
+  }
 
 
   // Extract a key value from a token, resolving aliases.
@@ -2805,17 +3200,20 @@ name an anchor defined earlier.`,
   // key's column above. `- a: 1` starts at 2, `-   a: 1` and `- - a: 1`
   // at 4, and `- &x a: 1` at 2, where the anchor starts the mapping ahead
   // of its first key's own token.
-  function entryColumn(src: string, at: number): number {
-    let li = at
-    while (li > 0 && src[li - 1] !== '\n' && src[li - 1] !== '\r') li--
-    if (0 === li && 0xFEFF === src.charCodeAt(0)) li = 1
+  // The source is read as the lexer `lex` holds it, with `hist` behind its
+  // window: the action runs on the token the lexer cut last but one or so,
+  // whose line `hist` keeps.
+  function entryColumn(lex: Lex, at: number): number {
+    viewOf(lex)
+    let li = lineStartOf(at)
+    if (0 === li && 0xFEFF === absCode(0)) li = 1
     let col = 0
     let i = li
-    while (i < at && ' ' === src[i]) { col++; i++ }
-    while (i < at && '-' === src[i] && (' ' === src[i + 1] || '\t' === src[i + 1])) {
+    while (i < at && ' ' === absAt(i)) { col++; i++ }
+    while (i < at && '-' === absAt(i) && (' ' === absAt(i + 1) || '\t' === absAt(i + 1))) {
       col += 2
       i += 2
-      while (i < at && ' ' === src[i]) { col++; i++ }
+      while (i < at && ' ' === absAt(i)) { col++; i++ }
     }
     return col
   }
@@ -2858,7 +3256,7 @@ name an anchor defined earlier.`,
     // and two, which no indent token reads.
     '@set-map-in': (rule: Rule, ctx: Context) => {
       rule.k.yamlMapIn = 'yamlBlockList' === rule.name || 'yamlBlockElem' === rule.name
-        ? entryColumn(ctx.src(), rule.o0.sI)
+        ? entryColumn(ctx.lex, rule.o0.sI)
         : rule.n.in + 2
     },
     '@t0-eq-in': (rule: Rule, ctx: Context) => ctx.t0.val === rule.n.in,
@@ -3226,6 +3624,22 @@ Yaml.defaults = ({
 } as YamlOptions)
 
 
+// Build a YAML parser whole: jsonic's base with the plugin installed, as
+// `new Tabnas().use(jsonic).use(Yaml)` builds it, and with `lex.window`
+// declared, so that `tn.parseReader` reads a reader a window at a time
+// rather than whole (admin ADR-30). The plugin's matcher and its text check
+// read the source through the window, reading on where a scan reaches its
+// end, and keep the lines before the cursor that their backward scans read;
+// jsonic's base cuts its tokens with the engine's own matchers. The window
+// is declared here, on the parser this package makes whole, and not in
+// `Yaml`, which a host may install beneath matchers of its own.
+function make(options: YamlOptions = {}): Tabnas {
+  const tn = new Tabnas().use(jsonic).use(Yaml, options)
+  tn.options({ lex: { window: true } })
+  return tn
+}
+
+
 // VERSION is this package's version. It MUST equal package.json "version":
 // the release orchestrator rewrites both, and test/version.test.ts fails the
 // build if they drift. Mirrors `const VERSION` in go/yaml.go.
@@ -3235,6 +3649,7 @@ const VERSION = '0.5.30'
 export {
   Yaml,
   VERSION,
+  make,
 }
 
 export type {

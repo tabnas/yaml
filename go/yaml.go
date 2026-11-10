@@ -1,6 +1,7 @@
 package tabnasyaml
 
 import (
+	"bytes"
 	"fmt"
 	"math"
 	"math/big"
@@ -66,6 +67,7 @@ var (
 // flowScanState caches incremental flow-collection depth and quote state
 // across lex calls so the plain-scalar / newline branches don't rescan
 // the source from index 0 on every token (which would be O(n²) overall).
+// Its positions are the source's, so they hold across a window's moves.
 //
 // Mirrors the _flowDepth / _flowScanPos / _inDoubleQuote / _inSingleQuote
 // cache in src/yaml.ts.
@@ -73,7 +75,6 @@ type flowScanState struct {
 	depth         int
 	pos           int
 	upTo          int
-	cr            int8 // 0 not yet looked, 1 the source has a \r, 2 it has none
 	inDoubleQuote bool
 	inSingleQuote bool
 }
@@ -97,52 +98,29 @@ type flowScanState struct {
 // two agree by construction. It also matches the engine on malformed
 // UTF-8, counting each invalid byte as one rune — a local "is this a
 // continuation byte" test does not, and gets a stray 0x80 wrong.
-func advanceCol(pnt *tabnas.Point, fwd string, n int) {
+func advanceCol(pnt *tabnas.Point, fwd fwdText, n int) {
+	pnt.CI += utf8.RuneCountInString(fwd.sub(0, n))
 	pnt.SI += n
-	pnt.CI += utf8.RuneCountInString(fwd[:n])
+}
+
+// advanceColText moves the lex point over text, which the cursor stands
+// at the start of.
+func advanceColText(pnt *tabnas.Point, text string) {
+	pnt.SI += len(text)
+	pnt.CI += utf8.RuneCountInString(text)
 }
 
 func (s *flowScanState) reset() {
 	s.depth = 0
 	s.pos = 0
 	s.upTo = 0
-	s.cr = 0
 	s.inDoubleQuote = false
 	s.inSingleQuote = false
 }
 
-// stripCommentLines removes leading-#-comment lines from src; used by the
-// matcher to detect a comments-only source.
-func stripCommentLines(src string) string {
-	out := src
-	for {
-		end := 0
-		// Skip leading whitespace on this line.
-		for end < len(out) && (out[end] == ' ' || out[end] == '\t') {
-			end++
-		}
-		if end >= len(out) || out[end] != '#' {
-			break
-		}
-		// Find end of line.
-		for end < len(out) && out[end] != '\n' && out[end] != '\r' {
-			end++
-		}
-		if end < len(out) && out[end] == '\r' {
-			end++
-		}
-		if end < len(out) && out[end] == '\n' {
-			end++
-		}
-		out = out[end:]
-	}
-	return out
-}
-
-// advance scans src forward from the cached position to target, updating
-// flow-collection depth and quote state. If target is behind the last
-// target the cache is reset (cleanSource may have replaced lex.Src and
-// shortened the cursor).
+// advance scans the source forward from the cached position to target, a
+// source position, updating flow-collection depth and quote state. If
+// target is behind the last target the cache is reset.
 //
 // The scan reads the source the way the lexer does, or text is counted as
 // syntax (tabnas/yaml#89; mirrors updateFlowState in src/yaml.ts). A quoted
@@ -150,19 +128,20 @@ func stripCommentLines(src string) string {
 // ordinary text: a comment, a block scalar's content lines, and, in block
 // context, any `{` `[` `"` `'` that does not begin a node. The scan may run
 // past target (to the end of a comment or a block scalar), since the lexer
-// never stops inside either.
-func (s *flowScanState) advance(src string, target int) {
+// never stops inside either. Each call goes on from where the last
+// stopped, so calling it at every cut, as yamlSource.begin does, reads
+// each byte once, as one call would.
+func (s *flowScanState) advance(y *yamlSource, target int) {
 	if target < s.upTo {
 		s.depth = 0
 		s.pos = 0
-		s.cr = 0
 		s.inDoubleQuote = false
 		s.inSingleQuote = false
 	}
 	s.upTo = target
 	fi := s.pos
 	for ; fi < target; fi++ {
-		fc := src[fi]
+		fc := y.b(fi)
 		// Fast path: only ten bytes matter in any state.
 		if !flowScanBytes[fc] {
 			continue
@@ -177,7 +156,7 @@ func (s *flowScanState) advance(src string, target int) {
 		}
 		if s.inSingleQuote {
 			if fc == '\'' {
-				if fi+1 < len(src) && src[fi+1] == '\'' {
+				if y.at(fi+1) == '\'' {
 					fi++ // escaped ''
 				} else {
 					s.inSingleQuote = false
@@ -185,8 +164,8 @@ func (s *flowScanState) advance(src string, target int) {
 			}
 			continue
 		}
-		if fc == '#' && (fi == 0 || isYamlSpaceByte(src[fi-1])) {
-			for fi+1 < len(src) && src[fi+1] != '\n' && src[fi+1] != '\r' {
+		if fc == '#' && (fi == 0 || isYamlSpaceByte(y.b(fi-1))) {
+			for c := y.at(fi + 1); c >= 0 && c != '\n' && c != '\r'; c = y.at(fi + 1) {
 				fi++
 			}
 			continue
@@ -202,7 +181,7 @@ func (s *flowScanState) advance(src string, target int) {
 			case '\'':
 				// Apostrophes preceded by a word char are not quote openers.
 				if fi > 0 {
-					pc := src[fi-1]
+					pc := y.b(fi - 1)
 					if (pc >= 'A' && pc <= 'Z') || (pc >= 'a' && pc <= 'z') || (pc >= '0' && pc <= '9') {
 						continue
 					}
@@ -214,10 +193,10 @@ func (s *flowScanState) advance(src string, target int) {
 		// Block context: only a node's first character opens anything.
 		switch fc {
 		case '{', '[', '"', '\'', '|', '>':
-			if !startsYamlNode(src, fi) {
+			if !startsYamlNode(y, fi) {
 				// Inside a plain scalar, which nothing can open until it
 				// ends at `: `, ` #` or the end of the line: skip to there.
-				fi = plainScalarRest(src, fi) - 1
+				fi = plainScalarRest(y, fi) - 1
 				continue
 			}
 			switch fc {
@@ -228,15 +207,7 @@ func (s *flowScanState) advance(src string, target int) {
 			case '\'':
 				s.inSingleQuote = true
 			default:
-				// A lone \r ends a line too, but most sources have none:
-				// look once per parse, not once per line.
-				if s.cr == 0 {
-					s.cr = 2
-					if strings.IndexByte(src, '\r') >= 0 {
-						s.cr = 1
-					}
-				}
-				if end := blockScalarEnd(src, fi, s.cr == 1); end > fi {
+				if end := blockScalarEnd(y, fi); end > fi {
 					fi = end - 1
 				}
 			}
@@ -259,71 +230,71 @@ var flowScanBytes = func() (t [256]bool) {
 // bomText is U+FEFF, the byte order mark, in UTF-8.
 const bomText = "\uFEFF"
 
-// atLineStart reports whether offset i begins a line: the source start,
-// just after a line break, or just after the byte order mark that opens
-// the stream. Mirrors atLineStart in src/yaml.ts.
-func atLineStart(src string, i int) bool {
-	return i == 0 || src[i-1] == '\n' || src[i-1] == '\r' ||
-		(i == len(bomText) && strings.HasPrefix(src, bomText))
+// atLineStart reports whether source position i begins a line: the source
+// start, just after a line break, or just after the byte order mark that
+// opens the stream. Mirrors atLineStart in src/yaml.ts.
+func atLineStart(y *yamlSource, i int) bool {
+	return i == 0 || y.at(i-1) == '\n' || y.at(i-1) == '\r' ||
+		(i == len(bomText) && y.bomAtStart())
 }
 
 func isYamlSpaceByte(c byte) bool {
 	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
 }
 
-// startsYamlNode reports whether the byte at i (block context) is the first
-// character of a node: first on its line, or after a `: ` / `- ` / `? `
-// indicator, a `---` marker, or a node property (&anchor, !tag) that itself
-// starts a node. Anything else is inside a plain scalar. Mirrors
-// startsYamlNode in src/yaml.ts.
-func startsYamlNode(src string, i int) bool {
+// startsYamlNode reports whether the byte at source position i (block
+// context) is the first character of a node: first on its line, or after
+// a `: ` / `- ` / `? ` indicator, a `---` marker, or a node property
+// (&anchor, !tag) that itself starts a node. Anything else is inside a
+// plain scalar. Mirrors startsYamlNode in src/yaml.ts.
+func startsYamlNode(y *yamlSource, i int) bool {
 	p := i - 1
-	for p >= 0 && (src[p] == ' ' || src[p] == '\t') {
+	for p >= 0 && (y.b(p) == ' ' || y.b(p) == '\t') {
 		p--
 	}
-	if p < 0 || src[p] == '\n' || src[p] == '\r' || (p == len(bomText)-1 && strings.HasPrefix(src, bomText)) {
+	if p < 0 || y.b(p) == '\n' || y.b(p) == '\r' || (p == len(bomText)-1 && y.bomAtStart()) {
 		return true
 	}
 	if p == i-1 {
 		return false
 	}
-	pc := src[p]
+	pc := y.b(p)
 	if pc == ':' {
 		return true
 	}
 	if pc == '-' || pc == '?' {
-		if pc == '-' && p >= 2 && src[p-1] == '-' && src[p-2] == '-' &&
-			(p-3 < 0 || src[p-3] == '\n' || src[p-3] == '\r') {
+		if pc == '-' && p >= 2 && y.b(p-1) == '-' && y.b(p-2) == '-' &&
+			(p-3 < 0 || y.b(p-3) == '\n' || y.b(p-3) == '\r') {
 			return true
 		}
-		return startsYamlNode(src, p)
+		return startsYamlNode(y, p)
 	}
 	w := p
-	for w > 0 && !isYamlSpaceByte(src[w-1]) {
+	for w > 0 && !isYamlSpaceByte(y.b(w-1)) {
 		w--
 	}
-	if src[w] == '&' || src[w] == '!' {
-		return startsYamlNode(src, w)
+	if y.b(w) == '&' || y.b(w) == '!' {
+		return startsYamlNode(y, w)
 	}
 	return false
 }
 
-// plainScalarRest returns, from i inside a block-context plain scalar, the
-// offset where it can end: the next line break, a `:` followed by
-// whitespace or the end, or a `#` after whitespace. Mirrors plainScalarRest
-// in src/yaml.ts.
-func plainScalarRest(src string, i int) int {
+// plainScalarRest returns, from source position i inside a block-context
+// plain scalar, the position where it can end: the next line break, a `:`
+// followed by whitespace or the end, or a `#` after whitespace. Mirrors
+// plainScalarRest in src/yaml.ts.
+func plainScalarRest(y *yamlSource, i int) int {
 	j := i + 1
-	for ; j < len(src); j++ {
-		switch src[j] {
+	for ; y.has(j); j++ {
+		switch y.b(j) {
 		case '\n', '\r':
 			return j
 		case ':':
-			if j+1 >= len(src) || isYamlSpaceByte(src[j+1]) {
+			if !y.has(j+1) || isYamlSpaceByte(y.b(j+1)) {
 				return j
 			}
 		case '#':
-			if src[j-1] == ' ' || src[j-1] == '\t' {
+			if y.b(j-1) == ' ' || y.b(j-1) == '\t' {
 				return j
 			}
 		}
@@ -332,14 +303,14 @@ func plainScalarRest(src string, i int) int {
 }
 
 // blockScalarEnd returns, for a block scalar indicator (| or >, optional
-// chomping/indentation indicators, then only a comment) at i, the offset
-// just past its content lines, or i when it is not one. Mirrors
-// blockScalarEnd in src/yaml.ts.
-func blockScalarEnd(src string, i int, hasCR bool) int {
+// chomping/indentation indicators, then only a comment) at source position
+// i, the position just past its content lines, or i when it is not one.
+// Mirrors blockScalarEnd in src/yaml.ts.
+func blockScalarEnd(y *yamlSource, i int) int {
 	j := i + 1
 	explicit := 0
 	for k := 0; k < 2; k++ {
-		c := byteAt(src, j)
+		c := y.b(j)
 		if c == '+' || c == '-' {
 			j++
 		} else if c >= '1' && c <= '9' {
@@ -347,38 +318,35 @@ func blockScalarEnd(src string, i int, hasCR bool) int {
 			j++
 		}
 	}
-	for byteAt(src, j) == ' ' || byteAt(src, j) == '\t' {
+	for y.b(j) == ' ' || y.b(j) == '\t' {
 		j++
 	}
-	if byteAt(src, j) == '#' {
-		for j < len(src) && src[j] != '\n' && src[j] != '\r' {
+	if y.b(j) == '#' {
+		for y.has(j) && y.b(j) != '\n' && y.b(j) != '\r' {
 			j++
 		}
 	}
-	if j < len(src) && src[j] != '\n' && src[j] != '\r' {
+	if y.has(j) && y.b(j) != '\n' && y.b(j) != '\r' {
 		return i
 	}
-	ls := i
-	for ls > 0 && src[ls-1] != '\n' && src[ls-1] != '\r' {
-		ls--
-	}
-	if ls == 0 && strings.HasPrefix(src, bomText) {
+	ls := y.lineStart(i)
+	if ls == 0 && y.bomAtStart() {
 		ls = len(bomText)
 	}
 	lineIndent := 0
-	for byteAt(src, ls+lineIndent) == ' ' {
+	for y.b(ls+lineIndent) == ' ' {
 		lineIndent++
 	}
-	isRoot := ls+lineIndent == i || strings.HasPrefix(src[ls:], "---")
+	isRoot := ls+lineIndent == i || y.prefixAt(ls, "---")
 	parentIndent := lineIndent
 	if isRoot && lineIndent == 0 {
 		parentIndent = -1
 	}
 	pos := j
-	if byteAt(src, pos) == '\r' {
+	if y.b(pos) == '\r' {
 		pos++
 	}
-	if byteAt(src, pos) == '\n' {
+	if y.b(pos) == '\n' {
 		pos++
 	}
 	blockIndent := -1
@@ -392,17 +360,17 @@ func blockScalarEnd(src string, i int, hasCR bool) int {
 		}
 		hasColon := false
 		for ci := ls + lineIndent; ci < i; ci++ {
-			if src[ci] == ':' && (byteAt(src, ci+1) == ' ' || byteAt(src, ci+1) == '\t') {
+			if y.b(ci) == ':' && (y.b(ci+1) == ' ' || y.b(ci+1) == '\t') {
 				hasColon = true
 				break
 			}
 		}
 		if hasColon {
 			si := ls + lineIndent
-			for si < i && src[si] == '-' && (byteAt(src, si+1) == ' ' || byteAt(src, si+1) == '\t') {
+			for si < i && y.b(si) == '-' && (y.b(si+1) == ' ' || y.b(si+1) == '\t') {
 				base += 2
 				si += 2
-				for si < i && src[si] == ' ' {
+				for si < i && y.b(si) == ' ' {
 					base++
 					si++
 				}
@@ -411,32 +379,23 @@ func blockScalarEnd(src string, i int, hasCR bool) int {
 		blockIndent = base + explicit
 	}
 	end := pos
-	for pos < len(src) {
+	for y.has(pos) {
 		n := 0
-		for pos+n < len(src) && src[pos+n] == ' ' {
+		for y.b(pos+n) == ' ' {
 			n++
 		}
-		c := byteAt(src, pos+n)
+		c := y.b(pos + n)
 		// Content lines are most of a block scalar: find the line end with
-		// IndexByte (assembly) rather than byte by byte, then look for a
-		// lone \r before it.
-		lineEnd := len(src)
-		if k := strings.IndexByte(src[pos+n:], '\n'); k >= 0 {
-			lineEnd = pos + n + k
-		}
-		if hasCR {
-			if k := strings.IndexByte(src[pos+n:lineEnd], '\r'); k >= 0 {
-				lineEnd = pos + n + k
-			}
-		}
+		// IndexAny (assembly) over the window rather than byte by byte.
+		lineEnd := y.lineEnd(pos + n)
 		next := lineEnd
-		if next < len(src) && src[next] == '\r' {
+		if y.b(next) == '\r' {
 			next++
 		}
-		if next < len(src) && src[next] == '\n' {
+		if y.b(next) == '\n' {
 			next++
 		}
-		if pos+n >= len(src) || c == '\n' || c == '\r' {
+		if !y.has(pos+n) || c == '\n' || c == '\r' {
 			pos = next
 			continue
 		}
@@ -449,7 +408,7 @@ func blockScalarEnd(src string, i int, hasCR bool) int {
 		if n < blockIndent {
 			break
 		}
-		if n == 0 && (strings.HasPrefix(src[pos:], "---") || strings.HasPrefix(src[pos:], "...")) {
+		if n == 0 && (y.prefixAt(pos, "---") || y.prefixAt(pos, "...")) {
 			break
 		}
 		end = lineEnd
@@ -466,20 +425,20 @@ func byteAt(src string, k int) byte {
 	return 0
 }
 
-// quotedKeyAt reports whether a quoted scalar opens at i and is a block
-// mapping key: its closing quote is followed, on the same line, by `:` and
-// then whitespace or the end of the line. Mirrors quotedKeyAt in
+// quotedKeyAt reports whether a quoted scalar opens at index i of fwd and
+// is a block mapping key: its closing quote is followed, on the same line,
+// by `:` and then whitespace or the end of the line. Mirrors quotedKeyAt in
 // src/yaml.ts.
-func quotedKeyAt(src string, i int) bool {
-	q := src[i]
+func quotedKeyAt(fwd fwdText, i int) bool {
+	q := fwd.b(i)
 	j := i + 1
-	for j < len(src) && src[j] != '\n' && src[j] != '\r' {
-		if q == '"' && src[j] == '\\' {
+	for fwd.has(j) && fwd.b(j) != '\n' && fwd.b(j) != '\r' {
+		if q == '"' && fwd.b(j) == '\\' {
 			j += 2
 			continue
 		}
-		if src[j] == q {
-			if q == '\'' && j+1 < len(src) && src[j+1] == '\'' {
+		if fwd.b(j) == q {
+			if q == '\'' && fwd.has(j+1) && fwd.b(j+1) == '\'' {
 				j += 2
 				continue
 			}
@@ -487,14 +446,14 @@ func quotedKeyAt(src string, i int) bool {
 		}
 		j++
 	}
-	if j >= len(src) || src[j] != q {
+	if !fwd.has(j) || fwd.b(j) != q {
 		return false
 	}
 	j++
-	for j < len(src) && (src[j] == ' ' || src[j] == '\t') {
+	for fwd.has(j) && (fwd.b(j) == ' ' || fwd.b(j) == '\t') {
 		j++
 	}
-	return j < len(src) && src[j] == ':' && (j+1 >= len(src) || isYamlSpaceByte(src[j+1]))
+	return fwd.has(j) && fwd.b(j) == ':' && (!fwd.has(j+1) || isYamlSpaceByte(fwd.b(j+1)))
 }
 
 // dqEscapes are the single-character escapes of a double-quoted scalar,
@@ -645,6 +604,15 @@ func MakeJsonic(opts ...YamlOptions) *tabnas.Tabnas {
 
 	pluginOpts := map[string]any{"meta": yo.Meta}
 	j.Use(Yaml, pluginOpts)
+	// Read a reader a window at a time (admin ADR-30): the plugin's matcher
+	// and text check read the source through the window, reading on where
+	// a scan reaches its end, and keep the lines before the cursor that
+	// their backward scans read (source.go); jsonic's base cuts its tokens
+	// with the engine's own matchers. The window is declared here, on the
+	// parser this package makes whole, and not in Yaml, which a host may
+	// install beneath matchers of its own.
+	yes := true
+	j.SetOptions(tabnas.Options{Lex: &tabnas.LexOptions{Window: &yes}})
 	return j
 }
 
@@ -944,26 +912,20 @@ func storeMember(r *tabnas.Rule, ctx *tabnas.Context, key string, val any) {
 // key's column. `- a: 1` starts at 2, `-   a: 1` and `- - a: 1` at 4, and
 // `- &x a: 1` at 2, where the anchor starts the mapping ahead of its first
 // key's own token.
-func entryColumn(src string, at int) int {
-	if at > len(src) {
-		at = len(src)
-	}
-	li := at
-	for li > 0 && src[li-1] != '\n' && src[li-1] != '\r' {
-		li--
-	}
-	if li == 0 && strings.HasPrefix(src, bomText) {
+func entryColumn(y *yamlSource, at int) int {
+	li := y.lineStart(at)
+	if li == 0 && y.bomAtStart() {
 		li = len(bomText)
 	}
 	col, i := 0, li
-	for i < at && src[i] == ' ' {
+	for i < at && y.b(i) == ' ' {
 		col++
 		i++
 	}
-	for i < at && src[i] == '-' && i+1 < len(src) && (src[i+1] == ' ' || src[i+1] == '\t') {
+	for i < at && y.b(i) == '-' && y.has(i+1) && (y.b(i+1) == ' ' || y.b(i+1) == '\t') {
 		col += 2
 		i += 2
-		for i < at && src[i] == ' ' {
+		for i < at && y.b(i) == ' ' {
 			col++
 			i++
 		}
@@ -1182,20 +1144,19 @@ type anchorInfo struct {
 	inline bool
 }
 
-// isDocMarker checks if the string at position i starts with --- or ...
-// followed by a space, tab, newline, or end of string.
-func isDocMarker(s string, i int) bool {
-	if i+3 > len(s) {
+// isDocMarker checks if the text at index i of fwd starts with --- or ...
+// followed by a space, tab, newline, or end of source.
+func isDocMarker(fwd fwdText, i int) bool {
+	if !fwd.has(i + 2) {
 		return false
 	}
-	marker := s[i : i+3]
-	if marker != "---" && marker != "..." {
+	if !fwd.prefix(i, "---") && !fwd.prefix(i, "...") {
 		return false
 	}
-	if i+3 >= len(s) {
+	if !fwd.has(i + 3) {
 		return true
 	}
-	next := s[i+3]
+	next := fwd.b(i + 3)
 	return next == '\n' || next == '\r' || next == ' ' || next == '\t'
 }
 
@@ -1205,27 +1166,23 @@ func isDocMarker(s string, i int) bool {
 // is the one of the four marker tests that leaves the tab out, so a
 // `---<TAB>` line stays inside the scalar here and ends the document
 // everywhere else, which is what isDocMarker says.
-func isDocMarkerNoTab(s string, i int) bool {
-	if !isDocMarkerRun(s, i) {
+func isDocMarkerNoTab(fwd fwdText, i int) bool {
+	if !isDocMarkerRun(fwd, i) {
 		return false
 	}
-	if i+3 >= len(s) {
+	if !fwd.has(i + 3) {
 		return true
 	}
-	next := s[i+3]
+	next := fwd.b(i + 3)
 	return next == '\n' || next == '\r' || next == ' '
 }
 
-// isDocMarkerRun is three of `-` or three of `.` at i, with nothing said
-// about what follows: the shape the canonical tests when it decides
-// whether a block scalar's final newline is followed by a document
-// marker (src/yaml.ts:674).
-func isDocMarkerRun(s string, i int) bool {
-	if i+3 > len(s) {
-		return false
-	}
-	marker := s[i : i+3]
-	return marker == "---" || marker == "..."
+// isDocMarkerRun is three of `-` or three of `.` at index i of fwd, with
+// nothing said about what follows: the shape the canonical tests when it
+// decides whether a block scalar's final newline is followed by a
+// document marker (src/yaml.ts:674).
+func isDocMarkerRun(fwd fwdText, i int) bool {
+	return fwd.prefix(i, "---") || fwd.prefix(i, "...")
 }
 
 // isJSSpace reports whether r is whitespace to JAVASCRIPT: the WhiteSpace
@@ -1635,19 +1592,43 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 
 	cfg := j.Config()
 
+	// The source as the matcher and the text check read it, through the
+	// lexer's window in a parse from a reader (source.go).
+	ys := &yamlSource{}
+	// The state a cut begins with, kept so that a cut the engine makes
+	// again over a wider window begins from it again (yamlSource.begin).
+	var cutPending, cutTokens = 0, []*tabnas.Token(nil)
+	var cutExplicitCL, cutSkipNumber bool
+	var cutFlow flowScanState
+	ys.saveHook = func() {
+		cutPending = len(pendingAnchors)
+		cutTokens = pendingTokens
+		cutExplicitCL = pendingExplicitCL
+		cutSkipNumber = skipNumberMatch
+		cutFlow = *flowState
+	}
+	ys.restoreHook = func() {
+		pendingAnchors = pendingAnchors[:cutPending]
+		pendingTokens = cutTokens
+		pendingExplicitCL = cutExplicitCL
+		skipNumberMatch = cutSkipNumber
+		*flowState = cutFlow
+	}
+
 	// ===== TextCheck: handles block scalars, !!tags, and plain scalars =====
+	// It runs in a cut the matcher began, so the source is read as the
+	// matcher set it up to be.
 	textCheck := func(lex *tabnas.Lex) *tabnas.LexCheckResult {
 		pnt := lex.Cursor()
-		src := lex.Src
-		fwd := src[pnt.SI:]
-		if len(fwd) == 0 {
+		fwd := ys.fwd()
+		if !fwd.has(0) {
 			return nil
 		}
-		ch := fwd[0]
+		ch := fwd.b(0)
 
 		// Block scalar: | or >
 		if ch == '|' || ch == '>' {
-			if r := handleBlockScalar(lex, pnt, src, fwd, ch); r != nil {
+			if r := handleBlockScalar(lex, pnt, ys, fwd, ch); r != nil {
 				return r
 			}
 			// handleBlockScalar returns nil when the indicator is followed by
@@ -1656,11 +1637,11 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 			// falls through to plain-scalar handling, yielding {"a":"> x"}.
 			// Go must fall through too, or it rejects what TS accepts
 			// (yaml-test-suite S4GJ).
-			return handlePlainScalar(lex, pnt, src, fwd, flowState)
+			return handlePlainScalar(lex, pnt, ys, fwd, flowState)
 		}
 
 		// !!type tags in text check context
-		if ch == '!' && len(fwd) > 1 && fwd[1] == '!' {
+		if ch == '!' && fwd.has(1) && fwd.b(1) == '!' {
 			return handleTagInTextCheck(lex, pnt, fwd, tagHandles)
 		}
 
@@ -1672,29 +1653,30 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 		}
 
 		// Colon followed by space/tab/newline/eof is a separator, not text.
-		if ch == ':' && (len(fwd) < 2 || fwd[1] == ' ' || fwd[1] == '\t' || fwd[1] == '\n' || fwd[1] == '\r') {
+		if ch == ':' && (!fwd.has(1) || fwd.b(1) == ' ' || fwd.b(1) == '\t' || fwd.b(1) == '\n' || fwd.b(1) == '\r') {
 			return nil
 		}
 
 		// Plain scalar — scan to end of line, handling multiline continuation.
-		return handlePlainScalar(lex, pnt, src, fwd, flowState)
+		return handlePlainScalar(lex, pnt, ys, fwd, flowState)
 	}
 
 	// ===== Custom YAML matcher (priority 500000 — before fixed tokens) =====
-	var lastSeenSrc string
-	srcSeen := false
+	// Set when a parse's source holds nothing to read: the end is every
+	// token after the one null it reads as.
+	blankSource := false
 
+	var yamlMatch func(lex *tabnas.Lex) *tabnas.Token
 	yamlMatcher := func(lex *tabnas.Lex, _ *tabnas.Rule) *tabnas.Token {
-		pnt := lex.Cursor()
-		src := lex.Src
-
-		// First call (or new source on a reused plugin instance): reset
-		// per-parse state. Mirrors the TS first-call setup. The source is
-		// no longer mutated — directives, --- / ... markers, and explicit
-		// keys flow through as #DR / #DS / #DE / #QM tokens.
-		if !srcSeen || src != lastSeenSrc {
-			srcSeen = true
-			lastSeenSrc = src
+		// First call of a new parse: reset per-parse state. Mirrors the TS
+		// first-call setup. A parse has a lexer of its own, so the lexer
+		// tells one parse from the next, as the canonical port's WeakSet of
+		// lexers does; the source cannot, since a parse from a reader shows
+		// it a window at a time. The source is no longer mutated —
+		// directives, --- / ... markers, and explicit keys flow through as
+		// #DR / #DS / #DE / #QM tokens.
+		first := lex != ys.lex
+		if first {
 			for k := range anchors {
 				delete(anchors, k)
 			}
@@ -1715,37 +1697,77 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 			for k := range literalMergeKey {
 				delete(literalMergeKey, k)
 			}
-
-			// Empty / whitespace-only / comments-only source: emit one #VL
-			// null so the parser yields nil rather than a parse error.
-			stripped := stripCommentLines(src)
-			// `src.trim() === '' || stripped === ''`, and `trim` is
-			// JavaScript's: a source of one byte-order mark is empty here,
-			// and one of a next-line character is a scalar.
-			if jsTrim(src) == "" || jsTrim(stripped) == "" {
-				pnt.Len = 0
-				tkn := lex.Token("#VL", VL, nil, "")
-				pnt.SI = 0
-				return tkn
-			}
+			blankSource = false
+			ys.reset(lex)
 		}
+		ys.begin(lex, flowState)
+
+		// Empty / whitespace-only / comments-only source: emit one #VL
+		// null so the parser yields nil rather than a parse error. As
+		// `src.trim() === '' || stripped === ''` asks, and `trim` is
+		// JavaScript's: a source of one byte-order mark is empty here, and
+		// one of a next-line character is a scalar. The source has been
+		// read to its end when it is so.
+		if first && ys.blank() {
+			pnt := lex.Cursor()
+			pnt.Len = 0
+			tkn := lex.Token("#VL", VL, nil, "")
+			pnt.SI = 0
+			// From a reader the cursor's length is the window's again
+			// after the cut, so the end the engine would give is given here.
+			blankSource = lex.Windowed()
+			return tkn
+		}
+		if blankSource {
+			return lex.Token("#ZZ", ZZ, tabnas.Undefined, "")
+		}
+
+		tkn := yamlMatch(lex)
+		if tkn == nil && lex.Windowed() {
+			// The engine's matchers take the cursor next, and the text
+			// check runs after the number and comment matchers, which read
+			// only the window: one that read to its end and declined would
+			// have the text check read on and take a number or a comment
+			// cut short as text. So the text check's scan is run here
+			// first, reading on as it reads, and the cursor put back: the
+			// window then holds what each matcher of the cut reads.
+			pnt := lex.Cursor()
+			si, ri, ci := pnt.SI, pnt.RI, pnt.CI
+			textCheck(lex)
+			pnt.SI, pnt.RI, pnt.CI = si, ri, ci
+		}
+		// What this call stepped over without a token of its own (an
+		// anchor, a tag) is the window's to drop at the next cut, so hist
+		// takes it now.
+		ys.sync(ys.pos())
+		return tkn
+	}
+
+	yamlMatch = func(lex *tabnas.Lex) *tabnas.Token {
+		pnt := lex.Cursor()
+
 		// A byte order mark opening the stream is not content: step over
 		// it without counting a column. atLineStart and the flow scan
-		// treat the offset after it as a line start. This sits outside the
-		// reset, which a second parse of the same source skips.
-		if pnt.SI == 0 && strings.HasPrefix(src, bomText) {
-			pnt.SI = len(bomText)
+		// treat the offset after it as a line start. Every cut made at the
+		// source's start steps over it, one the engine makes again over a
+		// wider window among them.
+		if ys.pos() == 0 && ys.bomAtStart() {
+			pnt.SI += len(bomText)
 		}
 
-		if pnt.SI >= pnt.Len {
+		if !ys.has(ys.pos()) {
 			return nil
 		}
 
-		// Emit pending tokens (from explicit key handling).
+		// Emit pending tokens (from explicit key handling). Each was made
+		// in an earlier cut and kept at its source position: it is handed
+		// over as a copy in this cut's frame, which the engine adds the
+		// window's start to.
 		if len(pendingTokens) > 0 {
-			tkn := pendingTokens[0]
+			tkn := *pendingTokens[0]
 			pendingTokens = pendingTokens[1:]
-			return tkn
+			tkn.SI -= ys.base
+			return &tkn
 		}
 
 		// Emit pending explicit CL token.
@@ -1755,58 +1777,58 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 			return tkn
 		}
 
-		fwd := lex.Src[pnt.SI:]
-		if len(fwd) == 0 {
+		fwd := ys.fwd()
+		if !fwd.has(0) {
 			return nil
 		}
 
 		// Process YAML features in a loop to handle chaining.
 		for {
-			if pnt.SI >= pnt.Len {
+			if !ys.has(ys.pos()) {
 				return nil
 			}
-			fwd = lex.Src[pnt.SI:]
-			if len(fwd) == 0 {
+			fwd = ys.fwd()
+			if !fwd.has(0) {
 				return nil
 			}
 
 			// Alias: *name
-			if fwd[0] == '*' {
+			if fwd.b(0) == '*' {
 				nameEnd := 1
-				for nameEnd < len(fwd) && fwd[nameEnd] != ' ' && fwd[nameEnd] != '\t' &&
-					fwd[nameEnd] != '\n' && fwd[nameEnd] != '\r' && fwd[nameEnd] != ',' &&
-					fwd[nameEnd] != '{' && fwd[nameEnd] != '}' && fwd[nameEnd] != '[' &&
-					fwd[nameEnd] != ']' {
+				for fwd.has(nameEnd) && fwd.b(nameEnd) != ' ' && fwd.b(nameEnd) != '\t' &&
+					fwd.b(nameEnd) != '\n' && fwd.b(nameEnd) != '\r' && fwd.b(nameEnd) != ',' &&
+					fwd.b(nameEnd) != '{' && fwd.b(nameEnd) != '}' && fwd.b(nameEnd) != '[' &&
+					fwd.b(nameEnd) != ']' {
 					// A colon ends the name only before a space or a tab, as
 					// in the canonical port; elsewhere it is a name character.
-					if fwd[nameEnd] == ':' && nameEnd+1 < len(fwd) &&
-						(fwd[nameEnd+1] == ' ' || fwd[nameEnd+1] == '\t') {
+					if fwd.b(nameEnd) == ':' && fwd.has(nameEnd+1) &&
+						(fwd.b(nameEnd+1) == ' ' || fwd.b(nameEnd+1) == '\t') {
 						break
 					}
 					nameEnd++
 				}
-				aliasName := fwd[1:nameEnd]
+				aliasName := fwd.sub(1, nameEnd)
 				// YAML 1.2.2, 7.1: "It is an error for an alias node to use
 				// an anchor that does not previously occur in the document."
 				// Checked here, as a key or as a value, because an alias read
 				// as nothing hides a mistyped name.
 				if !declaredAnchors[aliasName] {
 					tkn := lex.Bad("yaml_undefined_alias")
-					tkn.Src = fwd[:nameEnd]
+					tkn.Src = fwd.sub(0, nameEnd)
 					return tkn
 				}
 				// An alias used as a key, before `:` and a blank, the line's
 				// end or the source's: the property name its recorded value
 				// makes, as the canonical port's `String(anchors[name])`.
 				afterAlias := nameEnd
-				for afterAlias < len(fwd) && (fwd[afterAlias] == ' ' || fwd[afterAlias] == '\t') {
+				for fwd.has(afterAlias) && (fwd.b(afterAlias) == ' ' || fwd.b(afterAlias) == '\t') {
 					afterAlias++
 				}
-				isKey := afterAlias < len(fwd) && fwd[afterAlias] == ':' &&
-					(afterAlias+1 == len(fwd) || fwd[afterAlias+1] == ' ' || fwd[afterAlias+1] == '\t' ||
-						fwd[afterAlias+1] == '\n' || fwd[afterAlias+1] == '\r')
+				isKey := fwd.has(afterAlias) && fwd.b(afterAlias) == ':' &&
+					(!fwd.has(afterAlias+1) || fwd.b(afterAlias+1) == ' ' || fwd.b(afterAlias+1) == '\t' ||
+						fwd.b(afterAlias+1) == '\n' || fwd.b(afterAlias+1) == '\r')
 				if val, ok := anchors[aliasName]; isKey && ok && !tabnas.IsUndefined(val) {
-					tkn := lex.Token("#TX", TX, jsString(val), fwd[:nameEnd])
+					tkn := lex.Token("#TX", TX, jsString(val), fwd.sub(0, nameEnd))
 					advanceCol(pnt, fwd, nameEnd)
 					return tkn
 				}
@@ -1814,13 +1836,13 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 					var tkn *tabnas.Token
 					switch v := val.(type) {
 					case string:
-						tkn = lex.Token("#TX", TX, v, fwd[:nameEnd])
+						tkn = lex.Token("#TX", TX, v, fwd.sub(0, nameEnd))
 					case float64:
-						tkn = lex.Token("#NR", NR, v, fwd[:nameEnd])
+						tkn = lex.Token("#NR", NR, v, fwd.sub(0, nameEnd))
 					case bool:
-						tkn = lex.Token("#VL", VL, v, fwd[:nameEnd])
+						tkn = lex.Token("#VL", VL, v, fwd.sub(0, nameEnd))
 					case nil:
-						tkn = lex.Token("#VL", VL, nil, fwd[:nameEnd])
+						tkn = lex.Token("#VL", VL, nil, fwd.sub(0, nameEnd))
 					default:
 						// A mapping or a sequence: its copy, as the
 						// canonical port hands one (`JSON.parse(JSON.
@@ -1831,58 +1853,58 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 						// through the marker left the token the same as
 						// an alias to nothing, which the passes could not
 						// tell apart (tabnas/alchemy#81).
-						tkn = lex.Token("#VL", VL, deepCopy(val), fwd[:nameEnd])
+						tkn = lex.Token("#VL", VL, deepCopy(val), fwd.sub(0, nameEnd))
 					}
 					advanceCol(pnt, fwd, nameEnd)
 					return tkn
 				}
 				// Unknown alias — return as marker.
-				tkn := lex.Token("#VL", VL, map[string]any{"__yamlAlias": aliasName}, fwd[:nameEnd])
+				tkn := lex.Token("#VL", VL, map[string]any{"__yamlAlias": aliasName}, fwd.sub(0, nameEnd))
 				advanceCol(pnt, fwd, nameEnd)
 				return tkn
 			}
 
 			// Anchor: &name
-			if fwd[0] == '&' {
+			if fwd.b(0) == '&' {
 				nameEnd := 1
-				for nameEnd < len(fwd) && fwd[nameEnd] != ' ' && fwd[nameEnd] != '\t' &&
-					fwd[nameEnd] != '\n' && fwd[nameEnd] != '\r' && fwd[nameEnd] != ',' &&
-					fwd[nameEnd] != '{' && fwd[nameEnd] != '}' && fwd[nameEnd] != '[' &&
-					fwd[nameEnd] != ']' {
+				for fwd.has(nameEnd) && fwd.b(nameEnd) != ' ' && fwd.b(nameEnd) != '\t' &&
+					fwd.b(nameEnd) != '\n' && fwd.b(nameEnd) != '\r' && fwd.b(nameEnd) != ',' &&
+					fwd.b(nameEnd) != '{' && fwd.b(nameEnd) != '}' && fwd.b(nameEnd) != '[' &&
+					fwd.b(nameEnd) != ']' {
 					nameEnd++
 				}
-				anchorName := fwd[1:nameEnd]
+				anchorName := fwd.sub(1, nameEnd)
 				anchorInline := true
 
 				// Check if anchor is standalone (nothing meaningful after it on the line).
 				afterAnchor := nameEnd
-				for afterAnchor < len(fwd) && (fwd[afterAnchor] == ' ' || fwd[afterAnchor] == '\t') {
+				for fwd.has(afterAnchor) && (fwd.b(afterAnchor) == ' ' || fwd.b(afterAnchor) == '\t') {
 					afterAnchor++
 				}
-				isStandalone := afterAnchor >= len(fwd) || fwd[afterAnchor] == '\n' ||
-					fwd[afterAnchor] == '\r' || fwd[afterAnchor] == '#'
+				isStandalone := !fwd.has(afterAnchor) || fwd.b(afterAnchor) == '\n' ||
+					fwd.b(afterAnchor) == '\r' || fwd.b(afterAnchor) == '#'
 
 				if isStandalone {
 					anchorInline = false
 				}
 
 				// Try to capture inline scalar value for the anchor.
-				if anchorInline && afterAnchor < len(fwd) {
-					peek := fwd[afterAnchor:]
+				if anchorInline && fwd.has(afterAnchor) {
+					peek := fwd.from(afterAnchor)
 					var scalarVal any
 					pch := byte(0)
-					if len(peek) > 0 {
-						pch = peek[0]
+					if peek.has(0) {
+						pch = peek.b(0)
 					}
 					if pch == '"' {
 						ei := 1
-						for ei < len(peek) && peek[ei] != '"' {
-							if peek[ei] == '\\' {
+						for peek.has(ei) && peek.b(ei) != '"' {
+							if peek.b(ei) == '\\' {
 								ei++
 							}
 							ei++
 						}
-						raw := peek[1:ei]
+						raw := peek.sub(1, ei)
 						raw = strings.ReplaceAll(raw, "\\n", "\n")
 						raw = strings.ReplaceAll(raw, "\\t", "\t")
 						raw = strings.ReplaceAll(raw, "\\\\", "\\")
@@ -1890,24 +1912,24 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 						scalarVal = raw
 					} else if pch == '\'' {
 						ei := 1
-						for ei < len(peek) && peek[ei] != '\'' {
-							if ei+1 < len(peek) && peek[ei] == '\'' && peek[ei+1] == '\'' {
+						for peek.has(ei) && peek.b(ei) != '\'' {
+							if peek.has(ei+1) && peek.b(ei) == '\'' && peek.b(ei+1) == '\'' {
 								ei++
 							}
 							ei++
 						}
-						raw := peek[1:ei]
+						raw := peek.sub(1, ei)
 						raw = strings.ReplaceAll(raw, "''", "'")
 						scalarVal = raw
 					} else if pch != 0 && pch != '{' && pch != '[' && pch != '\n' && pch != '\r' {
 						ei := 0
-						for ei < len(peek) && peek[ei] != '\n' && peek[ei] != '\r' &&
-							peek[ei] != ',' && peek[ei] != '}' && peek[ei] != ']' {
-							if peek[ei] == ':' && (ei+1 >= len(peek) || peek[ei+1] == ' ' ||
-								peek[ei+1] == '\t' || peek[ei+1] == '\n' || peek[ei+1] == '\r') {
+						for peek.has(ei) && peek.b(ei) != '\n' && peek.b(ei) != '\r' &&
+							peek.b(ei) != ',' && peek.b(ei) != '}' && peek.b(ei) != ']' {
+							if peek.b(ei) == ':' && (!peek.has(ei+1) || peek.b(ei+1) == ' ' ||
+								peek.b(ei+1) == '\t' || peek.b(ei+1) == '\n' || peek.b(ei+1) == '\r') {
 								break
 							}
-							if peek[ei] == ' ' && ei+1 < len(peek) && peek[ei+1] == '#' {
+							if peek.b(ei) == ' ' && peek.has(ei+1) && peek.b(ei+1) == '#' {
 								break
 							}
 							ei++
@@ -1915,26 +1937,26 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 						// `peek.substring(0, ei).trim()`: both ends, and
 						// JavaScript's set, so a byte-order mark before the
 						// scalar is not part of what the alias resolves to.
-						raw := jsTrim(peek[:ei])
+						raw := jsTrim(peek.sub(0, ei))
 						if len(raw) > 0 {
 							scalarVal = raw
 						}
 					}
 					if scalarVal != nil {
-						anchors[anchorName] = scalarVal
+						ys.record(anchors, anchorName, scalarVal)
 					}
 				}
 
 				pendingAnchors = append(pendingAnchors, anchorInfo{name: anchorName, inline: anchorInline})
-				declaredAnchors[anchorName] = true
+				ys.declare(declaredAnchors, anchorName)
 
 				// Check whether the anchor is the first content on its line
 				// (only whitespace precedes it), and record that indent.
 				// Mirrors src/yaml.ts:1121-1135.
 				lineStandalone := true
 				anchorIndent := 0
-				for bi := pnt.SI - 1; bi >= 0 && lex.Src[bi] != '\n' && lex.Src[bi] != '\r'; bi-- {
-					if lex.Src[bi] != ' ' && lex.Src[bi] != '\t' {
+				for bi := ys.pos() - 1; bi >= 0 && ys.b(bi) != '\n' && ys.b(bi) != '\r'; bi-- {
+					if ys.b(bi) != ' ' && ys.b(bi) != '\t' {
 						lineStandalone = false
 						break
 					}
@@ -1943,12 +1965,12 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 
 				// Consume the anchor name (and trailing spaces, but NOT the newline).
 				skip := nameEnd
-				for skip < len(fwd) && (fwd[skip] == ' ' || fwd[skip] == '\t') {
+				for fwd.has(skip) && (fwd.b(skip) == ' ' || fwd.b(skip) == '\t') {
 					skip++
 				}
 				// Skip comments after anchor.
-				if skip < len(fwd) && fwd[skip] == '#' {
-					for skip < len(fwd) && fwd[skip] != '\n' && fwd[skip] != '\r' {
+				if fwd.has(skip) && fwd.b(skip) == '#' {
+					for fwd.has(skip) && fwd.b(skip) != '\n' && fwd.b(skip) != '\r' {
 						skip++
 					}
 				}
@@ -1960,21 +1982,21 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 				// content and its indent >= the anchor's indent, otherwise let
 				// the normal indent handler manage the transition.
 				// Mirrors src/yaml.ts:1187-1205.
-				if lineStandalone && pnt.SI < pnt.Len &&
-					(lex.Src[pnt.SI] == '\r' || lex.Src[pnt.SI] == '\n') {
+				if lineStandalone && ys.rhas(pnt.SI) &&
+					(ys.rb(pnt.SI) == '\r' || ys.rb(pnt.SI) == '\n') {
 					nl := pnt.SI
-					if lex.Src[nl] == '\r' {
+					if ys.rb(nl) == '\r' {
 						nl++
 					}
-					if nl < pnt.Len && lex.Src[nl] == '\n' {
+					if ys.rhas(nl) && ys.rb(nl) == '\n' {
 						nl++
 					}
 					spaces := 0
-					for nl+spaces < pnt.Len && lex.Src[nl+spaces] == ' ' {
+					for ys.rhas(nl+spaces) && ys.rb(nl+spaces) == ' ' {
 						spaces++
 					}
-					if nl+spaces < pnt.Len {
-						nextCh := lex.Src[nl+spaces]
+					if ys.rhas(nl + spaces) {
+						nextCh := ys.rb(nl + spaces)
 						if nextCh != '\n' && nextCh != '\r' && spaces >= anchorIndent {
 							pnt.SI = nl + spaces
 							pnt.CI = spaces
@@ -1987,35 +2009,35 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 			}
 
 			// Non-specific tag: ! value
-			if fwd[0] == '!' && len(fwd) > 1 && fwd[1] != '!' {
-				if fwd[1] == ' ' {
+			if fwd.b(0) == '!' && fwd.has(1) && fwd.b(1) != '!' {
+				if fwd.b(1) == ' ' {
 					// Non-specific tag: ! value
 					valStart := 2
 					valEnd := valStart
-					for valEnd < len(fwd) && fwd[valEnd] != '\n' && fwd[valEnd] != '\r' {
+					for fwd.has(valEnd) && fwd.b(valEnd) != '\n' && fwd.b(valEnd) != '\r' {
 						valEnd++
 					}
-					rawVal := trimRight(fwd[valStart:valEnd])
-					tkn := lex.Token("#TX", TX, rawVal, fwd[:valEnd])
+					rawVal := trimRight(fwd.sub(valStart, valEnd))
+					tkn := lex.Token("#TX", TX, rawVal, fwd.sub(0, valEnd))
 					advanceCol(pnt, fwd, valEnd)
 					return tkn
 				}
 				// Local tag: !name value — skip the tag.
 				tagEnd := 1
-				for tagEnd < len(fwd) && fwd[tagEnd] != ' ' && fwd[tagEnd] != '\n' && fwd[tagEnd] != '\r' {
+				for fwd.has(tagEnd) && fwd.b(tagEnd) != ' ' && fwd.b(tagEnd) != '\n' && fwd.b(tagEnd) != '\r' {
 					tagEnd++
 				}
-				if tagEnd < len(fwd) && fwd[tagEnd] == ' ' {
+				if fwd.has(tagEnd) && fwd.b(tagEnd) == ' ' {
 					tagEnd++
 				}
 				advanceCol(pnt, fwd, tagEnd)
 				// If tag is standalone, consume newline + spaces.
-				if pnt.SI < pnt.Len && (lex.Src[pnt.SI] == '\n' || lex.Src[pnt.SI] == '\r') {
+				if ys.rhas(pnt.SI) && (ys.rb(pnt.SI) == '\n' || ys.rb(pnt.SI) == '\r') {
 					tagStandalone := true
 					tagLineIndent := 0
-					tbi := pnt.SI - tagEnd - 1
-					for tbi >= 0 && lex.Src[tbi] != '\n' && lex.Src[tbi] != '\r' {
-						if lex.Src[tbi] != ' ' && lex.Src[tbi] != '\t' {
+					tbi := ys.pos() - tagEnd - 1
+					for tbi >= 0 && ys.b(tbi) != '\n' && ys.b(tbi) != '\r' {
+						if ys.b(tbi) != ' ' && ys.b(tbi) != '\t' {
 							tagStandalone = false
 							break
 						}
@@ -2025,14 +2047,14 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 					_ = tagLineIndent
 					if tagStandalone {
 						nl := pnt.SI
-						if nl < pnt.Len && lex.Src[nl] == '\r' {
+						if ys.rhas(nl) && ys.rb(nl) == '\r' {
 							nl++
 						}
-						if nl < pnt.Len && lex.Src[nl] == '\n' {
+						if ys.rhas(nl) && ys.rb(nl) == '\n' {
 							nl++
 						}
 						spaces := 0
-						for nl+spaces < pnt.Len && lex.Src[nl+spaces] == ' ' {
+						for ys.rhas(nl+spaces) && ys.rb(nl+spaces) == ' ' {
 							spaces++
 						}
 						pnt.SI = nl + spaces
@@ -2044,36 +2066,37 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 			}
 
 			// !!seq, !!map, !!omap, etc. structural tags — skip them.
-			if fwd[0] == '!' && len(fwd) > 1 && fwd[1] == '!' && structTagPrefixRe.MatchString(fwd) {
+			if fwd.b(0) == '!' && fwd.has(1) && fwd.b(1) == '!' &&
+				structTagPrefixRe.MatchString(fwd.sub(0, structTagReach(fwd))) {
 				skip := 2
-				for skip < len(fwd) && fwd[skip] != ' ' && fwd[skip] != '\n' {
+				for fwd.has(skip) && fwd.b(skip) != ' ' && fwd.b(skip) != '\n' {
 					skip++
 				}
-				for skip < len(fwd) && fwd[skip] == ' ' {
+				for fwd.has(skip) && fwd.b(skip) == ' ' {
 					skip++
 				}
 				// If standalone, consume newline.
 				tagIndent := 0
-				tbi := pnt.SI - 1
+				tbi := ys.pos() - 1
 				standalone := true
-				for tbi >= 0 && lex.Src[tbi] != '\n' && lex.Src[tbi] != '\r' {
-					if lex.Src[tbi] != ' ' && lex.Src[tbi] != '\t' {
+				for tbi >= 0 && ys.b(tbi) != '\n' && ys.b(tbi) != '\r' {
+					if ys.b(tbi) != ' ' && ys.b(tbi) != '\t' {
 						standalone = false
 						break
 					}
 					tagIndent++
 					tbi--
 				}
-				if standalone && skip < len(fwd) && (fwd[skip] == '\n' || fwd[skip] == '\r') {
+				if standalone && fwd.has(skip) && (fwd.b(skip) == '\n' || fwd.b(skip) == '\r') {
 					nl := skip
-					if nl < len(fwd) && fwd[nl] == '\r' {
+					if fwd.has(nl) && fwd.b(nl) == '\r' {
 						nl++
 					}
-					if nl < len(fwd) && fwd[nl] == '\n' {
+					if fwd.has(nl) && fwd.b(nl) == '\n' {
 						nl++
 					}
 					spaces := 0
-					for nl+spaces < len(fwd) && fwd[nl+spaces] == ' ' {
+					for fwd.has(nl+spaces) && fwd.b(nl+spaces) == ' ' {
 						spaces++
 					}
 					if spaces >= tagIndent {
@@ -2089,9 +2112,9 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 			}
 
 			// !!type tags (!!str, !!int, !!float, !!bool, !!null).
-			if fwd[0] == '!' && len(fwd) > 1 && fwd[1] == '!' {
+			if fwd.b(0) == '!' && fwd.has(1) && fwd.b(1) == '!' {
 				preSI := pnt.SI
-				if tkn := handleTypeTag(lex, pnt, fwd, tagHandles, &pendingAnchors, declaredAnchors, anchors, TX, NR, VL, ST); tkn != nil {
+				if tkn := handleTypeTag(lex, pnt, ys, fwd, tagHandles, &pendingAnchors, declaredAnchors, anchors, TX, NR, VL, ST); tkn != nil {
 					return tkn
 				}
 				// Tag followed by a newline was consumed with no token —
@@ -2107,8 +2130,8 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 			// Flow-context `?` explicit-key marker: emit #QM. Pair/elem rule
 			// alts handle the marker. Block-context `?` falls through to
 			// the heavyweight handleExplicitKey below.
-			if fwd[0] == '?' && len(fwd) > 1 && (fwd[1] == ' ' || fwd[1] == '\t') {
-				flowState.advance(lex.Src, pnt.SI)
+			if fwd.b(0) == '?' && fwd.has(1) && (fwd.b(1) == ' ' || fwd.b(1) == '\t') {
+				flowState.advance(ys, ys.pos())
 				if flowState.depth > 0 {
 					tkn := lex.Token("#QM", QM, tabnas.Undefined, "?")
 					pnt.SI++
@@ -2118,74 +2141,74 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 			}
 
 			// Explicit key: ? key (block context)
-			if fwd[0] == '?' && (len(fwd) < 2 || fwd[1] == ' ' || fwd[1] == '\t' ||
-				fwd[1] == '\n' || fwd[1] == '\r') {
-				return handleExplicitKey(lex, pnt, fwd, &pendingExplicitCL, &pendingTokens, TX, CL, VL, IN)
+			if fwd.b(0) == '?' && (!fwd.has(1) || fwd.b(1) == ' ' || fwd.b(1) == '\t' ||
+				fwd.b(1) == '\n' || fwd.b(1) == '\r') {
+				return handleExplicitKey(lex, pnt, ys, fwd, &pendingExplicitCL, &pendingTokens, TX, CL, VL, IN)
 			}
 
 			// Document markers: --- → #DS, ... → #DE.
 			// Only at column 0 (start of line or start of source).
-			if isDocMarker(fwd, 0) && atLineStart(lex.Src, pnt.SI) {
+			if isDocMarker(fwd, 0) && atLineStart(ys, ys.pos()) {
 				return handleDocMarker(lex, pnt, fwd, DS, DE)
 			}
 
 			// Directive line at column 0: emit #DR token. The stream rule
 			// applies %TAG handles via the @apply-directive action.
-			if fwd[0] == '%' && atLineStart(lex.Src, pnt.SI) {
+			if fwd.b(0) == '%' && atLineStart(ys, ys.pos()) {
 				pos := 0
-				for pos < len(fwd) && fwd[pos] != '\n' && fwd[pos] != '\r' {
+				for fwd.has(pos) && fwd.b(pos) != '\n' && fwd.b(pos) != '\r' {
 					pos++
 				}
-				directiveSrc := fwd[:pos]
+				directiveSrc := fwd.sub(0, pos)
 				advanceCol(pnt, fwd, pos)
 				return lex.Token("#DR", DR, directiveSrc, directiveSrc)
 			}
 
 			// Non-specific tag after ---.
-			if fwd[0] == '!' && len(fwd) > 1 && fwd[1] == ' ' {
+			if fwd.b(0) == '!' && fwd.has(1) && fwd.b(1) == ' ' {
 				valStart := 2
 				valEnd := valStart
-				for valEnd < len(fwd) && fwd[valEnd] != '\n' && fwd[valEnd] != '\r' {
+				for fwd.has(valEnd) && fwd.b(valEnd) != '\n' && fwd.b(valEnd) != '\r' {
 					valEnd++
 				}
-				rawVal := trimRight(fwd[valStart:valEnd])
-				tkn := lex.Token("#TX", TX, rawVal, fwd[:valEnd])
+				rawVal := trimRight(fwd.sub(valStart, valEnd))
+				tkn := lex.Token("#TX", TX, rawVal, fwd.sub(0, valEnd))
 				advanceCol(pnt, fwd, valEnd)
 				return tkn
 			}
 
 			// Anchor after --- fall-through.
-			if fwd[0] == '&' {
+			if fwd.b(0) == '&' {
 				continue // Will be handled at top of loop
 			}
 
 			// YAML double-quoted string.
-			if fwd[0] == '"' {
+			if fwd.b(0) == '"' {
 				return handleDoubleQuotedString(lex, pnt, fwd, ST)
 			}
 
 			// YAML single-quoted string.
-			if fwd[0] == '\'' {
+			if fwd.b(0) == '\'' {
 				return handleSingleQuotedString(lex, pnt, fwd, ST)
 			}
 
 			// Plain scalars starting with digits that contain colons (e.g. 20:03:20).
 			// A sign before the digit counts too: `+190:20:30` is one plain
 			// scalar (mirrors src/yaml.ts).
-			if (fwd[0] >= '0' && fwd[0] <= '9') ||
-				((fwd[0] == '+' || fwd[0] == '-') && len(fwd) > 1 && fwd[1] >= '0' && fwd[1] <= '9') {
-				if tkn := handleNumericColon(lex, pnt, fwd, TX, &skipNumberMatch, flowState); tkn != nil {
+			if (fwd.b(0) >= '0' && fwd.b(0) <= '9') ||
+				((fwd.b(0) == '+' || fwd.b(0) == '-') && fwd.has(1) && fwd.b(1) >= '0' && fwd.b(1) <= '9') {
+				if tkn := handleNumericColon(lex, pnt, ys, fwd, TX, &skipNumberMatch, flowState); tkn != nil {
 					return tkn
 				}
 			}
 
 			// Element marker: - (followed by space/tab/newline/eof)
-			if fwd[0] == '-' && (len(fwd) < 2 || fwd[1] == ' ' || fwd[1] == '\t' ||
-				fwd[1] == '\n' || fwd[1] == '\r') {
+			if fwd.b(0) == '-' && (!fwd.has(1) || fwd.b(1) == ' ' || fwd.b(1) == '\t' ||
+				fwd.b(1) == '\n' || fwd.b(1) == '\r') {
 				tkn := lex.Token("#EL", EL, nil, "- ")
 				pnt.SI++
 				pnt.CI++
-				if len(fwd) > 1 && (fwd[1] == ' ' || fwd[1] == '\t') {
+				if fwd.has(1) && (fwd.b(1) == ' ' || fwd.b(1) == '\t') {
 					pnt.SI++
 					pnt.CI++
 				}
@@ -2194,76 +2217,24 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 
 			// YAML colon: ": ", ":\t", ":\n", ":" at end.
 			isFlowColon := false
-			if fwd[0] == ':' && len(fwd) > 1 && fwd[1] != ' ' && fwd[1] != '\t' &&
-				fwd[1] != '\n' && fwd[1] != '\r' {
-				// Walk back skipping whitespace and any line-comment regions
-				// (so e.g. `"foo" # c\n  :bar` recognizes the closing quote).
-				prevI := pnt.SI - 1
-				for prevI >= 0 {
-					pc := lex.Src[prevI]
-					if pc == ' ' || pc == '\t' || pc == '\n' || pc == '\r' {
-						prevI--
-						continue
-					}
-					// If on a line whose `#` is preceded by whitespace, that's
-					// a comment — jump past it and keep walking back.
-					lineStart := prevI
-					for lineStart > 0 && lex.Src[lineStart-1] != '\n' &&
-						lex.Src[lineStart-1] != '\r' {
-						lineStart--
-					}
-					// Track quoting while scanning: a `#` inside a quoted scalar
-					// is literal, not a comment start. Without this, the value in
-					// {"d":"a #b","e":1} swallows the rest of the line and the
-					// following key never lexes.
-					hashAt := -1
-					quote := byte(0)
-					for li := lineStart; li <= prevI; li++ {
-						qc := lex.Src[li]
-						if quote != 0 {
-							// Double quotes escape with backslash, single quotes
-							// by doubling the quote character.
-							if quote == '"' && qc == '\\' {
-								li++
-								continue
-							}
-							if qc == quote {
-								if quote == '\'' && li+1 <= prevI && lex.Src[li+1] == '\'' {
-									li++
-									continue
-								}
-								quote = 0
-							}
-							continue
-						}
-						if qc == '"' || qc == '\'' {
-							quote = qc
-							continue
-						}
-						if qc == '#' &&
-							(li == lineStart || lex.Src[li-1] == ' ' ||
-								lex.Src[li-1] == '\t') {
-							hashAt = li
-							break
-						}
-					}
-					if hashAt >= 0 {
-						prevI = hashAt - 1
-						continue
-					}
-					break
-				}
-				if prevI >= 0 && (lex.Src[prevI] == '"' || lex.Src[prevI] == '\'') {
-					isFlowColon = true
-				}
+			if fwd.b(0) == ':' && fwd.has(1) && fwd.b(1) != ' ' && fwd.b(1) != '\t' &&
+				fwd.b(1) != '\n' && fwd.b(1) != '\r' {
+				// JSON-compatible flow colon: only when preceded by a quoted
+				// string. Whitespace and line comments (`# ...` to the end of
+				// a line, a `#` inside a quoted scalar being literal) between
+				// are passed over, so e.g. `"foo" # c\n  :bar` recognizes the
+				// closing quote: the last byte before the colon that is
+				// neither, which the source keeps as the text goes by
+				// (yamlSource.quoteBefore), however far back it is.
+				isFlowColon = ys.quoteBefore(ys.pos())
 			}
-			if fwd[0] == ':' && (len(fwd) < 2 || fwd[1] == ' ' || fwd[1] == '\t' ||
-				fwd[1] == '\n' || fwd[1] == '\r' || isFlowColon) {
+			if fwd.b(0) == ':' && (!fwd.has(1) || fwd.b(1) == ' ' || fwd.b(1) == '\t' ||
+				fwd.b(1) == '\n' || fwd.b(1) == '\r' || isFlowColon) {
 				tkn := lex.Token("#CL", CL, 1, ": ")
 				pnt.SI++
-				if len(fwd) > 1 && (fwd[1] == ' ' || fwd[1] == '\t') {
+				if fwd.has(1) && (fwd.b(1) == ' ' || fwd.b(1) == '\t') {
 					pnt.CI += 2
-				} else if len(fwd) > 1 && (fwd[1] == '\n' || fwd[1] == '\r') {
+				} else if fwd.has(1) && (fwd.b(1) == '\n' || fwd.b(1) == '\r') {
 					// Don't consume newline.
 				} else {
 					pnt.CI++
@@ -2272,9 +2243,9 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 			}
 
 			// Newline handling — YAML indentation is significant.
-			if fwd[0] == '\n' || fwd[0] == '\r' {
+			if fwd.b(0) == '\n' || fwd.b(0) == '\r' {
 				// Check if we're inside a flow collection (incremental scan).
-				flowState.advance(lex.Src, pnt.SI)
+				flowState.advance(ys, ys.pos())
 				if flowState.depth > 0 {
 					// Inside flow collection — consume whitespace.
 					// Bump RI for each consumed newline so error positions stay accurate.
@@ -2285,24 +2256,24 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 					// bare \r leaves the column advancing rather than
 					// restarting there.
 					lastNL := -1
-					for pos < len(fwd) && (fwd[pos] == '\n' || fwd[pos] == '\r' ||
-						fwd[pos] == ' ' || fwd[pos] == '\t') {
-						if fwd[pos] == '\r' && pos+1 < len(fwd) && fwd[pos+1] == '\n' {
+					for fwd.has(pos) && (fwd.b(pos) == '\n' || fwd.b(pos) == '\r' ||
+						fwd.b(pos) == ' ' || fwd.b(pos) == '\t') {
+						if fwd.b(pos) == '\r' && fwd.has(pos+1) && fwd.b(pos+1) == '\n' {
 							lastNL = pos + 1
 							pos += 2
 							rows++
 							continue
 						}
-						if fwd[pos] == '\n' || fwd[pos] == '\r' {
+						if fwd.b(pos) == '\n' || fwd.b(pos) == '\r' {
 							rows++
-							if fwd[pos] == '\n' {
+							if fwd.b(pos) == '\n' {
 								lastNL = pos
 							}
 						}
 						pos++
 					}
-					if pos < len(fwd) && fwd[pos] == '#' {
-						for pos < len(fwd) && fwd[pos] != '\n' && fwd[pos] != '\r' {
+					if fwd.has(pos) && fwd.b(pos) == '#' {
+						for fwd.has(pos) && fwd.b(pos) != '\n' && fwd.b(pos) != '\r' {
 							pos++
 						}
 					}
@@ -2323,9 +2294,9 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 					//
 					// Counted in characters, like every other column here.
 					if lastNL >= 0 {
-						pnt.CI = utf8.RuneCountInString(fwd[lastNL:pos])
+						pnt.CI = utf8.RuneCountInString(fwd.sub(lastNL, pos))
 					} else {
-						pnt.CI += utf8.RuneCountInString(fwd[:pos])
+						pnt.CI += utf8.RuneCountInString(fwd.sub(0, pos))
 					}
 					continue
 				}
@@ -2334,55 +2305,55 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 				pos := 0
 				spaces := 0
 				rows := 0
-				for pos < len(fwd) {
-					if fwd[pos] == '\r' && pos+1 < len(fwd) && fwd[pos+1] == '\n' {
+				for fwd.has(pos) {
+					if fwd.b(pos) == '\r' && fwd.has(pos+1) && fwd.b(pos+1) == '\n' {
 						pos += 2
 						rows++
-					} else if fwd[pos] == '\n' {
+					} else if fwd.b(pos) == '\n' {
 						pos++
 						rows++
 					} else {
 						break
 					}
 					spaces = 0
-					for pos < len(fwd) && fwd[pos] == ' ' {
+					for fwd.has(pos) && fwd.b(pos) == ' ' {
 						pos++
 						spaces++
 					}
 					// Comment-only line — skip.
-					if pos < len(fwd) && fwd[pos] == '#' {
-						for pos < len(fwd) && fwd[pos] != '\n' && fwd[pos] != '\r' {
+					if fwd.has(pos) && fwd.b(pos) == '#' {
+						for fwd.has(pos) && fwd.b(pos) != '\n' && fwd.b(pos) != '\r' {
 							pos++
 						}
 						continue
 					}
 					// Tab-only line — skip.
-					if pos < len(fwd) && fwd[pos] == '\t' {
+					if fwd.has(pos) && fwd.b(pos) == '\t' {
 						tp := pos
-						for tp < len(fwd) && (fwd[tp] == ' ' || fwd[tp] == '\t') {
+						for fwd.has(tp) && (fwd.b(tp) == ' ' || fwd.b(tp) == '\t') {
 							tp++
 						}
-						if tp >= len(fwd) || fwd[tp] == '\n' || fwd[tp] == '\r' {
+						if !fwd.has(tp) || fwd.b(tp) == '\n' || fwd.b(tp) == '\r' {
 							pos = tp
 							continue
 						}
 					}
 					// Anchor-only line.
-					if pos < len(fwd) && fwd[pos] == '&' {
+					if fwd.has(pos) && fwd.b(pos) == '&' {
 						ae := pos + 1
-						for ae < len(fwd) && fwd[ae] != ' ' && fwd[ae] != '\t' &&
-							fwd[ae] != '\n' && fwd[ae] != '\r' {
+						for fwd.has(ae) && fwd.b(ae) != ' ' && fwd.b(ae) != '\t' &&
+							fwd.b(ae) != '\n' && fwd.b(ae) != '\r' {
 							ae++
 						}
 						afterAnchor := ae
-						for afterAnchor < len(fwd) && (fwd[afterAnchor] == ' ' || fwd[afterAnchor] == '\t') {
+						for fwd.has(afterAnchor) && (fwd.b(afterAnchor) == ' ' || fwd.b(afterAnchor) == '\t') {
 							afterAnchor++
 						}
-						if afterAnchor >= len(fwd) || fwd[afterAnchor] == '\n' ||
-							fwd[afterAnchor] == '\r' || fwd[afterAnchor] == '#' {
-							pendingAnchors = append(pendingAnchors, anchorInfo{name: fwd[pos+1 : ae], inline: false})
-							declaredAnchors[fwd[pos+1:ae]] = true
-							for afterAnchor < len(fwd) && fwd[afterAnchor] != '\n' && fwd[afterAnchor] != '\r' {
+						if !fwd.has(afterAnchor) || fwd.b(afterAnchor) == '\n' ||
+							fwd.b(afterAnchor) == '\r' || fwd.b(afterAnchor) == '#' {
+							pendingAnchors = append(pendingAnchors, anchorInfo{name: fwd.sub(pos+1, ae), inline: false})
+							ys.declare(declaredAnchors, fwd.sub(pos+1, ae))
+							for fwd.has(afterAnchor) && fwd.b(afterAnchor) != '\n' && fwd.b(afterAnchor) != '\r' {
 								afterAnchor++
 							}
 							pos = afterAnchor
@@ -2392,7 +2363,7 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 				}
 
 				// Consumed everything — emit ZZ.
-				if pos >= len(fwd) {
+				if !fwd.has(pos) {
 					pnt.SI += pos
 					pnt.RI += rows
 					pnt.CI = spaces + 1
@@ -2402,7 +2373,7 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 
 				// Skip #IN when next line is a doc-frame marker (--- / ...)
 				// or directive (%) — let the next call emit #DS / #DE / #DR.
-				if spaces == 0 && (isDocMarker(fwd, pos) || fwd[pos] == '%') {
+				if spaces == 0 && (isDocMarker(fwd, pos) || fwd.b(pos) == '%') {
 					pnt.SI += pos
 					pnt.RI += rows
 					pnt.CI = 1
@@ -2415,8 +2386,8 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 				// the root block mapping, so it needs its #IN like a plain key
 				// does (tabnas/yaml#86).
 				if spaces == 0 &&
-					(fwd[pos] == '{' || fwd[pos] == '[' ||
-						((fwd[pos] == '"' || fwd[pos] == '\'') && !quotedKeyAt(fwd, pos))) {
+					(fwd.b(pos) == '{' || fwd.b(pos) == '[' ||
+						((fwd.b(pos) == '"' || fwd.b(pos) == '\'') && !quotedKeyAt(fwd, pos))) {
 					pnt.SI += pos
 					pnt.RI += rows
 					pnt.CI = 1
@@ -2424,7 +2395,7 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 				}
 
 				// Emit #IN with indent level.
-				tkn := lex.Token("#IN", IN, spaces, fwd[:pos])
+				tkn := lex.Token("#IN", IN, spaces, fwd.sub(0, pos))
 				pnt.SI += pos
 				pnt.RI += rows
 				pnt.CI = spaces + 1
@@ -2494,7 +2465,7 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 
 	// ===== Grammar rules =====
 	configureGrammarRules(j, IN, EL, KEY, CL, ZZ, CA, CS, CB, TX, ST, VL, NR, QM,
-		anchors, &pendingAnchors, literalMergeKey)
+		anchors, &pendingAnchors, literalMergeKey, ys)
 
 	// ===== Stream rule: top-level YAML document collector =====
 	// Replaces `val` as the parser's start rule. Consumes #DS / #DE / #DR
@@ -2644,46 +2615,46 @@ func isWordByte(b byte) bool {
 }
 
 // handleBlockScalar processes | and > block scalar indicators.
-func handleBlockScalar(lex *tabnas.Lex, pnt *tabnas.Point, src, fwd string, ch byte) *tabnas.LexCheckResult {
+func handleBlockScalar(lex *tabnas.Lex, pnt *tabnas.Point, ys *yamlSource, fwd fwdText, ch byte) *tabnas.LexCheckResult {
 	fold := ch == '>'
 	chomp := "clip"
 	explicitIndent := 0
 	idx := 1
 
 	// Parse chomping and indent indicators.
-	for pi := 0; pi < 2 && idx < len(fwd); pi++ {
-		if fwd[idx] == '+' {
+	for pi := 0; pi < 2 && fwd.has(idx); pi++ {
+		if fwd.b(idx) == '+' {
 			chomp = "keep"
 			idx++
-		} else if fwd[idx] == '-' {
+		} else if fwd.b(idx) == '-' {
 			chomp = "strip"
 			idx++
-		} else if fwd[idx] >= '1' && fwd[idx] <= '9' {
-			explicitIndent = int(fwd[idx] - '0')
+		} else if fwd.b(idx) >= '1' && fwd.b(idx) <= '9' {
+			explicitIndent = int(fwd.b(idx) - '0')
 			idx++
 		}
 	}
 
 	// Skip trailing spaces and comments.
-	for idx < len(fwd) && fwd[idx] == ' ' {
+	for fwd.has(idx) && fwd.b(idx) == ' ' {
 		idx++
 	}
-	if idx < len(fwd) && fwd[idx] == '#' {
-		for idx < len(fwd) && fwd[idx] != '\n' && fwd[idx] != '\r' {
+	if fwd.has(idx) && fwd.b(idx) == '#' {
+		for fwd.has(idx) && fwd.b(idx) != '\n' && fwd.b(idx) != '\r' {
 			idx++
 		}
 	}
 
 	// Must be followed by newline or eof.
-	if idx < len(fwd) && fwd[idx] != '\n' && fwd[idx] != '\r' {
+	if fwd.has(idx) && fwd.b(idx) != '\n' && fwd.b(idx) != '\r' {
 		return nil // Not a block scalar.
 	}
 
 	// Skip the indicator line's newline.
-	if idx < len(fwd) && fwd[idx] == '\r' {
+	if fwd.has(idx) && fwd.b(idx) == '\r' {
 		idx++
 	}
-	if idx < len(fwd) && fwd[idx] == '\n' {
+	if fwd.has(idx) && fwd.b(idx) == '\n' {
 		idx++
 	}
 
@@ -2692,18 +2663,18 @@ func handleBlockScalar(lex *tabnas.Lex, pnt *tabnas.Point, src, fwd string, ch b
 	if explicitIndent == 0 {
 		// Auto-detect from first content line.
 		tempIdx := idx
-		for tempIdx < len(fwd) {
+		for fwd.has(tempIdx) {
 			lineSpaces := 0
-			for tempIdx+lineSpaces < len(fwd) && fwd[tempIdx+lineSpaces] == ' ' {
+			for fwd.has(tempIdx+lineSpaces) && fwd.b(tempIdx+lineSpaces) == ' ' {
 				lineSpaces++
 			}
 			afterSpaces := tempIdx + lineSpaces
-			if afterSpaces >= len(fwd) || fwd[afterSpaces] == '\n' || fwd[afterSpaces] == '\r' {
+			if !fwd.has(afterSpaces) || fwd.b(afterSpaces) == '\n' || fwd.b(afterSpaces) == '\r' {
 				tempIdx = afterSpaces
-				if tempIdx < len(fwd) && fwd[tempIdx] == '\r' {
+				if fwd.has(tempIdx) && fwd.b(tempIdx) == '\r' {
 					tempIdx++
 				}
-				if tempIdx < len(fwd) && fwd[tempIdx] == '\n' {
+				if fwd.has(tempIdx) && fwd.b(tempIdx) == '\n' {
 					tempIdx++
 				}
 				continue
@@ -2718,22 +2689,20 @@ func handleBlockScalar(lex *tabnas.Lex, pnt *tabnas.Point, src, fwd string, ch b
 	isDocStart := false
 	isDocRoot := false
 	// Walk back from the indicator to the start of its own line. Start at
-	// pnt.SI, not pnt.SI - 1: when the indicator IS the first character of
-	// its line, SI - 1 is the preceding newline and the scan would land on
+	// the indicator, not the one before it: when the indicator IS the first
+	// character of its line, the one before is the preceding newline and the scan would land on
 	// the PREVIOUS line, mis-reading both containingIndent and the --- check.
-	li := pnt.SI
-	for li > 0 && src[li-1] != '\n' && src[li-1] != '\r' {
-		li--
-	}
-	if li == 0 && strings.HasPrefix(src, bomText) {
+	here := ys.pos()
+	li := ys.lineStart(here)
+	if li == 0 && ys.bomAtStart() {
 		li = len(bomText)
 	}
 	lineStart := li
-	for li < pnt.SI && src[li] == ' ' {
+	for li < here && ys.b(li) == ' ' {
 		containingIndent++
 		li++
 	}
-	if lineStart+2 < len(src) && src[lineStart] == '-' && src[lineStart+1] == '-' && src[lineStart+2] == '-' {
+	if ys.has(lineStart+2) && ys.b(lineStart) == '-' && ys.b(lineStart+1) == '-' && ys.b(lineStart+2) == '-' {
 		isDocStart = true
 	}
 	// The indicator is the first thing on a column-0 line, so nothing can
@@ -2741,13 +2710,13 @@ func handleBlockScalar(lex *tabnas.Lex, pnt *tabnas.Point, src, fwd string, ch b
 	// node parent indent -1, so content at column 0 is "more indented" and the
 	// block is not empty. (yaml-test-suite M7A3: a bare `|` document whose
 	// content starts at column 0.)
-	isDocRoot = containingIndent == 0 && li == pnt.SI
+	isDocRoot = containingIndent == 0 && li == here
 
 	// Apply explicit indent.
 	if explicitIndent > 0 {
 		hasColonOnLine := false
-		for ci := lineStart + containingIndent; ci < pnt.SI; ci++ {
-			if src[ci] == ':' && ci+1 < len(src) && (src[ci+1] == ' ' || src[ci+1] == '\t') {
+		for ci := lineStart + containingIndent; ci < here; ci++ {
+			if ys.b(ci) == ':' && ys.has(ci+1) && (ys.b(ci+1) == ' ' || ys.b(ci+1) == '\t') {
 				hasColonOnLine = true
 				break
 			}
@@ -2755,11 +2724,11 @@ func handleBlockScalar(lex *tabnas.Lex, pnt *tabnas.Point, src, fwd string, ch b
 		keyCol := containingIndent
 		if hasColonOnLine {
 			scanI := lineStart + containingIndent
-			for scanI < pnt.SI && src[scanI] == '-' &&
-				scanI+1 < len(src) && (src[scanI+1] == ' ' || src[scanI+1] == '\t') {
+			for scanI < here && ys.b(scanI) == '-' &&
+				ys.has(scanI+1) && (ys.b(scanI+1) == ' ' || ys.b(scanI+1) == '\t') {
 				keyCol += 2
 				scanI += 2
-				for scanI < pnt.SI && src[scanI] == ' ' {
+				for scanI < here && ys.b(scanI) == ' ' {
 					keyCol++
 					scanI++
 				}
@@ -2769,23 +2738,23 @@ func handleBlockScalar(lex *tabnas.Lex, pnt *tabnas.Point, src, fwd string, ch b
 			parentIndent := 0
 			searchI := lineStart - 1
 			if searchI > 0 {
-				if src[searchI] == '\n' {
+				if ys.b(searchI) == '\n' {
 					searchI--
 				}
-				if searchI > 0 && src[searchI] == '\r' {
+				if searchI > 0 && ys.b(searchI) == '\r' {
 					searchI--
 				}
 				prevLineEnd := searchI + 1
-				for searchI > 0 && src[searchI-1] != '\n' && src[searchI-1] != '\r' {
+				for searchI > 0 && ys.b(searchI-1) != '\n' && ys.b(searchI-1) != '\r' {
 					searchI--
 				}
 				prevLineStart := searchI
 				for ci := prevLineStart; ci < prevLineEnd; ci++ {
-					if src[ci] == ':' && (ci+1 >= prevLineEnd || src[ci+1] == ' ' ||
-						src[ci+1] == '\t' || src[ci+1] == '\n' || src[ci+1] == '\r') {
+					if ys.b(ci) == ':' && (ci+1 >= prevLineEnd || ys.b(ci+1) == ' ' ||
+						ys.b(ci+1) == '\t' || ys.b(ci+1) == '\n' || ys.b(ci+1) == '\r') {
 						parentIndent = 0
 						pi := prevLineStart
-						for pi < prevLineEnd && src[pi] == ' ' {
+						for pi < prevLineEnd && ys.b(pi) == ' ' {
 							parentIndent++
 							pi++
 						}
@@ -2798,19 +2767,19 @@ func handleBlockScalar(lex *tabnas.Lex, pnt *tabnas.Point, src, fwd string, ch b
 		}
 	}
 
-	if blockIndent <= containingIndent && !isDocStart && !isDocRoot && idx < len(fwd) {
+	if blockIndent <= containingIndent && !isDocStart && !isDocRoot && fwd.has(idx) {
 		// Content is not indented enough — empty block scalar.
 		var val string
 		if chomp == "keep" {
 			blankCount := 0
 			bi := idx
-			for bi < len(fwd) {
-				if fwd[bi] == '\n' {
+			for fwd.has(bi) {
+				if fwd.b(bi) == '\n' {
 					blankCount++
 					bi++
-				} else if fwd[bi] == '\r' {
+				} else if fwd.b(bi) == '\r' {
 					bi++
-					if bi < len(fwd) && fwd[bi] == '\n' {
+					if fwd.has(bi) && fwd.b(bi) == '\n' {
 						bi++
 					}
 					blankCount++
@@ -2827,7 +2796,7 @@ func handleBlockScalar(lex *tabnas.Lex, pnt *tabnas.Point, src, fwd string, ch b
 		} else {
 			val = ""
 		}
-		tkn := lex.Token("#TX", tabnas.TinTX, val, fwd[:idx])
+		tkn := lex.Token("#TX", tabnas.TinTX, val, fwd.sub(0, idx))
 		pnt.SI += idx
 		pnt.RI++
 		pnt.CI = 0
@@ -2839,24 +2808,24 @@ func handleBlockScalar(lex *tabnas.Lex, pnt *tabnas.Point, src, fwd string, ch b
 	pos := idx
 	rows := 1
 	lastNewlinePos := idx
-	for pos < len(fwd) {
+	for fwd.has(pos) {
 		lineIndent := 0
-		for pos+lineIndent < len(fwd) && fwd[pos+lineIndent] == ' ' {
+		for fwd.has(pos+lineIndent) && fwd.b(pos+lineIndent) == ' ' {
 			lineIndent++
 		}
 		afterSpaces := pos + lineIndent
-		if afterSpaces >= len(fwd) || fwd[afterSpaces] == '\n' || fwd[afterSpaces] == '\r' {
+		if !fwd.has(afterSpaces) || fwd.b(afterSpaces) == '\n' || fwd.b(afterSpaces) == '\r' {
 			if lineIndent > blockIndent {
-				lines = append(lines, fwd[pos+blockIndent:afterSpaces])
+				lines = append(lines, fwd.sub(pos+blockIndent, afterSpaces))
 			} else {
 				lines = append(lines, "")
 			}
 			lastNewlinePos = afterSpaces
 			pos = afterSpaces
-			if pos < len(fwd) && fwd[pos] == '\r' {
+			if fwd.has(pos) && fwd.b(pos) == '\r' {
 				pos++
 			}
-			if pos < len(fwd) && fwd[pos] == '\n' {
+			if fwd.has(pos) && fwd.b(pos) == '\n' {
 				pos++
 			}
 			rows++
@@ -2872,16 +2841,16 @@ func handleBlockScalar(lex *tabnas.Lex, pnt *tabnas.Point, src, fwd string, ch b
 		}
 		lineStartPos := pos + blockIndent
 		lineEnd := lineStartPos
-		for lineEnd < len(fwd) && fwd[lineEnd] != '\n' && fwd[lineEnd] != '\r' {
+		for fwd.has(lineEnd) && fwd.b(lineEnd) != '\n' && fwd.b(lineEnd) != '\r' {
 			lineEnd++
 		}
-		lines = append(lines, fwd[lineStartPos:lineEnd])
+		lines = append(lines, fwd.sub(lineStartPos, lineEnd))
 		lastNewlinePos = lineEnd
 		pos = lineEnd
-		if pos < len(fwd) && fwd[pos] == '\r' {
+		if fwd.has(pos) && fwd.b(pos) == '\r' {
 			pos++
 		}
-		if pos < len(fwd) && fwd[pos] == '\n' {
+		if fwd.has(pos) && fwd.b(pos) == '\n' {
 			pos++
 		}
 		rows++
@@ -2910,10 +2879,10 @@ func handleBlockScalar(lex *tabnas.Lex, pnt *tabnas.Point, src, fwd string, ch b
 	// Don't consume final newline if more content follows.
 	endPos := pos
 	endRows := rows
-	if pos < len(fwd) && pos > lastNewlinePos {
+	if fwd.has(pos) && pos > lastNewlinePos {
 		ni := pos
 		nextLineIndent := 0
-		for ni < len(fwd) && fwd[ni] == ' ' {
+		for fwd.has(ni) && fwd.b(ni) == ' ' {
 			nextLineIndent++
 			ni++
 		}
@@ -2926,7 +2895,7 @@ func handleBlockScalar(lex *tabnas.Lex, pnt *tabnas.Point, src, fwd string, ch b
 		}
 	}
 
-	tkn := lex.Token("#TX", tabnas.TinTX, val, fwd[:endPos])
+	tkn := lex.Token("#TX", tabnas.TinTX, val, fwd.sub(0, endPos))
 	pnt.SI += endPos
 	pnt.RI += endRows
 	pnt.CI = 0
@@ -2993,51 +2962,51 @@ func foldLines(lines []string) string {
 }
 
 // handleTagInTextCheck processes !!type tags encountered in the text check callback.
-func handleTagInTextCheck(lex *tabnas.Lex, pnt *tabnas.Point, fwd string, tagHandles map[string]string) *tabnas.LexCheckResult {
+func handleTagInTextCheck(lex *tabnas.Lex, pnt *tabnas.Point, fwd fwdText, tagHandles map[string]string) *tabnas.LexCheckResult {
 	tagEnd := 2
-	for tagEnd < len(fwd) && fwd[tagEnd] != ' ' && fwd[tagEnd] != '\n' && fwd[tagEnd] != '\r' {
+	for fwd.has(tagEnd) && fwd.b(tagEnd) != ' ' && fwd.b(tagEnd) != '\n' && fwd.b(tagEnd) != '\r' {
 		tagEnd++
 	}
-	tag := fwd[2:tagEnd]
+	tag := fwd.sub(2, tagEnd)
 	if tag == "seq" || tag == "map" {
 		return nil // Let yamlMatcher handle.
 	}
 	valStart := tagEnd
-	if valStart < len(fwd) && fwd[valStart] == ' ' {
+	if fwd.has(valStart) && fwd.b(valStart) == ' ' {
 		valStart++
 	}
 	rawVal := ""
 	valEnd := valStart
-	if valStart < len(fwd) && (fwd[valStart] == '"' || fwd[valStart] == '\'') {
-		q := fwd[valStart]
+	if fwd.has(valStart) && (fwd.b(valStart) == '"' || fwd.b(valStart) == '\'') {
+		q := fwd.b(valStart)
 		valEnd = valStart + 1
-		for valEnd < len(fwd) && fwd[valEnd] != q {
-			if fwd[valEnd] == '\\' && q == '"' {
+		for fwd.has(valEnd) && fwd.b(valEnd) != q {
+			if fwd.b(valEnd) == '\\' && q == '"' {
 				valEnd++
 			}
 			valEnd++
 		}
-		if valEnd < len(fwd) && fwd[valEnd] == q {
+		if fwd.has(valEnd) && fwd.b(valEnd) == q {
 			valEnd++
 		}
-		rawVal = jsSubstringLessOneUnit(fwd, valStart+1, valEnd)
+		rawVal = jsSubstringLessOneUnit(fwd.upTo(valEnd+utf8.UTFMax), valStart+1, valEnd)
 	} else {
 		// A `#` straight after the tag's space starts a comment.
-		for valEnd < len(fwd) && fwd[valEnd] != '\n' && fwd[valEnd] != '\r' {
-			if valEnd == valStart && fwd[valEnd] == '#' && valStart > 0 &&
-				(fwd[valStart-1] == ' ' || fwd[valStart-1] == '\t') {
+		for fwd.has(valEnd) && fwd.b(valEnd) != '\n' && fwd.b(valEnd) != '\r' {
+			if valEnd == valStart && fwd.b(valEnd) == '#' && valStart > 0 &&
+				(fwd.b(valStart-1) == ' ' || fwd.b(valStart-1) == '\t') {
 				break
 			}
-			if fwd[valEnd] == ':' && (valEnd+1 >= len(fwd) || fwd[valEnd+1] == ' ' ||
-				fwd[valEnd+1] == '\n' || fwd[valEnd+1] == '\r') {
+			if fwd.b(valEnd) == ':' && (!fwd.has(valEnd+1) || fwd.b(valEnd+1) == ' ' ||
+				fwd.b(valEnd+1) == '\n' || fwd.b(valEnd+1) == '\r') {
 				break
 			}
-			if fwd[valEnd] == ' ' && valEnd+1 < len(fwd) && fwd[valEnd+1] == '#' {
+			if fwd.b(valEnd) == ' ' && fwd.has(valEnd+1) && fwd.b(valEnd+1) == '#' {
 				break
 			}
 			valEnd++
 		}
-		rawVal = trimRight(fwd[valStart:valEnd])
+		rawVal = trimRight(fwd.sub(valStart, valEnd))
 	}
 
 	result := applyTagConversion(tag, rawVal, tagHandles)
@@ -3052,39 +3021,37 @@ func handleTagInTextCheck(lex *tabnas.Lex, pnt *tabnas.Point, fwd string, tagHan
 		tknTin = tabnas.TinVL
 	}
 
-	tkn := lex.Token(tinToName(tknTin), tknTin, result, fwd[:valEnd])
+	tkn := lex.Token(tinToName(tknTin), tknTin, result, fwd.sub(0, valEnd))
 	advanceCol(pnt, fwd, valEnd)
 	return &tabnas.LexCheckResult{Done: true, Token: tkn}
 }
 
 // handlePlainScalar processes YAML plain scalar values with multiline continuation.
-func handlePlainScalar(lex *tabnas.Lex, pnt *tabnas.Point, src, fwd string, flowState *flowScanState) *tabnas.LexCheckResult {
+func handlePlainScalar(lex *tabnas.Lex, pnt *tabnas.Point, ys *yamlSource, fwd fwdText, flowState *flowScanState) *tabnas.LexCheckResult {
 	// Detect flow context (incremental scan, see flowScanState).
-	flowState.advance(src, pnt.SI)
+	here := ys.pos()
+	flowState.advance(ys, here)
 	inFlowCtx := flowState.depth > 0
 
 	// Find current line indent.
-	lineStartPos := pnt.SI
-	for lineStartPos > 0 && src[lineStartPos-1] != '\n' && src[lineStartPos-1] != '\r' {
-		lineStartPos--
-	}
-	if lineStartPos == 0 && strings.HasPrefix(src, bomText) {
+	lineStartPos := ys.lineStart(here)
+	if lineStartPos == 0 && ys.bomAtStart() {
 		lineStartPos = len(bomText)
 	}
 	currentLineIndent := 0
 	ci := lineStartPos
-	for ci < pnt.SI && src[ci] == ' ' {
+	for ci < here && ys.b(ci) == ' ' {
 		currentLineIndent++
 		ci++
 	}
 
 	// Check if text is preceded by ": " on the same line.
 	isMapValue := false
-	ci = pnt.SI - 1
-	for ci >= lineStartPos && (src[ci] == ' ' || src[ci] == '\t') {
+	ci = here - 1
+	for ci >= lineStartPos && (ys.b(ci) == ' ' || ys.b(ci) == '\t') {
 		ci--
 	}
-	if ci >= lineStartPos && src[ci] == ':' {
+	if ci >= lineStartPos && ys.b(ci) == ':' {
 		isMapValue = true
 	}
 
@@ -3101,16 +3068,16 @@ func handlePlainScalar(lex *tabnas.Lex, pnt *tabnas.Point, src, fwd string, flow
 
 	scanLine := func() string {
 		start := i
-		for i < len(fwd) {
-			c := fwd[i]
+		for fwd.has(i) {
+			c := fwd.b(i)
 			if c == '\n' || c == '\r' {
 				break
 			}
-			if c == ':' && (i+1 >= len(fwd) || fwd[i+1] == ' ' || fwd[i+1] == '\t' ||
-				fwd[i+1] == '\n' || fwd[i+1] == '\r') {
+			if c == ':' && (!fwd.has(i+1) || fwd.b(i+1) == ' ' || fwd.b(i+1) == '\t' ||
+				fwd.b(i+1) == '\n' || fwd.b(i+1) == '\r') {
 				break
 			}
-			if (c == ' ' || c == '\t') && i+1 < len(fwd) && fwd[i+1] == '#' {
+			if (c == ' ' || c == '\t') && fwd.has(i+1) && fwd.b(i+1) == '#' {
 				break
 			}
 			if inFlowCtx && (c == ']' || c == '}') {
@@ -3121,28 +3088,31 @@ func handlePlainScalar(lex *tabnas.Lex, pnt *tabnas.Point, src, fwd string, flow
 			}
 			i++
 		}
-		return trimRight(fwd[start:i])
+		return trimRight(fwd.sub(start, i))
 	}
 
 	text = scanLine()
 	totalConsumed = i
+	// The lines the scalar goes on over are added to a byte slice: a string
+	// added to a line at a time costs a copy of all it holds for each one.
+	var folded []byte
 
 	// Check for continuation lines (multiline plain scalars).
-	for i < len(fwd) && (fwd[i] == '\n' || fwd[i] == '\r') {
+	for fwd.has(i) && (fwd.b(i) == '\n' || fwd.b(i) == '\r') {
 		nlPos := i
 		blankLines := 0
-		for i < len(fwd) && (fwd[i] == '\n' || fwd[i] == '\r') {
-			if fwd[i] == '\r' {
+		for fwd.has(i) && (fwd.b(i) == '\n' || fwd.b(i) == '\r') {
+			if fwd.b(i) == '\r' {
 				i++
 			}
-			if i < len(fwd) && fwd[i] == '\n' {
+			if fwd.has(i) && fwd.b(i) == '\n' {
 				i++
 			}
 			li := 0
-			for i+li < len(fwd) && (fwd[i+li] == ' ' || fwd[i+li] == '\t') {
+			for fwd.has(i+li) && (fwd.b(i+li) == ' ' || fwd.b(i+li) == '\t') {
 				li++
 			}
-			if i+li >= len(fwd) || fwd[i+li] == '\n' || fwd[i+li] == '\r' {
+			if !fwd.has(i+li) || fwd.b(i+li) == '\n' || fwd.b(i+li) == '\r' {
 				blankLines++
 				i += li
 				continue
@@ -3150,19 +3120,19 @@ func handlePlainScalar(lex *tabnas.Lex, pnt *tabnas.Point, src, fwd string, flow
 			break
 		}
 		lineIndent := 0
-		for i < len(fwd) && (fwd[i] == ' ' || fwd[i] == '\t') {
+		for fwd.has(i) && (fwd.b(i) == ' ' || fwd.b(i) == '\t') {
 			lineIndent++
 			i++
 		}
 
-		isNextDocMarker := lineIndent == 0 && i < len(fwd) && isDocMarker(fwd, i)
+		isNextDocMarker := lineIndent == 0 && fwd.has(i) && isDocMarker(fwd, i)
 		isSeqMarker := false
-		if i < len(fwd) && fwd[i] == '-' && (i+1 >= len(fwd) || fwd[i+1] == ' ' ||
-			fwd[i+1] == '\t' || fwd[i+1] == '\n' || fwd[i+1] == '\r') {
+		if fwd.has(i) && fwd.b(i) == '-' && (!fwd.has(i+1) || fwd.b(i+1) == ' ' ||
+			fwd.b(i+1) == '\t' || fwd.b(i+1) == '\n' || fwd.b(i+1) == '\r') {
 			seqIndent := -1
-			si := pnt.SI - 1
+			si := here - 1
 			for si >= lineStartPos {
-				if src[si] == '-' && (si+1 < len(src) && (src[si+1] == ' ' || src[si+1] == '\t')) {
+				if ys.b(si) == '-' && (ys.has(si+1) && (ys.b(si+1) == ' ' || ys.b(si+1) == '\t')) {
 					seqIndent = si - lineStartPos
 					break
 				}
@@ -3174,12 +3144,12 @@ func handlePlainScalar(lex *tabnas.Lex, pnt *tabnas.Point, src, fwd string, flow
 
 		canContinue := false
 		if inFlowCtx {
-			canContinue = i < len(fwd) && fwd[i] != '\n' && fwd[i] != '\r' &&
-				fwd[i] != '#' && fwd[i] != '{' && fwd[i] != '}' &&
-				fwd[i] != '[' && fwd[i] != ']'
+			canContinue = fwd.has(i) && fwd.b(i) != '\n' && fwd.b(i) != '\r' &&
+				fwd.b(i) != '#' && fwd.b(i) != '{' && fwd.b(i) != '}' &&
+				fwd.b(i) != '[' && fwd.b(i) != ']'
 		} else {
-			canContinue = lineIndent >= minContinuationIndent && i < len(fwd) &&
-				fwd[i] != '\n' && fwd[i] != '\r' && fwd[i] != '#' &&
+			canContinue = lineIndent >= minContinuationIndent && fwd.has(i) &&
+				fwd.b(i) != '\n' && fwd.b(i) != '\r' && fwd.b(i) != '#' &&
 				!isNextDocMarker && !isSeqMarker
 		}
 
@@ -3187,13 +3157,13 @@ func handlePlainScalar(lex *tabnas.Lex, pnt *tabnas.Point, src, fwd string, flow
 			// Check if continuation line is a key-value pair.
 			isKV := false
 			peekJ := i
-			for peekJ < len(fwd) && fwd[peekJ] != '\n' && fwd[peekJ] != '\r' {
-				if fwd[peekJ] == ':' && (peekJ+1 >= len(fwd) || fwd[peekJ+1] == ' ' ||
-					fwd[peekJ+1] == '\t' || fwd[peekJ+1] == '\n' || fwd[peekJ+1] == '\r') {
+			for fwd.has(peekJ) && fwd.b(peekJ) != '\n' && fwd.b(peekJ) != '\r' {
+				if fwd.b(peekJ) == ':' && (!fwd.has(peekJ+1) || fwd.b(peekJ+1) == ' ' ||
+					fwd.b(peekJ+1) == '\t' || fwd.b(peekJ+1) == '\n' || fwd.b(peekJ+1) == '\r') {
 					isKV = true
 					break
 				}
-				if fwd[peekJ] == '}' || fwd[peekJ] == ']' || fwd[peekJ] == ',' {
+				if fwd.b(peekJ) == '}' || fwd.b(peekJ) == ']' || fwd.b(peekJ) == ',' {
 					break
 				}
 				peekJ++
@@ -3201,14 +3171,17 @@ func handlePlainScalar(lex *tabnas.Lex, pnt *tabnas.Point, src, fwd string, flow
 			if !isKV || inFlowCtx {
 				contLine := scanLine()
 				if len(contLine) > 0 {
+					if folded == nil {
+						folded = append(folded, text...)
+					}
 					if blankLines > 0 {
 						for b := 0; b < blankLines; b++ {
-							text += "\n"
+							folded = append(folded, '\n')
 						}
 					} else {
-						text += " "
+						folded = append(folded, ' ')
 					}
-					text += contLine
+					folded = append(folded, contLine...)
 					totalConsumed = i
 					rows++
 					continue
@@ -3219,6 +3192,9 @@ func handlePlainScalar(lex *tabnas.Lex, pnt *tabnas.Point, src, fwd string, flow
 		break
 	}
 
+	if folded != nil {
+		text = string(folded)
+	}
 	text = trimRight(text)
 	if len(text) == 0 {
 		return nil
@@ -3230,7 +3206,7 @@ func handlePlainScalar(lex *tabnas.Lex, pnt *tabnas.Point, src, fwd string, flow
 		// Correct today by accident of the keyword set — `true`, `null`,
 		// `~` and the rest are ASCII — and written in the unit the column
 		// actually means, so it stays correct if that ever changes.
-		advanceCol(pnt, text, len(text))
+		advanceColText(pnt, text)
 		return &tabnas.LexCheckResult{Done: true, Token: tkn}
 	}
 
@@ -3241,7 +3217,7 @@ func handlePlainScalar(lex *tabnas.Lex, pnt *tabnas.Point, src, fwd string, flow
 		// ASCII, so bytes and characters coincide — and written in the
 		// unit the column actually means, so it stays correct if that
 		// ever changes.
-		advanceCol(pnt, text, len(text))
+		advanceColText(pnt, text)
 		return &tabnas.LexCheckResult{Done: true, Token: tkn}
 	}
 
@@ -3259,41 +3235,41 @@ func handlePlainScalar(lex *tabnas.Lex, pnt *tabnas.Point, src, fwd string, flow
 	// the same unit, which is the parity claim. Making them exact is a
 	// separate question, and one the TypeScript comment has been asking
 	// for longer.
-	tkn := lex.Token("#TX", tabnas.TinTX, text, fwd[:totalConsumed])
+	tkn := lex.Token("#TX", tabnas.TinTX, text, fwd.sub(0, totalConsumed))
 	pnt.RI += rows
 	advanceCol(pnt, fwd, totalConsumed)
 	return &tabnas.LexCheckResult{Done: true, Token: tkn}
 }
 
 // handleTypeTag processes !!type tags (!!str, !!int, !!float, etc.).
-func handleTypeTag(lex *tabnas.Lex, pnt *tabnas.Point, fwd string,
+func handleTypeTag(lex *tabnas.Lex, pnt *tabnas.Point, ys *yamlSource, fwd fwdText,
 	tagHandles map[string]string, pendingAnchors *[]anchorInfo, declaredAnchors map[string]bool,
 	anchors map[string]any, TX, NR, VL, ST tabnas.Tin) *tabnas.Token {
 
 	tagEnd := 2
-	for tagEnd < len(fwd) && fwd[tagEnd] != ' ' && fwd[tagEnd] != '\n' &&
-		fwd[tagEnd] != '\r' && fwd[tagEnd] != ',' &&
-		fwd[tagEnd] != '}' && fwd[tagEnd] != ']' && fwd[tagEnd] != ':' {
+	for fwd.has(tagEnd) && fwd.b(tagEnd) != ' ' && fwd.b(tagEnd) != '\n' &&
+		fwd.b(tagEnd) != '\r' && fwd.b(tagEnd) != ',' &&
+		fwd.b(tagEnd) != '}' && fwd.b(tagEnd) != ']' && fwd.b(tagEnd) != ':' {
 		tagEnd++
 	}
-	tag := fwd[2:tagEnd]
+	tag := fwd.sub(2, tagEnd)
 	valStart := tagEnd
-	if valStart < len(fwd) && fwd[valStart] == ' ' {
+	if fwd.has(valStart) && fwd.b(valStart) == ' ' {
 		valStart++
 	}
 	valEnd := valStart
 
 	// Skip anchor before value.
 	tagAnchorName := ""
-	if valStart < len(fwd) && fwd[valStart] == '&' {
+	if fwd.has(valStart) && fwd.b(valStart) == '&' {
 		anchorEnd := valStart + 1
-		for anchorEnd < len(fwd) && fwd[anchorEnd] != ' ' && fwd[anchorEnd] != '\n' && fwd[anchorEnd] != '\r' {
+		for fwd.has(anchorEnd) && fwd.b(anchorEnd) != ' ' && fwd.b(anchorEnd) != '\n' && fwd.b(anchorEnd) != '\r' {
 			anchorEnd++
 		}
-		tagAnchorName = fwd[valStart+1 : anchorEnd]
+		tagAnchorName = fwd.sub(valStart+1, anchorEnd)
 		*pendingAnchors = append(*pendingAnchors, anchorInfo{name: tagAnchorName, inline: true})
-		declaredAnchors[tagAnchorName] = true
-		if anchorEnd < len(fwd) && fwd[anchorEnd] == ' ' {
+		ys.declare(declaredAnchors, tagAnchorName)
+		if fwd.has(anchorEnd) && fwd.b(anchorEnd) == ' ' {
 			anchorEnd++
 		}
 		valStart = anchorEnd
@@ -3301,22 +3277,22 @@ func handleTypeTag(lex *tabnas.Lex, pnt *tabnas.Point, fwd string,
 	}
 
 	// Check for quoted value.
-	if valStart < len(fwd) && (fwd[valStart] == '"' || fwd[valStart] == '\'') {
-		q := fwd[valStart]
+	if fwd.has(valStart) && (fwd.b(valStart) == '"' || fwd.b(valStart) == '\'') {
+		q := fwd.b(valStart)
 		valEnd = valStart + 1
-		for valEnd < len(fwd) && fwd[valEnd] != q {
-			if fwd[valEnd] == '\\' && q == '"' {
+		for fwd.has(valEnd) && fwd.b(valEnd) != q {
+			if fwd.b(valEnd) == '\\' && q == '"' {
 				valEnd++
 			}
 			valEnd++
 		}
-		if valEnd < len(fwd) && fwd[valEnd] == q {
+		if fwd.has(valEnd) && fwd.b(valEnd) == q {
 			valEnd++
 		}
-		rawVal := jsSubstringLessOneUnit(fwd, valStart+1, valEnd)
+		rawVal := jsSubstringLessOneUnit(fwd.upTo(valEnd+utf8.UTFMax), valStart+1, valEnd)
 		result := applyTagConversion(tag, rawVal, tagHandles)
 		if tagAnchorName != "" {
-			anchors[tagAnchorName] = result
+			ys.record(anchors, tagAnchorName, result)
 		}
 		tknTin := TX
 		switch result.(type) {
@@ -3328,18 +3304,18 @@ func handleTypeTag(lex *tabnas.Lex, pnt *tabnas.Point, fwd string,
 		if result == nil {
 			tknTin = VL
 		}
-		tkn := lex.Token(tinToName(tknTin), tknTin, result, fwd[:valEnd])
+		tkn := lex.Token(tinToName(tknTin), tknTin, result, fwd.sub(0, valEnd))
 		advanceCol(pnt, fwd, valEnd)
 		return tkn
 	}
 
 	// Tag followed by newline — skip and let next cycle handle.
-	if valStart < len(fwd) && (fwd[valStart] == '\n' || fwd[valStart] == '\r') && valStart < len(fwd)-1 {
+	if fwd.has(valStart) && (fwd.b(valStart) == '\n' || fwd.b(valStart) == '\r') && fwd.has(valStart+1) {
 		nl := valStart
-		if nl < len(fwd) && fwd[nl] == '\r' {
+		if fwd.has(nl) && fwd.b(nl) == '\r' {
 			nl++
 		}
-		if nl < len(fwd) && fwd[nl] == '\n' {
+		if fwd.has(nl) && fwd.b(nl) == '\n' {
 			nl++
 		}
 		pnt.SI += nl
@@ -3350,25 +3326,25 @@ func handleTypeTag(lex *tabnas.Lex, pnt *tabnas.Point, fwd string,
 
 	// Unquoted value. A `#` straight after the tag's space starts a
 	// comment, so the value is empty (`!!str #c` is "").
-	for valEnd < len(fwd) && fwd[valEnd] != '\n' && fwd[valEnd] != '\r' &&
-		fwd[valEnd] != ',' && fwd[valEnd] != '}' && fwd[valEnd] != ']' {
-		if valEnd == valStart && fwd[valEnd] == '#' && valStart > 0 &&
-			(fwd[valStart-1] == ' ' || fwd[valStart-1] == '\t') {
+	for fwd.has(valEnd) && fwd.b(valEnd) != '\n' && fwd.b(valEnd) != '\r' &&
+		fwd.b(valEnd) != ',' && fwd.b(valEnd) != '}' && fwd.b(valEnd) != ']' {
+		if valEnd == valStart && fwd.b(valEnd) == '#' && valStart > 0 &&
+			(fwd.b(valStart-1) == ' ' || fwd.b(valStart-1) == '\t') {
 			break
 		}
-		if fwd[valEnd] == ':' && (valEnd+1 >= len(fwd) || fwd[valEnd+1] == ' ' ||
-			fwd[valEnd+1] == '\n' || fwd[valEnd+1] == '\r') {
+		if fwd.b(valEnd) == ':' && (!fwd.has(valEnd+1) || fwd.b(valEnd+1) == ' ' ||
+			fwd.b(valEnd+1) == '\n' || fwd.b(valEnd+1) == '\r') {
 			break
 		}
-		if fwd[valEnd] == ' ' && valEnd+1 < len(fwd) && fwd[valEnd+1] == '#' {
+		if fwd.b(valEnd) == ' ' && fwd.has(valEnd+1) && fwd.b(valEnd+1) == '#' {
 			break
 		}
 		valEnd++
 	}
-	rawVal := trimRight(fwd[valStart:valEnd])
+	rawVal := trimRight(fwd.sub(valStart, valEnd))
 	result := applyTagConversion(tag, rawVal, tagHandles)
 	if tagAnchorName != "" {
-		anchors[tagAnchorName] = result
+		ys.record(anchors, tagAnchorName, result)
 	}
 	tknTin := TX
 	switch result.(type) {
@@ -3386,30 +3362,30 @@ func handleTypeTag(lex *tabnas.Lex, pnt *tabnas.Point, fwd string,
 	if result == nil {
 		tknTin = VL
 	}
-	tkn := lex.Token(tinToName(tknTin), tknTin, result, fwd[:valEnd])
+	tkn := lex.Token(tinToName(tknTin), tknTin, result, fwd.sub(0, valEnd))
 	advanceCol(pnt, fwd, valEnd)
 	return tkn
 }
 
 // handleExplicitKey processes ? key\n: value patterns.
-func handleExplicitKey(lex *tabnas.Lex, pnt *tabnas.Point, fwd string,
+func handleExplicitKey(lex *tabnas.Lex, pnt *tabnas.Point, ys *yamlSource, fwd fwdText,
 	pendingExplicitCL *bool, pendingTokens *[]*tabnas.Token,
 	TX, CL, VL, IN tabnas.Tin) *tabnas.Token {
 
 	start := 1
-	if len(fwd) > 1 && (fwd[1] == ' ' || fwd[1] == '\t') {
+	if fwd.has(1) && (fwd.b(1) == ' ' || fwd.b(1) == '\t') {
 		start = 2
 	}
 
 	// Collect key text.
 	keyEnd := start
-	for keyEnd < len(fwd) && fwd[keyEnd] != '\n' && fwd[keyEnd] != '\r' {
-		if fwd[keyEnd] == ' ' && keyEnd+1 < len(fwd) && fwd[keyEnd+1] == '#' {
+	for fwd.has(keyEnd) && fwd.b(keyEnd) != '\n' && fwd.b(keyEnd) != '\r' {
+		if fwd.b(keyEnd) == ' ' && fwd.has(keyEnd+1) && fwd.b(keyEnd+1) == '#' {
 			break
 		}
 		keyEnd++
 	}
-	key := trimRight(fwd[start:keyEnd])
+	key := trimRight(fwd.sub(start, keyEnd))
 	// Strip !!type tags from explicit keys (mirrors src/yaml.ts:1455-1461).
 	if m := explicitKeyTagRe.FindStringSubmatch(key); m != nil {
 		key = m[2]
@@ -3423,26 +3399,24 @@ func handleExplicitKey(lex *tabnas.Lex, pnt *tabnas.Point, fwd string,
 	consumed := keyEnd
 
 	// Skip comment at end of key line.
-	for consumed < len(fwd) && fwd[consumed] != '\n' && fwd[consumed] != '\r' {
+	for fwd.has(consumed) && fwd.b(consumed) != '\n' && fwd.b(consumed) != '\r' {
 		consumed++
 	}
 	beforeNewline := consumed
 
 	// Consume newline.
-	if consumed < len(fwd) && fwd[consumed] == '\r' {
+	if fwd.has(consumed) && fwd.b(consumed) == '\r' {
 		consumed++
 	}
-	if consumed < len(fwd) && fwd[consumed] == '\n' {
+	if fwd.has(consumed) && fwd.b(consumed) == '\n' {
 		consumed++
 	}
 
 	// Check for continuation lines.
 	qIndent := 0
-	li := pnt.SI
-	for li > 0 && lex.Src[li-1] != '\n' && lex.Src[li-1] != '\r' {
-		li--
-	}
-	for li < pnt.SI && lex.Src[li] == ' ' {
+	here := ys.pos()
+	li := ys.lineStart(here)
+	for li < here && ys.b(li) == ' ' {
 		qIndent++
 		li++
 	}
@@ -3461,20 +3435,20 @@ func handleExplicitKey(lex *tabnas.Lex, pnt *tabnas.Point, fwd string,
 		// Collect block scalar content lines.
 		var blockLines []string
 		contentIndent := 0
-		for consumed < len(fwd) {
+		for fwd.has(consumed) {
 			lineIndent := 0
-			for consumed+lineIndent < len(fwd) && fwd[consumed+lineIndent] == ' ' {
+			for fwd.has(consumed+lineIndent) && fwd.b(consumed+lineIndent) == ' ' {
 				lineIndent++
 			}
 			afterSpaces := consumed + lineIndent
 			// Empty line or line with only spaces.
-			if afterSpaces >= len(fwd) || fwd[afterSpaces] == '\n' || fwd[afterSpaces] == '\r' {
+			if !fwd.has(afterSpaces) || fwd.b(afterSpaces) == '\n' || fwd.b(afterSpaces) == '\r' {
 				blockLines = append(blockLines, "")
 				consumed = afterSpaces
-				if consumed < len(fwd) && fwd[consumed] == '\r' {
+				if fwd.has(consumed) && fwd.b(consumed) == '\r' {
 					consumed++
 				}
-				if consumed < len(fwd) && fwd[consumed] == '\n' {
+				if fwd.has(consumed) && fwd.b(consumed) == '\n' {
 					consumed++
 				}
 				extraRows++
@@ -3494,15 +3468,15 @@ func handleExplicitKey(lex *tabnas.Lex, pnt *tabnas.Point, fwd string,
 			}
 			// Collect line content.
 			lineEnd := afterSpaces
-			for lineEnd < len(fwd) && fwd[lineEnd] != '\n' && fwd[lineEnd] != '\r' {
+			for fwd.has(lineEnd) && fwd.b(lineEnd) != '\n' && fwd.b(lineEnd) != '\r' {
 				lineEnd++
 			}
-			blockLines = append(blockLines, fwd[consumed+contentIndent:lineEnd])
+			blockLines = append(blockLines, fwd.sub(consumed+contentIndent, lineEnd))
 			consumed = lineEnd
-			if consumed < len(fwd) && fwd[consumed] == '\r' {
+			if fwd.has(consumed) && fwd.b(consumed) == '\r' {
 				consumed++
 			}
-			if consumed < len(fwd) && fwd[consumed] == '\n' {
+			if fwd.has(consumed) && fwd.b(consumed) == '\n' {
 				consumed++
 			}
 			extraRows++
@@ -3523,46 +3497,46 @@ func handleExplicitKey(lex *tabnas.Lex, pnt *tabnas.Point, fwd string,
 		}
 	} else {
 		// Scan continuation lines (plain scalar multiline key).
-		for consumed < len(fwd) {
+		for fwd.has(consumed) {
 			lineIndent := 0
-			for consumed+lineIndent < len(fwd) && fwd[consumed+lineIndent] == ' ' {
+			for fwd.has(consumed+lineIndent) && fwd.b(consumed+lineIndent) == ' ' {
 				lineIndent++
 			}
 			afterSpaces := consumed + lineIndent
-			if afterSpaces < len(fwd) && fwd[afterSpaces] == '#' {
-				for afterSpaces < len(fwd) && fwd[afterSpaces] != '\n' && fwd[afterSpaces] != '\r' {
+			if fwd.has(afterSpaces) && fwd.b(afterSpaces) == '#' {
+				for fwd.has(afterSpaces) && fwd.b(afterSpaces) != '\n' && fwd.b(afterSpaces) != '\r' {
 					afterSpaces++
 				}
 				beforeNewline = afterSpaces
-				if afterSpaces < len(fwd) && fwd[afterSpaces] == '\r' {
+				if fwd.has(afterSpaces) && fwd.b(afterSpaces) == '\r' {
 					afterSpaces++
 				}
-				if afterSpaces < len(fwd) && fwd[afterSpaces] == '\n' {
+				if fwd.has(afterSpaces) && fwd.b(afterSpaces) == '\n' {
 					afterSpaces++
 				}
 				extraRows++
 				consumed = afterSpaces
 				continue
 			}
-			if lineIndent > qIndent && afterSpaces < len(fwd) &&
-				fwd[afterSpaces] != ':' && fwd[afterSpaces] != '?' && fwd[afterSpaces] != '-' {
+			if lineIndent > qIndent && fwd.has(afterSpaces) &&
+				fwd.b(afterSpaces) != ':' && fwd.b(afterSpaces) != '?' && fwd.b(afterSpaces) != '-' {
 				contEnd := afterSpaces
-				for contEnd < len(fwd) && fwd[contEnd] != '\n' && fwd[contEnd] != '\r' {
-					if fwd[contEnd] == ' ' && contEnd+1 < len(fwd) && fwd[contEnd+1] == '#' {
+				for fwd.has(contEnd) && fwd.b(contEnd) != '\n' && fwd.b(contEnd) != '\r' {
+					if fwd.b(contEnd) == ' ' && fwd.has(contEnd+1) && fwd.b(contEnd+1) == '#' {
 						break
 					}
 					contEnd++
 				}
-				contText := trimRight(fwd[afterSpaces:contEnd])
+				contText := trimRight(fwd.sub(afterSpaces, contEnd))
 				if len(contText) > 0 {
 					key += " " + contText
 				}
 				consumed = contEnd
 				beforeNewline = consumed
-				if consumed < len(fwd) && fwd[consumed] == '\r' {
+				if fwd.has(consumed) && fwd.b(consumed) == '\r' {
 					consumed++
 				}
-				if consumed < len(fwd) && fwd[consumed] == '\n' {
+				if fwd.has(consumed) && fwd.b(consumed) == '\n' {
 					consumed++
 				}
 				extraRows++
@@ -3576,15 +3550,15 @@ func handleExplicitKey(lex *tabnas.Lex, pnt *tabnas.Point, fwd string,
 	hasValue := false
 	valConsumed := consumed
 	ci := consumed
-	for ci < len(fwd) && fwd[ci] == ' ' {
+	for fwd.has(ci) && fwd.b(ci) == ' ' {
 		ci++
 	}
-	if ci < len(fwd) && fwd[ci] == ':' &&
-		(ci+1 >= len(fwd) || fwd[ci+1] == ' ' || fwd[ci+1] == '\t' ||
-			fwd[ci+1] == '\n' || fwd[ci+1] == '\r') {
+	if fwd.has(ci) && fwd.b(ci) == ':' &&
+		(!fwd.has(ci+1) || fwd.b(ci+1) == ' ' || fwd.b(ci+1) == '\t' ||
+			fwd.b(ci+1) == '\n' || fwd.b(ci+1) == '\r') {
 		hasValue = true
 		valConsumed = ci + 1
-		if valConsumed < len(fwd) && (fwd[valConsumed] == ' ' || fwd[valConsumed] == '\t') {
+		if fwd.has(valConsumed) && (fwd.b(valConsumed) == ' ' || fwd.b(valConsumed) == '\t') {
 			valConsumed++
 		}
 	}
@@ -3595,7 +3569,7 @@ func handleExplicitKey(lex *tabnas.Lex, pnt *tabnas.Point, fwd string,
 		// Characters, not bytes: `consumed` and `valConsumed` are BYTE
 		// indices into fwd, so a non-ASCII key set the following indent
 		// column too far right by that key's extra bytes.
-		indent := utf8.RuneCountInString(fwd[consumed:valConsumed])
+		indent := utf8.RuneCountInString(fwd.sub(consumed, valConsumed))
 		pnt.CI = indent + 1
 
 		// If there's inline content after `: ` on the same line that itself
@@ -3603,21 +3577,21 @@ func handleExplicitKey(lex *tabnas.Lex, pnt *tabnas.Point, fwd string,
 		// emit CL + IN now so the inner block has a proper indent context.
 		// Mirrors src/yaml.ts:1891-1931.
 		needsIndent := false
-		if valConsumed < len(fwd) {
-			nextCh := fwd[valConsumed]
+		if fwd.has(valConsumed) {
+			nextCh := fwd.b(valConsumed)
 			if nextCh != '\n' && nextCh != '\r' &&
 				nextCh != '"' && nextCh != '\'' &&
 				nextCh != '[' && nextCh != '{' && nextCh != '!' {
 				// Look for ` ' or ':' at end of line — indicates a block-mapping key.
 				le := valConsumed
-				for le < len(fwd) && fwd[le] != '\n' && fwd[le] != '\r' {
+				for fwd.has(le) && fwd.b(le) != '\n' && fwd.b(le) != '\r' {
 					le++
 				}
 				for ri := valConsumed; ri < le; ri++ {
-					if fwd[ri] == ':' {
+					if fwd.b(ri) == ':' {
 						nc := byte(0)
-						if ri+1 < len(fwd) {
-							nc = fwd[ri+1]
+						if fwd.has(ri + 1) {
+							nc = fwd.b(ri + 1)
 						}
 						if nc == ' ' || nc == '\t' || nc == '\n' || nc == '\r' || ri+1 == le {
 							needsIndent = true
@@ -3626,8 +3600,8 @@ func handleExplicitKey(lex *tabnas.Lex, pnt *tabnas.Point, fwd string,
 					}
 				}
 				// Or sequence indicator `- `.
-				if !needsIndent && nextCh == '-' && valConsumed+1 < len(fwd) &&
-					(fwd[valConsumed+1] == ' ' || fwd[valConsumed+1] == '\t') {
+				if !needsIndent && nextCh == '-' && fwd.has(valConsumed+1) &&
+					(fwd.b(valConsumed+1) == ' ' || fwd.b(valConsumed+1) == '\t') {
 					needsIndent = true
 				}
 			}
@@ -3635,6 +3609,10 @@ func handleExplicitKey(lex *tabnas.Lex, pnt *tabnas.Point, fwd string,
 		if needsIndent {
 			clTkn := lex.Token("#CL", CL, 1, ": ")
 			inTkn := lex.Token("#IN", IN, indent, "")
+			// Kept at their source position, for the cut that hands them
+			// over (see the matcher).
+			clTkn.SI += ys.base
+			inTkn.SI += ys.base
 			*pendingTokens = append(*pendingTokens, clTkn, inTkn)
 		} else {
 			*pendingExplicitCL = true
@@ -3643,6 +3621,8 @@ func handleExplicitKey(lex *tabnas.Lex, pnt *tabnas.Point, fwd string,
 		advanceCol(pnt, fwd, beforeNewline)
 		clTkn := lex.Token("#CL", CL, 1, ": ")
 		vlTkn := lex.Token("#VL", VL, nil, "")
+		clTkn.SI += ys.base
+		vlTkn.SI += ys.base
 		*pendingTokens = append(*pendingTokens, clTkn, vlTkn)
 	}
 
@@ -3652,9 +3632,9 @@ func handleExplicitKey(lex *tabnas.Lex, pnt *tabnas.Point, fwd string,
 		srcEnd = consumed
 	}
 	if quotedKey {
-		return lex.Token("#ST", tabnas.TinST, key, fwd[:srcEnd])
+		return lex.Token("#ST", tabnas.TinST, key, fwd.sub(0, srcEnd))
 	}
-	tkn := lex.Token("#TX", TX, key, fwd[:srcEnd])
+	tkn := lex.Token("#TX", TX, key, fwd.sub(0, srcEnd))
 	return tkn
 }
 
@@ -3664,27 +3644,27 @@ func handleExplicitKey(lex *tabnas.Lex, pnt *tabnas.Point, fwd string,
 // next matcher call lands on the next document's content with no spurious
 // #IN. Inline content on the same line as the marker (--- foo) is left
 // for subsequent matcher calls.
-func handleDocMarker(lex *tabnas.Lex, pnt *tabnas.Point, fwd string,
+func handleDocMarker(lex *tabnas.Lex, pnt *tabnas.Point, fwd fwdText,
 	DS, DE tabnas.Tin) *tabnas.Token {
 
-	isEnd := fwd[0] == '.'
+	isEnd := fwd.b(0) == '.'
 	pos := 3
 	// Skip trailing whitespace after marker.
-	for pos < len(fwd) && (fwd[pos] == ' ' || fwd[pos] == '\t') {
+	for fwd.has(pos) && (fwd.b(pos) == ' ' || fwd.b(pos) == '\t') {
 		pos++
 	}
-	hasInline := pos < len(fwd) &&
-		fwd[pos] != '\n' && fwd[pos] != '\r' && fwd[pos] != '#'
+	hasInline := fwd.has(pos) &&
+		fwd.b(pos) != '\n' && fwd.b(pos) != '\r' && fwd.b(pos) != '#'
 
 	if !hasInline {
 		// Skip trailing comment, then consume the line terminator.
-		for pos < len(fwd) && fwd[pos] != '\n' && fwd[pos] != '\r' {
+		for fwd.has(pos) && fwd.b(pos) != '\n' && fwd.b(pos) != '\r' {
 			pos++
 		}
-		if pos < len(fwd) && fwd[pos] == '\r' {
+		if fwd.has(pos) && fwd.b(pos) == '\r' {
 			pos++
 		}
-		if pos < len(fwd) && fwd[pos] == '\n' {
+		if fwd.has(pos) && fwd.b(pos) == '\n' {
 			pos++
 			pnt.RI++
 		}
@@ -3694,7 +3674,7 @@ func handleDocMarker(lex *tabnas.Lex, pnt *tabnas.Point, fwd string,
 		// TypeScript half advances by the same expression over UTF-16
 		// indices. Inline content after a `---` marker is where this
 		// shows.
-		pnt.CI += utf8.RuneCountInString(fwd[:pos])
+		pnt.CI += utf8.RuneCountInString(fwd.sub(0, pos))
 	}
 	var tkn *tabnas.Token
 	if isEnd {
@@ -3707,9 +3687,11 @@ func handleDocMarker(lex *tabnas.Lex, pnt *tabnas.Point, fwd string,
 }
 
 // handleDoubleQuotedString processes YAML double-quoted strings.
-func handleDoubleQuotedString(lex *tabnas.Lex, pnt *tabnas.Point, fwd string, ST tabnas.Tin) *tabnas.Token {
+func handleDoubleQuotedString(lex *tabnas.Lex, pnt *tabnas.Point, fwd fwdText, ST tabnas.Tin) *tabnas.Token {
 	i := 1
-	val := ""
+	// The value is built in a byte slice: a string added to a character at
+	// a time costs a copy of all it holds for each one.
+	var val []byte
 	escapedUpTo := 0
 	rows := 0
 	lastNewlineEnd := 0
@@ -3725,7 +3707,7 @@ func handleDoubleQuotedString(lex *tabnas.Lex, pnt *tabnas.Point, fwd string, ST
 	pendingHigh := int64(-1)
 	flushSurrogate := func() {
 		if pendingHigh >= 0 {
-			val += "\uFFFD"
+			val = append(val, "\uFFFD"...)
 			pendingHigh = -1
 		}
 	}
@@ -3736,24 +3718,24 @@ func handleDoubleQuotedString(lex *tabnas.Lex, pnt *tabnas.Point, fwd string, ST
 			pendingHigh = n
 		case 0xDC00 <= n && n <= 0xDFFF:
 			if pendingHigh >= 0 {
-				val += string(rune(0x10000 + (pendingHigh-0xD800)<<10 + (n - 0xDC00)))
+				val = append(val, string(rune(0x10000+(pendingHigh-0xD800)<<10+(n-0xDC00)))...)
 				pendingHigh = -1
 			} else {
-				val += "\uFFFD"
+				val = append(val, "\uFFFD"...)
 			}
 		default:
 			flushSurrogate()
-			val += string(rune(n))
+			val = append(val, string(rune(n))...)
 		}
 	}
 
-	for i < len(fwd) && fwd[i] != '"' {
-		if fwd[i] == '\\' {
+	for fwd.has(i) && fwd.b(i) != '"' {
+		if fwd.b(i) == '\\' {
 			i++
-			if i >= len(fwd) {
+			if !fwd.has(i) {
 				break
 			}
-			esc := fwd[i]
+			esc := fwd.b(i)
 			// Anything but a code-unit escape or a line continuation
 			// separates a high surrogate from the low one it needed.
 			if esc != 'x' && esc != 'u' && esc != 'U' && esc != '\n' && esc != '\r' {
@@ -3761,77 +3743,77 @@ func handleDoubleQuotedString(lex *tabnas.Lex, pnt *tabnas.Point, fwd string, ST
 			}
 			switch esc {
 			case 'n':
-				val += "\n"
+				val = append(val, "\n"...)
 				i++
 				escapedUpTo = len(val)
 			case 't':
-				val += "\t"
+				val = append(val, "\t"...)
 				i++
 				escapedUpTo = len(val)
 			case 'r':
-				val += "\r"
+				val = append(val, "\r"...)
 				i++
 				escapedUpTo = len(val)
 			case '"':
-				val += "\""
+				val = append(val, "\""...)
 				i++
 				escapedUpTo = len(val)
 			case '\\':
-				val += "\\"
+				val = append(val, "\\"...)
 				i++
 				escapedUpTo = len(val)
 			case '/':
-				val += "/"
+				val = append(val, "/"...)
 				i++
 				escapedUpTo = len(val)
 			case 'b':
-				val += "\b"
+				val = append(val, "\b"...)
 				i++
 				escapedUpTo = len(val)
 			case 'f':
-				val += "\f"
+				val = append(val, "\f"...)
 				i++
 				escapedUpTo = len(val)
 			case 'a':
-				val += "\x07"
+				val = append(val, "\x07"...)
 				i++
 				escapedUpTo = len(val)
 			case 'e':
-				val += "\x1b"
+				val = append(val, "\x1b"...)
 				i++
 				escapedUpTo = len(val)
 			case 'v':
-				val += "\v"
+				val = append(val, "\v"...)
 				i++
 				escapedUpTo = len(val)
 			case '0':
-				val += "\x00"
+				val = append(val, "\x00"...)
 				i++
 				escapedUpTo = len(val)
 			case '\t':
 				// Escaped literal tab (mirrors src/yaml.ts:1734): mark it
 				// non-trimmable so line folding preserves it.
-				val += "\t"
+				val = append(val, "\t"...)
 				i++
 				escapedUpTo = len(val)
 			case ' ':
-				val += " "
+				val = append(val, " "...)
 				i++
 				escapedUpTo = len(val)
 			case '_':
-				val += "\u00a0"
+				val = append(val, "\u00a0"...)
 				i++
 				escapedUpTo = len(val)
 			case 'N':
-				val += "\u0085"
+				val = append(val, "\u0085"...)
 				i++
 				escapedUpTo = len(val)
 			case 'L':
-				val += "\u2028"
+				val = append(val, "\u2028"...)
 				i++
 				escapedUpTo = len(val)
 			case 'P':
-				val += "\u2029"
+				val = append(val, "\u2029"...)
 				i++
 				escapedUpTo = len(val)
 			case 'x', 'u', 'U':
@@ -3848,7 +3830,7 @@ func handleDoubleQuotedString(lex *tabnas.Lex, pnt *tabnas.Point, fwd string, ST
 				} else if esc == 'U' {
 					width = 8
 				}
-				digits, end, splitLow := utf16Window(fwd, i+1, width)
+				digits, end, splitLow := utf16Window(fwd.upTo(i+1+4*width+utf8.UTFMax), i+1, width)
 				n := jsParseInt16(digits)
 				if esc == 'U' {
 					// `String.fromCodePoint` throws on anything that is not
@@ -3872,25 +3854,25 @@ func handleDoubleQuotedString(lex *tabnas.Lex, pnt *tabnas.Point, fwd string, ST
 					// through the same pairing an escape goes through, it
 					// completes a high surrogate the escape left pending.
 					pushCodeUnit(splitLow)
-					_, size := utf8.DecodeRuneInString(fwd[i:])
+					_, size := utf8.DecodeRuneInString(fwd.sub(i, i+utf8.UTFMax))
 					i += size
 				}
 			case '\n', '\r':
 				// Escaped newline: line continuation.
-				if esc == '\r' && i+1 < len(fwd) && fwd[i+1] == '\n' {
+				if esc == '\r' && fwd.has(i+1) && fwd.b(i+1) == '\n' {
 					i++
 				}
 				i++
 				rows++
 				lastNewlineEnd = i
-				for i < len(fwd) && (fwd[i] == ' ' || fwd[i] == '\t') {
+				for fwd.has(i) && (fwd.b(i) == ' ' || fwd.b(i) == '\t') {
 					i++
 				}
 			default:
-				val += string(esc)
+				val = append(val, string(esc)...)
 				i++
 			}
-		} else if fwd[i] == '\n' || fwd[i] == '\r' {
+		} else if fwd.b(i) == '\n' || fwd.b(i) == '\r' {
 			flushSurrogate()
 			// Flow scalar line folding.
 			trimTo := len(val)
@@ -3899,26 +3881,26 @@ func handleDoubleQuotedString(lex *tabnas.Lex, pnt *tabnas.Point, fwd string, ST
 			}
 			val = val[:trimTo]
 			emptyLines := 0
-			for i < len(fwd) && (fwd[i] == '\n' || fwd[i] == '\r') {
-				if fwd[i] == '\r' {
+			for fwd.has(i) && (fwd.b(i) == '\n' || fwd.b(i) == '\r') {
+				if fwd.b(i) == '\r' {
 					i++
 				}
-				if i < len(fwd) && fwd[i] == '\n' {
+				if fwd.has(i) && fwd.b(i) == '\n' {
 					i++
 				}
 				emptyLines++
 				rows++
 				lastNewlineEnd = i
-				for i < len(fwd) && (fwd[i] == ' ' || fwd[i] == '\t') {
+				for fwd.has(i) && (fwd.b(i) == ' ' || fwd.b(i) == '\t') {
 					i++
 				}
 			}
 			if emptyLines > 1 {
 				for e := 1; e < emptyLines; e++ {
-					val += "\n"
+					val = append(val, "\n"...)
 				}
 			} else {
-				val += " "
+				val = append(val, " "...)
 			}
 		} else {
 			// Append the source byte as-is so multi-byte UTF-8 sequences
@@ -3926,15 +3908,15 @@ func handleDoubleQuotedString(lex *tabnas.Lex, pnt *tabnas.Point, fwd string, ST
 			// a Unicode codepoint and re-encode it as UTF-8, mangling any
 			// non-ASCII byte that is part of a multi-byte sequence.
 			flushSurrogate()
-			val += fwd[i : i+1]
+			val = append(val, fwd.sub(i, i+1)...)
 			i++
 		}
 	}
 	flushSurrogate()
-	if i < len(fwd) && fwd[i] == '"' {
+	if fwd.has(i) && fwd.b(i) == '"' {
 		i++
 	}
-	tkn := lex.Token("#ST", ST, val, fwd[:i])
+	tkn := lex.Token("#ST", ST, string(val), fwd.sub(0, i))
 	pnt.SI += i
 	pnt.RI += rows
 	// Characters, not bytes — `i` and `lastNewlineEnd` are BYTE indices
@@ -3948,63 +3930,64 @@ func handleDoubleQuotedString(lex *tabnas.Lex, pnt *tabnas.Point, fwd string, ST
 	// structural gap means deciding which port is right about rows,
 	// which is a separate question with its own answer.
 	if rows > 0 {
-		pnt.CI = utf8.RuneCountInString(fwd[lastNewlineEnd:i])
+		pnt.CI = utf8.RuneCountInString(fwd.sub(lastNewlineEnd, i))
 	} else {
-		pnt.CI += utf8.RuneCountInString(fwd[:i])
+		pnt.CI += utf8.RuneCountInString(fwd.sub(0, i))
 	}
 	return tkn
 }
 
 // handleSingleQuotedString processes YAML single-quoted strings.
-func handleSingleQuotedString(lex *tabnas.Lex, pnt *tabnas.Point, fwd string, ST tabnas.Tin) *tabnas.Token {
+func handleSingleQuotedString(lex *tabnas.Lex, pnt *tabnas.Point, fwd fwdText, ST tabnas.Tin) *tabnas.Token {
 	i := 1
-	val := ""
+	// Built in a byte slice, as handleDoubleQuotedString builds its value.
+	var val []byte
 	rows := 0
 	lastNewlineEnd := 0
-	for i < len(fwd) {
-		if fwd[i] == '\'' {
-			if i+1 < len(fwd) && fwd[i+1] == '\'' {
-				val += "'"
+	for fwd.has(i) {
+		if fwd.b(i) == '\'' {
+			if fwd.has(i+1) && fwd.b(i+1) == '\'' {
+				val = append(val, "'"...)
 				i += 2
 			} else {
 				i++
 				break
 			}
-		} else if fwd[i] == '\n' || fwd[i] == '\r' {
+		} else if fwd.b(i) == '\n' || fwd.b(i) == '\r' {
 			// Flow scalar line folding.
-			val = strings.TrimRight(val, " \t")
+			val = bytes.TrimRight(val, " \t")
 			emptyLines := 0
-			for i < len(fwd) && (fwd[i] == '\n' || fwd[i] == '\r') {
-				if fwd[i] == '\r' {
+			for fwd.has(i) && (fwd.b(i) == '\n' || fwd.b(i) == '\r') {
+				if fwd.b(i) == '\r' {
 					i++
 				}
-				if i < len(fwd) && fwd[i] == '\n' {
+				if fwd.has(i) && fwd.b(i) == '\n' {
 					i++
 				}
 				emptyLines++
 				rows++
 				lastNewlineEnd = i
-				for i < len(fwd) && (fwd[i] == ' ' || fwd[i] == '\t') {
+				for fwd.has(i) && (fwd.b(i) == ' ' || fwd.b(i) == '\t') {
 					i++
 				}
 			}
 			if emptyLines > 1 {
 				for e := 1; e < emptyLines; e++ {
-					val += "\n"
+					val = append(val, "\n"...)
 				}
 			} else {
-				val += " "
+				val = append(val, " "...)
 			}
 		} else {
 			// Append the source byte as-is so multi-byte UTF-8 sequences
 			// survive intact. `string(byte)` would treat the byte value as
 			// a Unicode codepoint and re-encode it as UTF-8, mangling any
 			// non-ASCII byte that is part of a multi-byte sequence.
-			val += fwd[i : i+1]
+			val = append(val, fwd.sub(i, i+1)...)
 			i++
 		}
 	}
-	tkn := lex.Token("#ST", ST, val, fwd[:i])
+	tkn := lex.Token("#ST", ST, string(val), fwd.sub(0, i))
 	pnt.SI += i
 	pnt.RI += rows
 	// Characters, not bytes — `i` and `lastNewlineEnd` are BYTE indices
@@ -4018,9 +4001,9 @@ func handleSingleQuotedString(lex *tabnas.Lex, pnt *tabnas.Point, fwd string, ST
 	// structural gap means deciding which port is right about rows,
 	// which is a separate question with its own answer.
 	if rows > 0 {
-		pnt.CI = utf8.RuneCountInString(fwd[lastNewlineEnd:i])
+		pnt.CI = utf8.RuneCountInString(fwd.sub(lastNewlineEnd, i))
 	} else {
-		pnt.CI += utf8.RuneCountInString(fwd[:i])
+		pnt.CI += utf8.RuneCountInString(fwd.sub(0, i))
 	}
 	return tkn
 }
@@ -4033,17 +4016,17 @@ func handleSingleQuotedString(lex *tabnas.Lex, pnt *tabnas.Point, fwd string, ST
 // skipNumberMatch is set to true when trailing text is detected so the
 // NumberCheck callback skips the number matcher and lets TextCheck handle
 // the scalar (with multiline continuation support).
-func handleNumericColon(lex *tabnas.Lex, pnt *tabnas.Point, fwd string, TX tabnas.Tin, skipNumberMatch *bool, flowState *flowScanState) *tabnas.Token {
-	flowState.advance(lex.Src, pnt.SI)
+func handleNumericColon(lex *tabnas.Lex, pnt *tabnas.Point, ys *yamlSource, fwd fwdText, TX tabnas.Tin, skipNumberMatch *bool, flowState *flowScanState) *tabnas.Token {
+	flowState.advance(ys, ys.pos())
 	inFlow := flowState.depth > 0
 
 	hasEmbeddedColon := false
 	hasTrailingText := false
 	hasBlockComma := false
 	pi := 1
-	for pi < len(fwd) && fwd[pi] != '\n' && fwd[pi] != '\r' {
-		if fwd[pi] == ':' && pi+1 < len(fwd) && fwd[pi+1] != ' ' && fwd[pi+1] != '\t' &&
-			fwd[pi+1] != '\n' && fwd[pi+1] != '\r' {
+	for fwd.has(pi) && fwd.b(pi) != '\n' && fwd.b(pi) != '\r' {
+		if fwd.b(pi) == ':' && fwd.has(pi+1) && fwd.b(pi+1) != ' ' && fwd.b(pi+1) != '\t' &&
+			fwd.b(pi+1) != '\n' && fwd.b(pi+1) != '\r' {
 			// An embedded colon does not end the scan: the scalar can go on
 			// past a space ("09:00 AM"), which only the trailing-text branch
 			// reads as one scalar (tabnas/yaml#90).
@@ -4065,7 +4048,7 @@ func handleNumericColon(lex *tabnas.Lex, pnt *tabnas.Point, fwd string, TX tabna
 		// space with text after it ("12, hexadecimal") still reaches the
 		// trailing-text branch, which handles spaces and multiline
 		// continuation that the token scan cannot.
-		if fwd[pi] == ',' {
+		if fwd.b(pi) == ',' {
 			if inFlow {
 				break
 			}
@@ -4073,15 +4056,15 @@ func handleNumericColon(lex *tabnas.Lex, pnt *tabnas.Point, fwd string, TX tabna
 			pi++
 			continue
 		}
-		if fwd[pi] == ' ' || fwd[pi] == '\t' {
+		if fwd.b(pi) == ' ' || fwd.b(pi) == '\t' {
 			// Check if after the space there are non-separator characters,
 			// meaning this is a plain scalar like "64 characters, hexadecimal."
 			si := pi
-			for si < len(fwd) && (fwd[si] == ' ' || fwd[si] == '\t') {
+			for fwd.has(si) && (fwd.b(si) == ' ' || fwd.b(si) == '\t') {
 				si++
 			}
-			if si < len(fwd) && fwd[si] != '\n' && fwd[si] != '\r' &&
-				fwd[si] != '#' && fwd[si] != ':' {
+			if fwd.has(si) && fwd.b(si) != '\n' && fwd.b(si) != '\r' &&
+				fwd.b(si) != '#' && fwd.b(si) != ':' {
 				hasTrailingText = true
 			}
 			break
@@ -4115,23 +4098,23 @@ func handleNumericColon(lex *tabnas.Lex, pnt *tabnas.Point, fwd string, TX tabna
 	// `5[` and `12[x]` are plain scalars too. The number matcher took the
 	// digits and the parse failed on the bracket (tabnas/yaml#99).
 	tokenEnd := 0
-	for tokenEnd < len(fwd) && fwd[tokenEnd] != ' ' && fwd[tokenEnd] != '\t' &&
-		fwd[tokenEnd] != '\n' && fwd[tokenEnd] != '\r' &&
-		!(inFlow && (fwd[tokenEnd] == ',' || fwd[tokenEnd] == ']' || fwd[tokenEnd] == '}')) {
+	for fwd.has(tokenEnd) && fwd.b(tokenEnd) != ' ' && fwd.b(tokenEnd) != '\t' &&
+		fwd.b(tokenEnd) != '\n' && fwd.b(tokenEnd) != '\r' &&
+		!(inFlow && (fwd.b(tokenEnd) == ',' || fwd.b(tokenEnd) == ']' || fwd.b(tokenEnd) == '}')) {
 		tokenEnd++
 	}
-	token := fwd[:tokenEnd]
+	token := fwd.sub(0, tokenEnd)
 	if strings.IndexByte(token, '#') > 0 || (!inFlow && strings.ContainsAny(token, "[]{}")) {
 		*skipNumberMatch = true
 		return nil
 	}
 	if hasBlockComma {
 		end := 0
-		for end < len(fwd) && fwd[end] != ' ' && fwd[end] != '\t' &&
-			fwd[end] != '\n' && fwd[end] != '\r' {
+		for fwd.has(end) && fwd.b(end) != ' ' && fwd.b(end) != '\t' &&
+			fwd.b(end) != '\n' && fwd.b(end) != '\r' {
 			end++
 		}
-		text := fwd[:end]
+		text := fwd.sub(0, end)
 		tkn := lex.Token("#TX", TX, text, text)
 		advanceCol(pnt, fwd, end)
 		return tkn
@@ -4142,12 +4125,12 @@ func handleNumericColon(lex *tabnas.Lex, pnt *tabnas.Point, fwd string, TX tabna
 	// In a flow collection the scalar also ends at its `,` `]` `}`:
 	// `[1, 12:30]` holds "12:30", not "12:30,".
 	end := 0
-	for end < len(fwd) && fwd[end] != ' ' && fwd[end] != '\t' &&
-		fwd[end] != '\n' && fwd[end] != '\r' &&
-		!(inFlow && (fwd[end] == ',' || fwd[end] == ']' || fwd[end] == '}')) {
+	for fwd.has(end) && fwd.b(end) != ' ' && fwd.b(end) != '\t' &&
+		fwd.b(end) != '\n' && fwd.b(end) != '\r' &&
+		!(inFlow && (fwd.b(end) == ',' || fwd.b(end) == ']' || fwd.b(end) == '}')) {
 		end++
 	}
-	text := fwd[:end]
+	text := fwd.sub(0, end)
 	tkn := lex.Token("#TX", TX, text, text)
 	advanceCol(pnt, fwd, end)
 	return tkn
@@ -4478,7 +4461,7 @@ const grammarText = `
 func configureGrammarRules(j *tabnas.Tabnas, IN, EL tabnas.Tin, KEY []tabnas.Tin,
 	CL, ZZ, CA, CS, CB, TX, ST, VL, NR, QM tabnas.Tin,
 	anchors map[string]any, pendingAnchors *[]anchorInfo,
-	literalMergeKey map[*tabnas.OrderedMap]bool) {
+	literalMergeKey map[*tabnas.OrderedMap]bool, ys *yamlSource) {
 
 	_ = IN
 	_ = EL
@@ -4562,7 +4545,11 @@ func configureGrammarRules(j *tabnas.Tabnas, IN, EL tabnas.Tin, KEY []tabnas.Tin
 		// indent and two, which no indent token reads.
 		"@set-map-in": tabnas.AltAction(func(r *tabnas.Rule, ctx *tabnas.Context) {
 			if (r.Name == "yamlBlockList" || r.Name == "yamlBlockElem") && r.O0 != nil {
-				r.EnsureK()["yamlMapIn"] = entryColumn(ctx.Src, r.O0.SI)
+				// The line is read as the lexer holds it, with what the
+				// source keeps behind its window: the key is the token the
+				// lexer cut last but one, on the line the source keeps.
+				ys.outside(ctx.Lex)
+				r.EnsureK()["yamlMapIn"] = entryColumn(ys, r.O0.SI)
 				return
 			}
 			r.EnsureK()["yamlMapIn"] = r.N["in"] + 2

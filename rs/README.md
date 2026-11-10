@@ -81,8 +81,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-To layer another grammar on top, install the plugin on your own jsonic
-instance, or through `use_plugin` so a derived instance rebuilds it:
+`make()` and `make_with()` declare the engine option `lex.window`, so
+`parse_reader` reads a reader a window at a time rather than whole, with
+the same values and errors as `parse` of the same text:
+
+```rust
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let parser = tabnas_yaml::make();
+    let value = parser.parse_reader("a: 1\nb: [x, y]\n".as_bytes())?;
+    assert_eq!(value.to_string(), r#"{"a":1,"b":["x","y"]}"#);
+    Ok(())
+}
+```
+
+The plugin itself declares nothing, because a host may install it
+beneath matchers of its own. To layer another grammar on top, install the
+plugin on your own jsonic instance, or through `use_plugin` so a derived
+instance rebuilds it:
 
 ```rust
 use tabnas_yaml::{plugin, yaml, YamlOptions};

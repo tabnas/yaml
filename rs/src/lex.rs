@@ -42,8 +42,12 @@
 //! consumed span with `chars().count()`. Conflating the two is the defect
 //! `go/column_units_test.go` was written for.
 
+use std::cell::Cell;
+
 use tabnas::{Context, Lexer, Point, Rule, Site, Token, Value};
 
+pub(crate) use crate::source::Src;
+use crate::source::{self, Kept};
 use crate::state;
 use crate::text;
 
@@ -160,14 +164,12 @@ impl Act {
 /// `fwd[i] === undefined` constantly; a signed sentinel keeps those tests
 /// readable and, unlike `0`, cannot collide with a NUL in the source.
 #[inline]
-pub(crate) fn at(src: &str, index: usize) -> i32 {
-    src.as_bytes()
-        .get(index)
-        .map_or(-1, |byte| i32::from(*byte))
+pub(crate) fn at(src: Src<'_>, index: usize) -> i32 {
+    src.at(index)
 }
 
 #[inline]
-pub(crate) fn is(src: &str, index: usize, byte: u8) -> bool {
+pub(crate) fn is(src: Src<'_>, index: usize, byte: u8) -> bool {
     at(src, index) == i32::from(byte)
 }
 
@@ -320,30 +322,30 @@ pub(crate) fn take_units(text: &str, from: usize, count: usize) -> Window<'_> {
 /// `pnt.sI += n; pnt.cI += n` over UTF-16 units, which count characters
 /// there and would count bytes here.
 pub(crate) fn advance_cols(
-    src: &str,
+    src: Src<'_>,
     at: (usize, usize, usize),
     count: usize,
 ) -> (usize, usize, usize) {
-    let mut end = (at.0 + count).min(src.len());
+    let mut end = src.clamp(at.0 + count);
     // Every scan here stops on an ASCII byte, so `end` is normally a
     // character boundary already. A count taken from a token's decoded
     // text rather than from its source span may not be, and slicing one
     // would panic.
-    while end < src.len() && !src.is_char_boundary(end) {
+    while src.has(end) && !src.is_char_boundary(end) {
         end += 1;
     }
-    let columns = src[at.0..end].chars().count();
+    let columns = src.slice(at.0, end).chars().count();
     (end, at.1, at.2 + columns)
 }
 
-/// Carry a `(row, column)` pair forward over `src[from..to]` the way the
+/// Carry a `(row, column)` pair forward over `src.slice(from, to)` the way the
 /// engine's own cursor moves: a line feed starts a new row at column one,
 /// anything else charges one column.
-fn carry(src: &str, from: usize, to: usize, row: usize, column: usize) -> (usize, usize) {
+fn carry(src: Src<'_>, from: usize, to: usize, row: usize, column: usize) -> (usize, usize) {
     let (mut row, mut column) = (row, column);
-    let from = from.min(src.len());
-    let to = to.min(src.len()).max(from);
-    for character in src[from..to].chars() {
+    let from = src.clamp(from);
+    let to = src.clamp(to).max(from);
+    for character in src.slice(from, to).chars() {
         if character == '\n' {
             row += 1;
             column = 1;
@@ -357,8 +359,7 @@ fn carry(src: &str, from: usize, to: usize, row: usize, column: usize) -> (usize
 /// The virtual point for this call: what was stored, carried over
 /// anything another matcher consumed since, or the real cursor when
 /// nothing has been stored yet.
-pub(crate) fn virtual_point_for(lexer: &Lexer<'_>, context: &mut Context) -> (usize, usize) {
-    let point = lexer.point();
+pub(crate) fn virtual_point_for(src: Src<'_>, point: &Point, context: &Context) -> (usize, usize) {
     let here = point.site.si;
     let Some(stored) = state::num(context, state::V_POS) else {
         return (point.site.ri, point.site.ci);
@@ -369,7 +370,7 @@ pub(crate) fn virtual_point_for(lexer: &Lexer<'_>, context: &mut Context) -> (us
     }
     let row = state::usize_at(context, state::V_ROW);
     let column = state::usize_at(context, state::V_COL);
-    carry(lexer.source(), stored, here, row, column)
+    carry(src, stored, here, row, column)
 }
 
 fn store_point(context: &mut Context, act: &Act) {
@@ -378,20 +379,27 @@ fn store_point(context: &mut Context, act: &Act) {
     state::set_usize(context, state::V_COL, act.ci);
 }
 
-/// Apply a decision: build the token at its own virtual point, move the
-/// real cursor by the same number of characters, and record where the
-/// virtual cursor now stands.
-pub(crate) fn apply(lexer: &mut Lexer<'_>, context: &mut Context, act: Act) -> Option<Token> {
-    let point = lexer.point();
+/// A decision made ready to apply: its token built at its own virtual
+/// point, and how many characters the real cursor moves.
+pub(crate) struct Ready {
+    act: Act,
+    token: Option<Token>,
+    characters: usize,
+}
+
+/// Build a decision's token at its own virtual point, and count the
+/// characters the real cursor moves over, reading `src`, the source the
+/// decision was made over, from the cursor at `point`.
+pub(crate) fn ready(src: Src<'_>, point: &Point, act: Act) -> Ready {
     let start = point.site.si;
     let start_pos = point.site.pos;
     let length = point.len;
+    let end = src.read_end();
 
     let token = {
-        let source = lexer.source();
         act.token.as_ref().map(|token| {
-            let offset = token.si.clamp(start, source.len());
-            let pos = start_pos + source[start..offset].chars().count();
+            let offset = token.si.clamp(start, end);
+            let pos = start_pos + src.slice(start, offset).chars().count();
             // A tin of -1 asks the engine to resolve the identity from the
             // name, which it does for every custom matcher result. Every
             // name used here is registered before the grammar is installed.
@@ -413,11 +421,24 @@ pub(crate) fn apply(lexer: &mut Lexer<'_>, context: &mut Context, act: Act) -> O
         })
     };
 
-    let characters = {
-        let source = lexer.source();
-        let end = act.si.clamp(start, source.len());
-        source[start..end].chars().count()
-    };
+    let characters = src.slice(start, act.si.clamp(start, end)).chars().count();
+    Ready {
+        act,
+        token,
+        characters,
+    }
+}
+
+/// Apply a decision made ready: move the real cursor by the same number of
+/// characters as the virtual one, and record where the virtual cursor now
+/// stands.
+pub(crate) fn apply(lexer: &mut Lexer<'_>, context: &mut Context, ready: Ready) -> Option<Token> {
+    let Ready {
+        act,
+        token,
+        characters,
+    } = ready;
+    let start_pos = lexer.point().site.pos;
     if characters > 0 {
         lexer.advance_chars(characters);
     }
@@ -441,46 +462,109 @@ pub(crate) fn apply(lexer: &mut Lexer<'_>, context: &mut Context, act: Act) -> O
 /// The matcher itself, in the shape [`tabnas::Tabnas::imperative_lex_match_ref`]
 /// takes. The decision is made against an immutable view of the source so
 /// the cursor moves exactly once, at the end.
+///
+/// It runs first in every cut the engine makes, so it begins the cut: the
+/// copy of the source it reads is brought up to the window, and the line
+/// breaks, the flow colon's question and the flow scan up to the cursor,
+/// and the state the cut begins with is kept; or, where the engine makes
+/// the last cut again over a wider window, that state is restored
+/// ([`crate::source`]). A decision a read at the end of what has been read
+/// stood on asks the engine to cut again, over a wider window.
 pub(crate) fn yaml_matcher(
     lexer: &mut Lexer<'_>,
     _rule: &mut Rule,
     context: &mut Context,
 ) -> Option<Token> {
-    let (row, column) = virtual_point_for(lexer, context);
-    let start = lexer.point().site.si;
-    let act = {
-        let source = lexer.source();
-        decide(source, (start, row, column), context)
+    let mut kept = Kept::load(context, lexer.windowed());
+    kept.extend(lexer);
+    let point = lexer.point();
+    let start = point.site.si;
+    let touched = Cell::new(false);
+    let again = kept.again(start, source::taken(context));
+    let (row, column) = if again {
+        kept.restore(context)
+    } else {
+        kept.note(start, lexer);
+        let at = virtual_point_for(kept.src(lexer.source(), &touched), &point, context);
+        kept.save(context, at);
+        at
     };
-    // A call that moved the cursor and produced nothing leaves the rest
-    // of the matcher chain reading a position it was not dispatched for.
-    // The text check compensates; see `crate::text::check`.
-    let moved = act.token.is_none() && act.bad.is_none() && act.si != start;
-    state::set_flag(context, state::MOVED, moved);
-    apply(lexer, context, act)
+    // The flow scan goes on from where it stopped, which a cut made again
+    // begins from again: the copy keeps the text from there.
+    let flow_from = state::usize_at(context, state::FLOW_POS);
+    let ready = {
+        let src = kept.src(lexer.source(), &touched);
+        if kept.windowed() {
+            // Before the copy drops the text it went on from.
+            state::update_flow(context, src, start);
+        }
+        let act = decide(src, (start, row, column), context);
+        // A call that moved the cursor and produced nothing leaves the rest
+        // of the matcher chain reading a position it was not dispatched for.
+        // The text check compensates; see `crate::text::check`.
+        let moved = act.token.is_none() && act.bad.is_none() && act.si != start;
+        state::set_flag(context, state::MOVED, moved);
+        ready(src, &point, act)
+    };
+    if !again {
+        kept.trim(flow_from);
+    }
+    let windowed = kept.windowed();
+    kept.store(context);
+    let token = apply(lexer, context, ready);
+    if windowed && touched.get() {
+        // Past the window's end, as the engine's own matchers ask: the
+        // cut is made again over a wider window.
+        lexer.advance_chars(usize::MAX);
+    }
+    token
 }
 
-/// Remove every comment line from `src`, the port of the canonical
-/// `src.replace(/^[ \t]*#[^\n]*(\n|$)/gm, '')`. A line whose first
-/// non-blank character is `#` goes, terminator included.
-fn strip_comment_lines(src: &str) -> String {
-    let mut out = String::with_capacity(src.len());
-    let mut rest = src;
-    while !rest.is_empty() {
-        let end = rest.find('\n').map_or(rest.len(), |index| index + 1);
-        let (line, tail) = rest.split_at(end);
-        if !line.trim_start_matches([' ', '\t']).starts_with('#') {
-            out.push_str(line);
+/// Whether the source holds nothing but comment lines and JavaScript's
+/// white space: `src.trim() === '' || stripped === ''` in the canonical
+/// port, where `stripped` is `src.replace(/^[ \t]*#[^\n]*(\n|$)/gm, '')`
+/// and `trim` strips JavaScript's whitespace rather than Rust's. A line,
+/// ended by a line feed, whose first non-blank character is `#` goes,
+/// terminator included, and every other line must be white space, so the
+/// source is read from its start only as far as the first character that
+/// is neither.
+fn blank_source(src: Src<'_>) -> bool {
+    let mut at = 0;
+    loop {
+        // At a line's start: a comment line goes whole.
+        let mut q = at;
+        while src.is(q, b' ') || src.is(q, b'\t') {
+            q += 1;
         }
-        rest = tail;
+        if src.is(q, b'#') {
+            match src.find(q, b'\n') {
+                Some(end) => {
+                    at = end + 1;
+                    continue;
+                }
+                None => return true,
+            }
+        }
+        // Any other line holds only white space, to its line feed.
+        loop {
+            let Some(character) = src.char_at(at) else {
+                return true;
+            };
+            if !crate::js_space(character) {
+                return false;
+            }
+            at += character.len_utf8();
+            if character == '\n' {
+                break;
+            }
+        }
     }
-    out
 }
 
 /// The body of the canonical `yamlMatcher`, as a decision over an
 /// immutable source.
 #[allow(clippy::too_many_lines)]
-fn decide(src: &str, start: (usize, usize, usize), context: &mut Context) -> Act {
+fn decide(src: Src<'_>, start: (usize, usize, usize), context: &mut Context) -> Act {
     // First call of a parse: plant the state the accessors expect, and
     // answer a source with no content at all with one null value, so the
     // parser yields null rather than refusing the document.
@@ -488,13 +572,10 @@ fn decide(src: &str, start: (usize, usize, usize), context: &mut Context) -> Act
         state::initialise(context);
         // `src.trim() === '' || stripped === ''` in the canonical port,
         // where `trim` strips JavaScript's whitespace rather than Rust's.
-        if src.trim_matches(crate::js_space).is_empty()
-            || strip_comment_lines(src)
-                .trim_matches(crate::js_space)
-                .is_empty()
-        {
+        // The source has been read to its end when it is so.
+        if blank_source(src) {
             return Act::moved(
-                (src.len(), start.1, start.2),
+                (src.clamp(usize::MAX), start.1, start.2),
                 Some(Tok::new("#VL", Value::Null, "", start)),
             );
         }
@@ -512,7 +593,7 @@ fn decide(src: &str, start: (usize, usize, usize), context: &mut Context) -> Act
     // A byte order mark opening the stream is not content: step over it
     // without counting a column. `at_line_start` and the flow scan treat
     // the offset after it as a line start.
-    if cursor.0 == 0 && src.starts_with(BOM) {
+    if cursor.0 == 0 && src.starts_with(0, BOM_TEXT) {
         cursor.0 = BOM.len_utf8();
         // The engine chose this call's matchers for the mark, which leave
         // a flow opener or a comment unclaimed (see `dispatch_family`), so
@@ -520,11 +601,16 @@ fn decide(src: &str, start: (usize, usize, usize), context: &mut Context) -> Act
         let here = at(src, cursor.0);
         if here == i32::from(b'[') || here == i32::from(b'{') {
             let name = flow_punctuation(here).expect("an opener is flow punctuation");
-            let token = Tok::new(name, Value::Undefined, &src[cursor.0..=cursor.0], cursor);
+            let token = Tok::new(
+                name,
+                Value::Undefined,
+                src.slice(cursor.0, cursor.0 + 1),
+                cursor,
+            );
             return Act::moved((cursor.0 + 1, cursor.1, cursor.2 + 1), Some(token));
         }
         if here == i32::from(b'#') {
-            while cursor.0 < src.len() && !line_end(at(src, cursor.0)) {
+            while src.has(cursor.0) && !line_end(at(src, cursor.0)) {
                 cursor.0 += 1;
             }
         }
@@ -533,21 +619,26 @@ fn decide(src: &str, start: (usize, usize, usize), context: &mut Context) -> Act
         // Consuming the last of the source without producing a token
         // leaves the engine's matcher chain with nothing to claim and no
         // character to reject. End of source IS the next token.
-        if cursor.0 >= src.len() {
+        if !src.has(cursor.0) {
             return Act::refuse(cursor);
         }
-        let fwd = &src[cursor.0..];
+        let fwd = src.from(cursor.0);
 
         // A line of only tabs and spaces is blank in YAML, but the engine
-        // refuses a bare tab, so skip it here.
+        // refuses a bare tab, so skip it here. The line is what lies before
+        // the next line feed: blank when the run of tabs and spaces at the
+        // cursor, a tab among them, reaches it or the source's end, so only
+        // that run is read.
         if blank(at(fwd, 0)) {
-            let line_end_index = fwd.find('\n');
-            let line = line_end_index.map_or(fwd, |index| &fwd[..index]);
-            if line.contains('\t')
-                && !line.is_empty()
-                && line.bytes().all(|byte| blank(i32::from(byte)))
-            {
-                let skip = line_end_index.map_or(line.len(), |index| index + 1);
+            let mut run = 0;
+            let mut tab = false;
+            while blank(at(fwd, run)) {
+                tab |= is(fwd, run, b'\t');
+                run += 1;
+            }
+            let after = at(fwd, run);
+            if tab && (after == i32::from(b'\n') || after < 0) {
+                let skip = if after < 0 { run } else { run + 1 };
                 cursor = (cursor.0 + skip, cursor.1 + 1, 0);
                 continue;
             }
@@ -583,10 +674,10 @@ fn decide(src: &str, start: (usize, usize, usize), context: &mut Context) -> Act
         // Directive line at column 0: %YAML, %TAG, %FOO.
         if is(fwd, 0, b'%') && at_line_start(src, cursor.0) {
             let mut pos = 0;
-            while pos < fwd.len() && !line_end(at(fwd, pos)) {
+            while fwd.has(pos) && !line_end(at(fwd, pos)) {
                 pos += 1;
             }
-            let text = fwd[..pos].to_string();
+            let text = fwd.slice(0, pos).to_string();
             let next = advance_cols(src, cursor, pos);
             return Act::moved(
                 next,
@@ -598,11 +689,11 @@ fn decide(src: &str, start: (usize, usize, usize), context: &mut Context) -> Act
         if is(fwd, 0, b'!') && !is(fwd, 1, b'!') && at(fwd, 1) >= 0 {
             if is(fwd, 1, b' ') {
                 let mut val_end = 2;
-                while val_end < fwd.len() && !line_end(at(fwd, val_end)) {
+                while fwd.has(val_end) && !line_end(at(fwd, val_end)) {
                     val_end += 1;
                 }
-                let raw = trim_end(&fwd[2..val_end]).to_string();
-                let source = fwd[..val_end].to_string();
+                let raw = trim_end(fwd.slice(2, val_end)).to_string();
+                let source = fwd.slice(0, val_end).to_string();
                 let next = advance_cols(src, cursor, val_end);
                 return Act::moved(
                     next,
@@ -715,7 +806,7 @@ fn decide(src: &str, start: (usize, usize, usize), context: &mut Context) -> Act
         // call dispatched on is this one.
         if cursor.0 == start.0 && flow_punctuation(at(fwd, 0)).is_some() {
             let name = flow_punctuation(at(fwd, 0)).expect("just tested");
-            let text = &fwd[..1];
+            let text = fwd.slice(0, 1);
             let token = Tok::new(name, Value::String(text.to_string()), text, cursor);
             return Act::moved(advance_cols(src, cursor, 1), Some(token));
         }
@@ -812,22 +903,22 @@ fn flow_punctuation(byte: i32) -> Option<&'static str> {
 /// U+FEFF, the byte order mark.
 pub(crate) const BOM: char = '\u{FEFF}';
 
+/// The byte order mark as text.
+pub(crate) const BOM_TEXT: &str = "\u{FEFF}";
+
 /// Whether `offset` begins a line: the source start, just after a line
 /// break, or just after the byte order mark that opens the stream.
-fn at_line_start(src: &str, offset: usize) -> bool {
+fn at_line_start(src: Src<'_>, offset: usize) -> bool {
     offset == 0
         || line_end(at(src, offset - 1))
-        || (offset == BOM.len_utf8() && src.starts_with(BOM))
+        || (offset == BOM.len_utf8() && src.starts_with(0, BOM_TEXT))
 }
 
 /// The start of the line holding `offset`, not counting a byte order mark
 /// that opens the stream.
-pub(crate) fn line_start_of(src: &str, offset: usize) -> usize {
-    let mut index = offset;
-    while index > 0 && !line_end(at(src, index - 1)) {
-        index -= 1;
-    }
-    if index == 0 && src.starts_with(BOM) {
+pub(crate) fn line_start_of(src: Src<'_>, offset: usize) -> usize {
+    let mut index = src.line_start(offset);
+    if index == 0 && src.starts_with(0, BOM_TEXT) {
         index = BOM.len_utf8();
     }
     index
@@ -835,7 +926,7 @@ pub(crate) fn line_start_of(src: &str, offset: usize) -> usize {
 
 /// Three of `-` or three of `.` at `index`, with nothing said about what
 /// follows.
-fn doc_marker_run(src: &str, index: usize) -> bool {
+fn doc_marker_run(src: Src<'_>, index: usize) -> bool {
     // Compared byte by byte: a slice would panic on a source whose next
     // character is multi-byte, and `---` and `...` are ASCII anyway.
     let head = at(src, index);
@@ -846,7 +937,7 @@ fn doc_marker_run(src: &str, index: usize) -> bool {
 }
 
 /// `---` or `...` followed by a blank, a line end or end of source.
-pub(crate) fn is_doc_marker(src: &str, index: usize) -> bool {
+pub(crate) fn is_doc_marker(src: Src<'_>, index: usize) -> bool {
     doc_marker_run(src, index) && blank_line_end_or_eof(at(src, index + 3))
 }
 
@@ -857,14 +948,14 @@ pub(crate) fn is_doc_marker(src: &str, index: usize) -> bool {
 /// the same: three take a tab after the marker and the one that stops a
 /// BLOCK SCALAR does not, so a `---<TAB>` line stays part of the scalar
 /// there and ends the document everywhere else.
-pub(crate) fn is_doc_marker_no_tab(src: &str, index: usize) -> bool {
+pub(crate) fn is_doc_marker_no_tab(src: Src<'_>, index: usize) -> bool {
     let after = at(src, index + 3);
     doc_marker_run(src, index) && (after == i32::from(b' ') || line_end(after) || after < 0)
 }
 
 /// Whether the source at `index` starts with the ASCII `word`, compared
 /// byte by byte so a multi-byte character cannot split a slice.
-fn starts_with_at(src: &str, index: usize, word: &str) -> bool {
+fn starts_with_at(src: Src<'_>, index: usize, word: &str) -> bool {
     word.bytes()
         .enumerate()
         .all(|(offset, byte)| at(src, index + offset) == i32::from(byte))
@@ -872,7 +963,7 @@ fn starts_with_at(src: &str, index: usize, word: &str) -> bool {
 
 /// `^!!(seq|map|omap|set|pairs|binary|ordered|python/\S*)\b`, the
 /// structural tags whose value is the structure that follows.
-fn is_struct_tag(fwd: &str) -> bool {
+fn is_struct_tag(fwd: Src<'_>) -> bool {
     for name in ["seq", "map", "omap", "set", "pairs", "binary", "ordered"] {
         if starts_with_at(fwd, 2, name) {
             // The canonical pattern ends in `\b`, so a longer word does
@@ -893,10 +984,17 @@ fn is_struct_tag(fwd: &str) -> bool {
     // the slash carries one: `\S*` backtracks to the first of them. The
     // word characters are JavaScript's ASCII `\w`, and the run ends at
     // JavaScript's `\s`. `!!python/ [1]` therefore keeps its `[1]`.
-    fwd["!!python/".len()..]
-        .chars()
-        .take_while(|character| !crate::js_space(*character))
-        .any(|character| character.is_ascii_alphanumeric() || character == '_')
+    let mut index = "!!python/".len();
+    while let Some(character) = fwd.char_at(index) {
+        if crate::js_space(character) {
+            return false;
+        }
+        if character.is_ascii_alphanumeric() || character == '_' {
+            return true;
+        }
+        index += character.len_utf8();
+    }
+    false
 }
 
 /// Encode a token for the queue in the context bag, and read it back.
@@ -952,9 +1050,9 @@ fn decode_token(value: &Value, fallback: (usize, usize, usize)) -> Tok {
 // ---------------------------------------------------------------------
 
 /// The characters an anchor or alias name stops at.
-fn name_end(fwd: &str, alias: bool) -> usize {
+fn name_end(fwd: Src<'_>, alias: bool) -> usize {
     let mut index = 1;
-    while index < fwd.len() {
+    while fwd.has(index) {
         let byte = at(fwd, index);
         if blank(byte)
             || line_end(byte)
@@ -976,10 +1074,10 @@ fn name_end(fwd: &str, alias: bool) -> usize {
     index
 }
 
-fn alias(src: &str, fwd: &str, cursor: (usize, usize, usize), context: &mut Context) -> Act {
+fn alias(src: Src<'_>, fwd: Src<'_>, cursor: (usize, usize, usize), context: &mut Context) -> Act {
     let end = name_end(fwd, true);
-    let name = fwd[1..end].to_string();
-    let source = fwd[..end].to_string();
+    let name = fwd.slice(1, end).to_string();
+    let source = fwd.slice(0, end).to_string();
 
     // YAML 1.2.2, 7.1: "It is an error for an alias node to use an anchor
     // that does not previously occur in the document." Checked here, as a
@@ -1042,13 +1140,13 @@ fn alias(src: &str, fwd: &str, cursor: (usize, usize, usize), context: &mut Cont
 /// to continue from, or a token when the anchored value is a flow
 /// collection whose opener this has to emit itself.
 fn anchor(
-    src: &str,
-    fwd: &str,
+    src: Src<'_>,
+    fwd: Src<'_>,
     cursor: (usize, usize, usize),
     context: &mut Context,
 ) -> Result<(usize, usize, usize), Box<Act>> {
     let end = name_end(fwd, false);
-    let name = fwd[1..end].to_string();
+    let name = fwd.slice(1, end).to_string();
     let mut skip = end;
     if blank(at(fwd, skip)) {
         skip += 1;
@@ -1076,16 +1174,16 @@ fn anchor(
             index += 1;
         }
         if is(src, index, b'#') {
-            while index < src.len() && !line_end(at(src, index)) {
+            while src.has(index) && !line_end(at(src, index)) {
                 index += 1;
             }
             next = advance_cols(src, next, index - next.0);
         }
     }
 
-    let inline = !(standalone && (line_end(at(src, next.0)) || next.0 >= src.len()));
+    let inline = !(standalone && (line_end(at(src, next.0)) || !src.has(next.0)));
     if inline {
-        let peek = &src[next.0.min(src.len())..];
+        let peek = src.from(src.clamp(next.0));
         let head = at(peek, 0);
         if head >= 0
             && head != i32::from(b'[')
@@ -1095,7 +1193,7 @@ fn anchor(
             && !line_end(head)
         {
             if let Some(scalar) = inline_scalar(peek) {
-                state::map_set(context, state::ANCHORS, name.clone(), Value::String(scalar));
+                state::map_set_in_cut(context, state::ANCHORS, name.clone(), Value::String(scalar));
             }
         }
     }
@@ -1146,17 +1244,17 @@ fn anchor(
 }
 
 /// The scalar an inline anchor names, read off the rest of the line.
-fn inline_scalar(peek: &str) -> Option<String> {
+fn inline_scalar(peek: Src<'_>) -> Option<String> {
     match at(peek, 0) {
         value if value == i32::from(b'"') => {
             let mut index = 1;
-            while index < peek.len() && !is(peek, index, b'"') {
+            while peek.has(index) && !is(peek, index, b'"') {
                 if is(peek, index, b'\\') {
                     index += 1;
                 }
                 index += 1;
             }
-            let raw = &peek[1..index.min(peek.len())];
+            let raw = peek.slice(1, peek.clamp(index));
             Some(
                 raw.replace("\\n", "\n")
                     .replace("\\t", "\t")
@@ -1166,18 +1264,18 @@ fn inline_scalar(peek: &str) -> Option<String> {
         }
         value if value == i32::from(b'\'') => {
             let mut index = 1;
-            while index < peek.len() && !is(peek, index, b'\'') {
+            while peek.has(index) && !is(peek, index, b'\'') {
                 if is(peek, index, b'\'') && is(peek, index + 1, b'\'') {
                     index += 1;
                 }
                 index += 1;
             }
-            let raw = &peek[1..index.min(peek.len())];
+            let raw = peek.slice(1, peek.clamp(index));
             Some(raw.replace("''", "'"))
         }
         _ => {
             let mut index = 0;
-            while index < peek.len() {
+            while peek.has(index) {
                 let byte = at(peek, index);
                 if line_end(byte)
                     || byte == i32::from(b',')
@@ -1196,7 +1294,7 @@ fn inline_scalar(peek: &str) -> Option<String> {
             }
             // `peek.substring(0, ei).trim()`, again JavaScript's
             // whitespace rather than Rust's.
-            let raw = peek[..index].trim_matches(crate::js_space);
+            let raw = peek.slice(0, index).trim_matches(crate::js_space);
             if raw.is_empty() {
                 None
             } else {
@@ -1210,10 +1308,10 @@ fn inline_scalar(peek: &str) -> Option<String> {
 // Tags
 // ---------------------------------------------------------------------
 
-fn local_tag(src: &str, fwd: &str, cursor: (usize, usize, usize)) -> (usize, usize, usize) {
+fn local_tag(src: Src<'_>, fwd: Src<'_>, cursor: (usize, usize, usize)) -> (usize, usize, usize) {
     let mut tag_end = 1;
     // A tab does not end a tag name, only a space or a line break does.
-    while tag_end < fwd.len() && !is(fwd, tag_end, b' ') && !line_end(at(fwd, tag_end)) {
+    while fwd.has(tag_end) && !is(fwd, tag_end, b' ') && !line_end(at(fwd, tag_end)) {
         tag_end += 1;
     }
     if is(fwd, tag_end, b' ') {
@@ -1221,7 +1319,7 @@ fn local_tag(src: &str, fwd: &str, cursor: (usize, usize, usize)) -> (usize, usi
     }
     let mut next = advance_cols(src, cursor, tag_end);
 
-    if next.0 < src.len() && line_end(at(src, next.0)) {
+    if src.has(next.0) && line_end(at(src, next.0)) {
         // Standalone on its line: take the newline and the next indent.
         let mut standalone = true;
         let mut back = cursor.0;
@@ -1251,12 +1349,12 @@ fn local_tag(src: &str, fwd: &str, cursor: (usize, usize, usize)) -> (usize, usi
 }
 
 fn struct_tag(
-    src: &str,
-    fwd: &str,
+    src: Src<'_>,
+    fwd: Src<'_>,
     cursor: (usize, usize, usize),
 ) -> Result<(usize, usize, usize), Box<Act>> {
     let mut skip = 2;
-    while skip < fwd.len() && !is(fwd, skip, b' ') && !is(fwd, skip, b'\n') {
+    while fwd.has(skip) && !is(fwd, skip, b' ') && !is(fwd, skip, b'\n') {
         skip += 1;
     }
     while is(fwd, skip, b' ') {
@@ -1315,7 +1413,7 @@ fn struct_tag(
             index += 1;
         }
         if is(src, index, b'#') {
-            while index < src.len() && !line_end(at(src, index)) {
+            while src.has(index) && !line_end(at(src, index)) {
                 index += 1;
             }
             next = advance_cols(src, next, index - next.0);
@@ -1342,18 +1440,18 @@ fn struct_tag(
 // Document frames
 // ---------------------------------------------------------------------
 
-fn doc_marker(src: &str, fwd: &str, cursor: (usize, usize, usize)) -> Act {
+fn doc_marker(src: Src<'_>, fwd: Src<'_>, cursor: (usize, usize, usize)) -> Act {
     let ended = is(fwd, 0, b'.');
     let mut pos = 3;
     while blank(at(fwd, pos)) {
         pos += 1;
     }
-    let inline = pos < fwd.len() && !line_end(at(fwd, pos)) && !is(fwd, pos, b'#');
+    let inline = fwd.has(pos) && !line_end(at(fwd, pos)) && !is(fwd, pos, b'#');
     let next = if inline {
         advance_cols(src, cursor, pos)
     } else {
         let mut end = pos;
-        while end < fwd.len() && !line_end(at(fwd, end)) {
+        while fwd.has(end) && !line_end(at(fwd, end)) {
             end += 1;
         }
         let mut rows = 0;
@@ -1369,7 +1467,7 @@ fn doc_marker(src: &str, fwd: &str, cursor: (usize, usize, usize)) -> Act {
     let name = if ended { "#DE" } else { "#DS" };
     Act::moved(
         next,
-        Some(Tok::new(name, Value::Undefined, &fwd[..3], next)),
+        Some(Tok::new(name, Value::Undefined, fwd.slice(0, 3), next)),
     )
 }
 
@@ -1410,14 +1508,14 @@ fn push_code_point(code: u32, pending: &mut Option<u32>, out: &mut String) {
     }
 }
 
-fn double_quoted(src: &str, fwd: &str, cursor: (usize, usize, usize)) -> Act {
+fn double_quoted(src: Src<'_>, fwd: Src<'_>, cursor: (usize, usize, usize)) -> Act {
     let mut index = 1;
     let mut value = String::new();
     // A high surrogate escape waiting for the low one that completes it.
     let mut pending = None;
     // Characters up to here came from escapes and are not trimmable.
     let mut escaped_upto = 0usize;
-    while index < fwd.len() && !is(fwd, index, b'"') {
+    while fwd.has(index) && !is(fwd, index, b'"') {
         if is(fwd, index, b'\\') {
             index += 1;
             let escape = at(fwd, index);
@@ -1470,7 +1568,7 @@ fn double_quoted(src: &str, fwd: &str, cursor: (usize, usize, usize)) -> Act {
                 // nothing else: it is not the length of the text the
                 // window happened to cover.
                 let from = index + 1;
-                let window = take_units(fwd, from, width);
+                let window = take_units(fwd.up_to(from + 4 * width + 4), from, width);
                 let number = crate::parse_int_16(window.digits);
                 if escape == i32::from(b'U') {
                     // `String.fromCodePoint` THROWS a RangeError on
@@ -1499,7 +1597,7 @@ fn double_quoted(src: &str, fwd: &str, cursor: (usize, usize, usize)) -> Act {
                     // goes through, it completes a high surrogate the
                     // escape left pending, exactly as it does there.
                     push_code_point(low, &mut pending, &mut value);
-                    index += fwd[index..].chars().next().map_or(0, char::len_utf8);
+                    index += fwd.char_at(index).map_or(0, char::len_utf8);
                 }
                 continue;
             }
@@ -1524,7 +1622,7 @@ fn double_quoted(src: &str, fwd: &str, cursor: (usize, usize, usize)) -> Act {
                 index += 1;
                 continue;
             }
-            let character = fwd[index..].chars().next().unwrap_or('\\');
+            let character = fwd.char_at(index).unwrap_or('\\');
             flush_surrogate(&mut pending, &mut value);
             value.push(character);
             index += character.len_utf8();
@@ -1541,7 +1639,7 @@ fn double_quoted(src: &str, fwd: &str, cursor: (usize, usize, usize)) -> Act {
             }
             value.truncate(trim_to);
             let mut empty_lines = 0;
-            while index < fwd.len() && line_end(at(fwd, index)) {
+            while fwd.has(index) && line_end(at(fwd, index)) {
                 if is(fwd, index, b'\r') {
                     index += 1;
                 }
@@ -1562,7 +1660,7 @@ fn double_quoted(src: &str, fwd: &str, cursor: (usize, usize, usize)) -> Act {
             }
             continue;
         }
-        let character = fwd[index..].chars().next().unwrap_or('"');
+        let character = fwd.char_at(index).unwrap_or('"');
         flush_surrogate(&mut pending, &mut value);
         value.push(character);
         index += character.len_utf8();
@@ -1571,7 +1669,7 @@ fn double_quoted(src: &str, fwd: &str, cursor: (usize, usize, usize)) -> Act {
     if is(fwd, index, b'"') {
         index += 1;
     }
-    let source = fwd[..index.min(fwd.len())].to_string();
+    let source = fwd.slice(0, fwd.clamp(index)).to_string();
     let next = advance_cols(src, cursor, index);
     Act::moved(
         next,
@@ -1579,10 +1677,10 @@ fn double_quoted(src: &str, fwd: &str, cursor: (usize, usize, usize)) -> Act {
     )
 }
 
-fn single_quoted(src: &str, fwd: &str, cursor: (usize, usize, usize)) -> Act {
+fn single_quoted(src: Src<'_>, fwd: Src<'_>, cursor: (usize, usize, usize)) -> Act {
     let mut index = 1;
     let mut value = String::new();
-    while index < fwd.len() {
+    while fwd.has(index) {
         if is(fwd, index, b'\'') {
             if is(fwd, index + 1, b'\'') {
                 value.push('\'');
@@ -1597,7 +1695,7 @@ fn single_quoted(src: &str, fwd: &str, cursor: (usize, usize, usize)) -> Act {
                 value.pop();
             }
             let mut empty_lines = 0;
-            while index < fwd.len() && line_end(at(fwd, index)) {
+            while fwd.has(index) && line_end(at(fwd, index)) {
                 if is(fwd, index, b'\r') {
                     index += 1;
                 }
@@ -1618,11 +1716,11 @@ fn single_quoted(src: &str, fwd: &str, cursor: (usize, usize, usize)) -> Act {
             }
             continue;
         }
-        let character = fwd[index..].chars().next().unwrap_or('\'');
+        let character = fwd.char_at(index).unwrap_or('\'');
         value.push(character);
         index += character.len_utf8();
     }
-    let source = fwd[..index.min(fwd.len())].to_string();
+    let source = fwd.slice(0, fwd.clamp(index)).to_string();
     let next = advance_cols(src, cursor, index);
     Act::moved(
         next,
@@ -1632,58 +1730,12 @@ fn single_quoted(src: &str, fwd: &str, cursor: (usize, usize, usize)) -> Act {
 
 /// Whether the nearest significant character before `offset`, skipping
 /// whitespace and line comments, closes a quoted scalar. That is what
-/// makes a bare `:` a key separator in JSON-compatible flow syntax.
-fn quoted_before(src: &str, offset: usize) -> bool {
-    let mut previous = offset as isize - 1;
-    while previous >= 0 {
-        let byte = at(src, previous as usize);
-        if blank(byte) || line_end(byte) {
-            previous -= 1;
-            continue;
-        }
-        let mut line_start = previous as usize;
-        while line_start > 0 && !line_end(at(src, line_start - 1)) {
-            line_start -= 1;
-        }
-        // A `#` inside a quoted scalar is literal, not a comment start.
-        let mut hash_at: isize = -1;
-        let mut quote: i32 = 0;
-        let mut index = line_start;
-        while index <= previous as usize {
-            let character = at(src, index);
-            if quote != 0 {
-                if quote == i32::from(b'"') && character == i32::from(b'\\') {
-                    index += 2;
-                    continue;
-                }
-                if character == quote {
-                    if quote == i32::from(b'\'') && is(src, index + 1, b'\'') {
-                        index += 2;
-                        continue;
-                    }
-                    quote = 0;
-                }
-                index += 1;
-                continue;
-            }
-            if character == i32::from(b'"') || character == i32::from(b'\'') {
-                quote = character;
-                index += 1;
-                continue;
-            }
-            if character == i32::from(b'#') && (index == line_start || blank(at(src, index - 1))) {
-                hash_at = index as isize;
-                break;
-            }
-            index += 1;
-        }
-        if hash_at >= 0 {
-            previous = hash_at - 1;
-            continue;
-        }
-        break;
-    }
-    previous >= 0 && (is(src, previous as usize, b'"') || is(src, previous as usize, b'\''))
+/// makes a bare `:` a key separator in JSON-compatible flow syntax. The
+/// answer is kept as the source goes by ([`crate::source::Lines`]), so
+/// however many lines back the quote is, nothing is read behind the
+/// cursor's line.
+fn quoted_before(src: Src<'_>, offset: usize) -> bool {
+    src.quote_before(offset)
 }
 
 // ---------------------------------------------------------------------
@@ -1695,8 +1747,8 @@ fn quoted_before(src: &str, offset: usize) -> bool {
 /// (`64 characters, hexadecimal.`) is a plain scalar, and the engine's
 /// number matcher would otherwise take only the digits.
 fn numeric_plain(
-    src: &str,
-    fwd: &str,
+    src: Src<'_>,
+    fwd: Src<'_>,
     cursor: (usize, usize, usize),
     context: &mut Context,
 ) -> Option<Act> {
@@ -1705,7 +1757,7 @@ fn numeric_plain(
     let mut trailing_text = false;
     let mut block_comma = false;
     let mut index = 1;
-    while index < fwd.len() && !line_end(at(fwd, index)) {
+    while fwd.has(index) && !line_end(at(fwd, index)) {
         // An embedded colon does not end the scan: the scalar can go on
         // past a space (`09:00 AM`), which only the trailing-text branch
         // reads as one scalar (tabnas/yaml#90).
@@ -1737,7 +1789,7 @@ fn numeric_plain(
                 after += 1;
             }
             let following = at(fwd, after);
-            if after < fwd.len()
+            if fwd.has(after)
                 && !line_end(following)
                 && following != i32::from(b'#')
                 && following != i32::from(b':')
@@ -1775,14 +1827,14 @@ fn numeric_plain(
     // `5[` and `12[x]` are plain scalars too. The number matcher took the
     // digits and the parse failed on the bracket (tabnas/yaml#99).
     let mut token_end = 0;
-    while token_end < fwd.len()
+    while fwd.has(token_end)
         && !blank_line_end_or_eof(at(fwd, token_end))
         && !(in_flow
             && (is(fwd, token_end, b',') || is(fwd, token_end, b']') || is(fwd, token_end, b'}')))
     {
         token_end += 1;
     }
-    let token = &fwd.as_bytes()[..token_end];
+    let token = fwd.slice(0, token_end).as_bytes();
     if token.contains(&b'#')
         || (!in_flow && token.iter().any(|b| matches!(b, b'[' | b']' | b'{' | b'}')))
     {
@@ -1793,13 +1845,13 @@ fn numeric_plain(
         // In a flow collection the scalar also ends at its `,` `]` `}`:
         // `[1, 12:30]` holds "12:30", not "12:30,".
         let mut end = 0;
-        while end < fwd.len()
+        while fwd.has(end)
             && !blank_line_end_or_eof(at(fwd, end))
             && !(in_flow && (is(fwd, end, b',') || is(fwd, end, b']') || is(fwd, end, b'}')))
         {
             end += 1;
         }
-        let text = fwd[..end].to_string();
+        let text = fwd.slice(0, end).to_string();
         let next = advance_cols(src, cursor, end);
         return Some(Act::moved(
             next,
@@ -1818,14 +1870,14 @@ fn numeric_plain(
 /// emitted here: the fixed-token matcher never gets a clean look at the
 /// advanced position and would read `]` as a bad character.
 fn flow_newline(
-    src: &str,
-    fwd: &str,
+    src: Src<'_>,
+    fwd: Src<'_>,
     cursor: (usize, usize, usize),
 ) -> Result<(usize, usize, usize), Box<Act>> {
     let mut pos = 0;
     let mut rows = 0;
     let mut last_newline: isize = -1;
-    while pos < fwd.len() && (line_end(at(fwd, pos)) || blank(at(fwd, pos))) {
+    while fwd.has(pos) && (line_end(at(fwd, pos)) || blank(at(fwd, pos))) {
         if is(fwd, pos, b'\n') {
             rows += 1;
             last_newline = pos as isize;
@@ -1833,14 +1885,14 @@ fn flow_newline(
         pos += 1;
     }
     if is(fwd, pos, b'#') {
-        while pos < fwd.len() && !line_end(at(fwd, pos)) {
+        while fwd.has(pos) && !line_end(at(fwd, pos)) {
             pos += 1;
         }
     }
     let column = if last_newline >= 0 {
-        fwd[last_newline as usize..pos].chars().count()
+        fwd.slice(last_newline as usize, pos).chars().count()
     } else {
-        cursor.2 + fwd[..pos].chars().count()
+        cursor.2 + fwd.slice(0, pos).chars().count()
     };
     let next = (cursor.0 + pos, cursor.1 + rows, column);
 
@@ -1872,15 +1924,15 @@ fn flow_newline(
 /// on. Blank, comment-only, tab-only and anchor-only lines are consumed
 /// so the indent reported is that of the next line with content.
 fn block_newline(
-    _src: &str,
-    fwd: &str,
+    _src: Src<'_>,
+    fwd: Src<'_>,
     cursor: (usize, usize, usize),
     context: &mut Context,
 ) -> Result<(usize, usize, usize), Box<Act>> {
     let mut pos = 0;
     let mut spaces = 0;
     let mut rows = 0;
-    while pos < fwd.len() {
+    while fwd.has(pos) {
         if is(fwd, pos, b'\r') && is(fwd, pos + 1, b'\n') {
             pos += 2;
             rows += 1;
@@ -1896,7 +1948,7 @@ fn block_newline(
             spaces += 1;
         }
         if is(fwd, pos, b'#') {
-            while pos < fwd.len() && !line_end(at(fwd, pos)) {
+            while fwd.has(pos) && !line_end(at(fwd, pos)) {
                 pos += 1;
             }
             continue;
@@ -1906,27 +1958,27 @@ fn block_newline(
             while blank(at(fwd, tab)) {
                 tab += 1;
             }
-            if tab >= fwd.len() || line_end(at(fwd, tab)) {
+            if !fwd.has(tab) || line_end(at(fwd, tab)) {
                 pos = tab;
                 continue;
             }
         }
         if is(fwd, pos, b'&') {
             let mut end = pos + 1;
-            while end < fwd.len() && !blank_line_end_or_eof(at(fwd, end)) {
+            while fwd.has(end) && !blank_line_end_or_eof(at(fwd, end)) {
                 end += 1;
             }
             let mut after = end;
             while blank(at(fwd, after)) {
                 after += 1;
             }
-            if after >= fwd.len() || line_end(at(fwd, after)) || is(fwd, after, b'#') {
-                let name = &fwd[pos + 1..end];
+            if !fwd.has(after) || line_end(at(fwd, after)) || is(fwd, after, b'#') {
+                let name = fwd.slice(pos + 1, end);
                 let mut pending = indexmap::IndexMap::new();
                 pending.insert("n".to_string(), Value::String(name.to_string()));
                 pending.insert("i".to_string(), Value::Bool(false));
                 state::pend_anchor(context, name, Value::object(pending));
-                while after < fwd.len() && !line_end(at(fwd, after)) {
+                while fwd.has(after) && !line_end(at(fwd, after)) {
                     after += 1;
                 }
                 pos = after;
@@ -1936,7 +1988,7 @@ fn block_newline(
     }
 
     // Trailing newlines: the source is exhausted.
-    if pos >= fwd.len() {
+    if !fwd.has(pos) {
         let next = (cursor.0 + pos, cursor.1 + rows, spaces + 1);
         return Err(Box::new(Act::moved(
             next,
@@ -1961,7 +2013,12 @@ fn block_newline(
         return Ok((cursor.0 + pos, cursor.1 + rows, 0));
     }
 
-    let token = Tok::new("#IN", Value::Number(spaces as f64), &fwd[..pos], cursor);
+    let token = Tok::new(
+        "#IN",
+        Value::Number(spaces as f64),
+        fwd.slice(0, pos),
+        cursor,
+    );
     Err(Box::new(Act::moved(
         (cursor.0 + pos, cursor.1 + rows, spaces + 1),
         Some(token),
@@ -1980,17 +2037,20 @@ fn block_newline(
 /// Whether a quoted scalar opens at `index` and is a block mapping key:
 /// its closing quote is followed, on the same line, by `:` and then
 /// whitespace or the end of the line. Mirrors the canonical `quotedKeyAt`.
-fn quoted_key_at(src: &str, index: usize) -> bool {
-    let bytes = src.as_bytes();
-    let quote = bytes[index];
+fn quoted_key_at(src: Src<'_>, index: usize) -> bool {
+    let byte = |k: usize| {
+        let c = src.at(k);
+        (c >= 0).then_some(c as u8)
+    };
+    let quote = src.at(index) as u8;
     let mut j = index + 1;
-    while j < bytes.len() && !matches!(bytes[j], b'\n' | b'\r') {
-        if quote == b'"' && bytes[j] == b'\\' {
+    while let Some(c) = byte(j).filter(|c| !matches!(c, b'\n' | b'\r')) {
+        if quote == b'"' && c == b'\\' {
             j += 2;
             continue;
         }
-        if bytes[j] == quote {
-            if quote == b'\'' && bytes.get(j + 1) == Some(&b'\'') {
+        if c == quote {
+            if quote == b'\'' && byte(j + 1) == Some(b'\'') {
                 j += 2;
                 continue;
             }
@@ -1998,15 +2058,14 @@ fn quoted_key_at(src: &str, index: usize) -> bool {
         }
         j += 1;
     }
-    if bytes.get(j) != Some(&quote) {
+    if byte(j) != Some(quote) {
         return false;
     }
     j += 1;
-    while matches!(bytes.get(j), Some(b' ' | b'\t')) {
+    while matches!(byte(j), Some(b' ' | b'\t')) {
         j += 1;
     }
-    bytes.get(j) == Some(&b':')
-        && matches!(bytes.get(j + 1), None | Some(b' ' | b'\t' | b'\n' | b'\r'))
+    byte(j) == Some(b':') && matches!(byte(j + 1), None | Some(b' ' | b'\t' | b'\n' | b'\r'))
 }
 
 /// The single-character escapes of a double-quoted scalar, YAML 1.2's
@@ -2121,16 +2180,21 @@ fn hex_at(chars: &[char], at: usize, width: usize, end: usize) -> Option<u32> {
         .try_fold(0u32, |n, c| c.to_digit(16).map(|d| n * 16 + d))
 }
 
-fn explicit_key(src: &str, fwd: &str, cursor: (usize, usize, usize), context: &mut Context) -> Act {
+fn explicit_key(
+    src: Src<'_>,
+    fwd: Src<'_>,
+    cursor: (usize, usize, usize),
+    context: &mut Context,
+) -> Act {
     let start = if blank(at(fwd, 1)) { 2 } else { 1 };
     let mut key_end = start;
-    while key_end < fwd.len() && !line_end(at(fwd, key_end)) {
+    while fwd.has(key_end) && !line_end(at(fwd, key_end)) {
         if is(fwd, key_end, b' ') && is(fwd, key_end + 1, b'#') {
             break;
         }
         key_end += 1;
     }
-    let mut key = trim_end(&fwd[start..key_end]).to_string();
+    let mut key = trim_end(fwd.slice(start, key_end)).to_string();
 
     // A `!!type` prefix on the key is stripped and applied.
     if let Some(stripped) = strip_key_tag(&key) {
@@ -2144,7 +2208,7 @@ fn explicit_key(src: &str, fwd: &str, cursor: (usize, usize, usize), context: &m
     let key_token = if key == raw_key { "#TX" } else { "#ST" };
 
     let mut consumed = key_end;
-    while consumed < fwd.len() && !line_end(at(fwd, consumed)) {
+    while fwd.has(consumed) && !line_end(at(fwd, consumed)) {
         consumed += 1;
     }
     let mut before_newline = consumed;
@@ -2173,13 +2237,13 @@ fn explicit_key(src: &str, fwd: &str, cursor: (usize, usize, usize), context: &m
     if let Some((folded, chomp, explicit_indent)) = block_scalar_key(&key) {
         let mut lines: Vec<String> = Vec::new();
         let mut content_indent = 0usize;
-        while consumed < fwd.len() {
+        while fwd.has(consumed) {
             let mut line_indent = 0;
             while is(fwd, consumed + line_indent, b' ') {
                 line_indent += 1;
             }
             let after = consumed + line_indent;
-            if after >= fwd.len() || line_end(at(fwd, after)) {
+            if !fwd.has(after) || line_end(at(fwd, after)) {
                 lines.push(String::new());
                 consumed = after;
                 if is(fwd, consumed, b'\r') {
@@ -2202,10 +2266,13 @@ fn explicit_key(src: &str, fwd: &str, cursor: (usize, usize, usize), context: &m
                 break;
             }
             let mut line_end_index = after;
-            while line_end_index < fwd.len() && !line_end(at(fwd, line_end_index)) {
+            while fwd.has(line_end_index) && !line_end(at(fwd, line_end_index)) {
                 line_end_index += 1;
             }
-            lines.push(fwd[consumed + content_indent..line_end_index].to_string());
+            lines.push(
+                fwd.slice(consumed + content_indent, line_end_index)
+                    .to_string(),
+            );
             consumed = line_end_index;
             if is(fwd, consumed, b'\r') {
                 consumed += 1;
@@ -2230,14 +2297,14 @@ fn explicit_key(src: &str, fwd: &str, cursor: (usize, usize, usize), context: &m
         }
     } else {
         // A plain key may run over several lines.
-        while consumed < fwd.len() {
+        while fwd.has(consumed) {
             let mut line_indent = 0;
             while is(fwd, consumed + line_indent, b' ') {
                 line_indent += 1;
             }
             let mut after = consumed + line_indent;
-            if after < fwd.len() && is(fwd, after, b'#') {
-                while after < fwd.len() && !line_end(at(fwd, after)) {
+            if fwd.has(after) && is(fwd, after, b'#') {
+                while fwd.has(after) && !line_end(at(fwd, after)) {
                     after += 1;
                 }
                 before_newline = after;
@@ -2257,13 +2324,13 @@ fn explicit_key(src: &str, fwd: &str, cursor: (usize, usize, usize), context: &m
                 && !is(fwd, after, b'-')
             {
                 let mut continuation_end = after;
-                while continuation_end < fwd.len() && !line_end(at(fwd, continuation_end)) {
+                while fwd.has(continuation_end) && !line_end(at(fwd, continuation_end)) {
                     if is(fwd, continuation_end, b' ') && is(fwd, continuation_end + 1, b'#') {
                         break;
                     }
                     continuation_end += 1;
                 }
-                let text = trim_end(&fwd[after..continuation_end]);
+                let text = trim_end(fwd.slice(after, continuation_end));
                 if !text.is_empty() {
                     key.push(' ');
                     key.push_str(text);
@@ -2300,7 +2367,9 @@ fn explicit_key(src: &str, fwd: &str, cursor: (usize, usize, usize), context: &m
         }
     }
 
-    let source = fwd[..if has_value { consumed } else { key_end }].to_string();
+    let source = fwd
+        .slice(0, if has_value { consumed } else { key_end })
+        .to_string();
 
     if has_value {
         let indent = value_consumed - consumed;
@@ -2320,7 +2389,7 @@ fn explicit_key(src: &str, fwd: &str, cursor: (usize, usize, usize), context: &m
                 || following == i32::from(b'!');
             if !quoted_or_flow {
                 let mut line_end_index = value_consumed;
-                while line_end_index < fwd.len() && !line_end(at(fwd, line_end_index)) {
+                while fwd.has(line_end_index) && !line_end(at(fwd, line_end_index)) {
                     line_end_index += 1;
                 }
                 for index in value_consumed..line_end_index {

@@ -141,15 +141,15 @@ j.parse('name: Alice\nitems:\n  - one\n  - two\n')
 | Path | What it is |
 |---|---|
 | [`ts/`](ts/) | **Canonical** TypeScript implementation — the `@tabnas/yaml` package. The entire plugin (lexer matcher + grammar wiring + scalar/anchor/tag handling) lives in the single large [`ts/src/yaml.ts`](ts/src/yaml.ts). Depends on `@tabnas/jsonic` and `@tabnas/parser`. |
-| [`go/`](go/) | Go port — `github.com/tabnas/yaml/go`. The whole plugin is in [`go/yaml.go`](go/yaml.go); the package's `const VERSION` lives there too. Module path is `github.com/tabnas/yaml/go`; its dependencies are whatever [`go/go.mod`](go/go.mod) requires (see below). |
-| [`rs/`](rs/) | Rust port — crate `tabnas-yaml`, library `tabnas_yaml`. The plugin is [`rs/src/lib.rs`](rs/src/lib.rs) (options, grammar, rule wiring, entry points) with the lexer in `rs/src/lex.rs`, the scalar handlers in `rs/src/text.rs` and the per-parse state in `rs/src/state.rs`; `pub const VERSION` lives in `lib.rs`. Path dependencies on sibling checkouts of **parser**, **jsonic** (and **json** beneath it) and, for tests, **support**. |
+| [`go/`](go/) | Go port — `github.com/tabnas/yaml/go`. The whole plugin is in [`go/yaml.go`](go/yaml.go), with the source as its scans read it, through the window, in [`go/source.go`](go/source.go); the package's `const VERSION` lives in `yaml.go`. Module path is `github.com/tabnas/yaml/go`; its dependencies are whatever [`go/go.mod`](go/go.mod) requires (see below). |
+| [`rs/`](rs/) | Rust port — crate `tabnas-yaml`, library `tabnas_yaml`. The plugin is [`rs/src/lib.rs`](rs/src/lib.rs) (options, grammar, rule wiring, entry points) with the lexer in `rs/src/lex.rs`, the scalar handlers in `rs/src/text.rs`, the per-parse state in `rs/src/state.rs` and the source as the scans read it, through the window, in `rs/src/source.rs`; `pub const VERSION` lives in `lib.rs`. Path dependencies on sibling checkouts of **parser**, **jsonic** (and **json** beneath it) and, for tests, **support**. |
 | [`alchemy/render.alc`](alchemy/render.alc) | **YAML's render**, an [alchemy](https://github.com/tabnas/alchemy) library whose entry point `yaml-render` writes a tree's events as one YAML document. The manifest's `translate` object names it and every runtime embeds it (`npm run embed` in `ts/` writes the copies); see [The translation parts](#the-translation-parts). |
 | [`yaml-grammar.jsonic`](yaml-grammar.jsonic) | **Single source of truth for the grammar**, written in jsonic syntax. Lives at the **repo root** and is embedded verbatim into `ts/src/yaml.ts`, `go/yaml.go` and `rs/src/lib.rs` by [`ts/embed-grammar.js`](ts/embed-grammar.js). Do not edit the embedded copies by hand — edit the `.jsonic` and re-run the embed. |
 | [`test/spec/`](test/spec/) | **Repo-root shared fixtures**, auto-discovered and run by all three runtimes: `*.tsv` files with an `input`/`expected`/`opts` header row. See [`test/AGENTS.md`](test/AGENTS.md) for the exact format. |
 | [`test/yaml-test-suite/`](test/yaml-test-suite/) | The upstream YAML Test Suite corpus, vendored verbatim and run by **all three** runtimes, plus the two shared ledgers every runner reads: [`test/yaml-test-suite-lenient.tsv`](test/yaml-test-suite-lenient.tsv) (`error` cases this parser accepts) and [`test/yaml-test-suite-unparsed.tsv`](test/yaml-test-suite-unparsed.tsv) (parse-only cases it still rejects). |
 | [`test/yaml-test-schema/`](test/yaml-test-schema/) | The YAML Test Schema's core-schema corpus, vendored verbatim with its licence, and run by **all three** runtimes against the ledger [`test/yaml-test-schema-deviations.tsv`](test/yaml-test-schema-deviations.tsv). See its [`README.md`](test/yaml-test-schema/README.md). |
-| [`ts/test/`](ts/test/) | TS `*.test.ts` suites (compiled to `dist-test/`): `yaml.test.ts` (unit), `parity.test.ts` (the shared `test/spec/*.tsv` fixtures), `yaml-test-suite.test.ts` (official corpus), `yaml-test-schema.test.ts` (the scalar-resolution corpus), `doc-examples.test.ts`, `debug-model.test.ts` (the `@tabnas/debug` composition test). |
-| [`go/`](go/) `*_test.go` | Go suites: `yaml_test.go` + `yaml_scenarios_test.go` (unit), `parity_test.go` (`TestSpec` runs the shared `test/spec/*.tsv` fixtures), `parity_regression_test.go` (TS/Go parity regressions), `yaml_test_suite_test.go` (official corpus), `yaml_test_schema_test.go` (the scalar-resolution corpus), `guide_test.go` (the guide's relaxed-JSON recipe), plus `bench_test.go` / `perf_test.go` / `scaling_test.go` (performance). |
+| [`ts/test/`](ts/test/) | TS `*.test.ts` suites (compiled to `dist-test/`): `yaml.test.ts` (unit), `parity.test.ts` (the shared `test/spec/*.tsv` fixtures), `yaml-test-suite.test.ts` (official corpus), `yaml-test-schema.test.ts` (the scalar-resolution corpus), `doc-examples.test.ts`, `debug-model.test.ts` (the `@tabnas/debug` composition test), `window.test.ts` (a parse from a reader: see [Reading from a reader](#reading-from-a-reader)). |
+| [`go/`](go/) `*_test.go` | Go suites: `yaml_test.go` + `yaml_scenarios_test.go` (unit), `parity_test.go` (`TestSpec` runs the shared `test/spec/*.tsv` fixtures), `parity_regression_test.go` (TS/Go parity regressions), `yaml_test_suite_test.go` (official corpus), `yaml_test_schema_test.go` (the scalar-resolution corpus), `guide_test.go` (the guide's relaxed-JSON recipe), `window_test.go` (a parse from a reader), plus `bench_test.go` / `perf_test.go` / `scaling_test.go` (performance). |
 | [`ts/doc/`](ts/doc/), [`go/doc/`](go/doc/) | Per-runtime Diataxis guides (`yaml-ts.md`, `yaml-go.md`) and the generated railroad diagram (`ts/doc/grammar.{svg,txt}`), which `npm run diagram` in `ts/` regenerates and `ts/test/grammar-diagram.test.js` holds to the grammar. |
 | [`bench/`](bench/) | TS benchmark harness (`bench/ts/*.mjs`, fixtures generated by `bench/fixtures/generate.mjs`); the Go side benches via `go/bench_test.go`. |
 
@@ -256,24 +256,34 @@ CI checks the whole closure out and builds it first.
 
 ## Public API
 
-The TS and Go surfaces differ in shape (TS exposes only the plugin; Go
-exposes convenience entry points):
+The TS and Go surfaces differ in shape (TS exposes the plugin and one
+constructor; Go exposes convenience entry points):
 
-- **TS** (`src/yaml.ts`) exports the `Yaml` plugin, the `YamlOptions`
-  type, and `const VERSION`. Parse by installing the plugin:
-  `new Tabnas().use(jsonic).use(Yaml).parse(src)`. There is **no**
-  exported `parse`/`make` on the TS side.
+- **TS** (`src/yaml.ts`) exports the `Yaml` plugin, `make(options?)`
+  (the whole parser, `new Tabnas().use(jsonic).use(Yaml, options)` with
+  `lex.window` declared), the `YamlOptions` type, and `const VERSION`.
+  Parse with `make().parse(src)`, or from a reader with
+  `make().parseReader(reader)`. There is **no** exported `parse` on the
+  TS side.
 - **Go** (`go/yaml.go`) exports `Parse(src) (any, error)` (lazy default
   instance), `MakeJsonic(opts ...YamlOptions) *tabnas.Tabnas` (build a
-  configured instance), the `Yaml` plugin (`j.Use(Yaml, opts)`), and
-  `const VERSION`.
+  configured instance, `lex.window` declared), the `Yaml` plugin
+  (`j.Use(Yaml, opts)`), and `const VERSION`.
 - **Rust** (`rs/src/lib.rs`) exports `parse(src) -> Result<Value,
   YamlError>` (shared default instance), `make()` and
-  `make_with(YamlOptions)`, the plugin as both `plugin() -> Plugin` and
-  `yaml(&mut Tabnas, &YamlOptions)`, the `YamlOptions` struct, the
-  `YamlError` re-export, `pub const VERSION`, and the translation parts,
-  `translate()`, `render_text()` and `manifest_text()` (below). TS
-  exports the same parts as `translate()` and Go as `Translate()`.
+  `make_with(YamlOptions)` (`lex.window` declared), the plugin as both
+  `plugin() -> Plugin` and `yaml(&mut Tabnas, &YamlOptions)`, the
+  `YamlOptions` struct, the `YamlError` re-export, `pub const VERSION`,
+  and the translation parts, `translate()`, `render_text()` and
+  `manifest_text()` (below). TS exports the same parts as `translate()`
+  and Go as `Translate()`.
+- **The window is declared on the whole parser only.** `make()` (TS),
+  `MakeJsonic()` (Go) and `make()`/`make_with()` (Rust) set
+  `lex.window`, so the engine's `parseReader` / `ParseReader` /
+  `parse_reader` reads a reader a window at a time (admin ADR-30). The
+  plugin function (`Yaml`, `plugin()`, `yaml()`) never sets it: a host may
+  install the plugin beneath matchers of its own, which may not read
+  through a window. See [Reading from a reader](#reading-from-a-reader).
 - **`VERSION` must always equal `ts/package.json` "version"**, in all
   three runtimes. `go/version_test.go`, `ts/test/version.test.ts` and
   `rs/tests/version_test.rs` are the CI checks: they read
@@ -283,6 +293,55 @@ exposes convenience entry points):
 - `YamlOptions{ meta }` exists in both: with `meta: true`, parsing
   returns `{ meta, content }` (per-document `{directives, explicit,
   ended}`) instead of bare content.
+
+## Reading from a reader
+
+From a reader (`lex.window`), the engine holds a window of the source
+rather than all of it: the text from the oldest token the parser holds to
+as far as it has been read, which it may move on, dropping what lies
+behind, before each token it cuts. The plugin's matcher and its text check
+read the source by source position, through the window, in every
+runtime:
+
+- **Forward reads read on.** A scan that reaches the window's end while
+  the source may have more reads on (TS `lex.fill`, Go `Lex.Fill`) or, in
+  Rust, where the scans read an immutable view, asks the engine to cut the
+  token again over a wider window (`Lexer::advance_chars` past the end,
+  as the engine's own matchers ask). The text check, which runs after the
+  engine's number and comment matchers, never reads the source on by
+  itself: TS notes the read with `lex.touchEnd()` instead, and Go runs the
+  text check's scan once in the matcher, before those matchers, so the
+  window already holds what it reads. Otherwise a number or a comment one
+  of them stopped short at the window's end could be read as text, the
+  window ending where the source does and the engine taking the cut.
+- **Backward reads read the plugin's own copy.** The scans read back over
+  the line a token starts on and at most the two before it, which the
+  window may have dropped. The plugin keeps the text after the eighth-last
+  line break before the cursor (`hist` in TS, `yamlSource.hist` in Go,
+  `source::Kept` in Rust, which copies the window too) and reads it
+  behind the window's start. A read behind what it keeps is a fault of the
+  plugin's and fails loudly (`internal`), never reads a different text.
+- **Two questions are answered from what went by.** The start of a line,
+  from the line breaks passed (so a long line costs no scan back per
+  token), and whether the last character before the cursor that is
+  neither blank nor in a comment is a quote (the flow colon's question),
+  however many lines back it is.
+- **A cut made again starts from the state the first began with.** The
+  engine cuts a token again over a wider window when a read reached the
+  window's end; the plugin knows the cut by its position and the tokens
+  taken, restores what the first attempt changed (the pending anchors and
+  tokens, the flow scan, the virtual cursor) and takes back the anchors it
+  recorded, from a record of them.
+
+Every fixture row, every case of the YAML Test Suite and every input of
+the YAML Test Schema parses the same from a reader as whole, in every
+runtime (`ts/test/window.test.ts`, `go/window_test.go`,
+`rs/tests/window_test.rs`): in pieces of 1, 3 and 64 bytes, and in
+TypeScript and Rust under windows of a few characters as well. So do
+tokens of every kind longer than the window and a long document of
+records, and a document with an error near its start fails there from a
+reader having read a window or so past it, not the document. A long
+document from a reader parses in time linear in its length.
 
 ## The translation parts
 
