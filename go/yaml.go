@@ -1465,38 +1465,30 @@ func jsParseFloat(s string) float64 {
 	return n
 }
 
-// childNode is the node of a rule's child, read from the END of the
-// child's rotation chain.
+// childNode is the node of a rule's child: the rule it pushed, read alone,
+// as the canonical port reads `rule.child.node`.
 //
-// A rule that replaces itself (`r: list`, `r: elem`) leaves the original
-// rule in `r.Child` with the new one hanging off its `Next`. A JavaScript
-// array aliases by reference, so the canonical port reads `rule.child.node`
-// and sees every element the rotated rules appended. A Go slice is a
-// header, and the engine's append writes the grown slice back through
-// `r.Parent.Node`, which is the ROTATED rule's parent, never the original
-// child: the original keeps the one-element header the implicit-list
-// promotion gave it, and a reader of `r.Child.Node` sees `["a"]` for
-// `"a" "b"`. Every closure in this plugin that reads a child's node goes
-// through here so it sees the whole value.
+// A rule that replaces itself (`r: list`, `r: yamlBlockElem`) hands its
+// node on to the rule that replaces it, and the rule pushed first, the
+// head of that chain, is the one its pusher holds. A JavaScript array
+// aliases by reference, so in the canonical port the head holds every
+// element the rules after it appended. A Go slice is a header, so each
+// chain writes its grown list back to its head: yamlBlockList and
+// yamlBlockElem through `r.Parent.Child` (pushBack), and an implicit list
+// (`"a" "b"`), which grows through `r.Parent.Node`, the list rule's own,
+// to the val it replaced when it closes (the list rule's before-close).
+// A mapping is a pointer every pair shares.
+//
+// The child is never read past the head, through its `Next` links: under
+// a bounded rule history (`rule.history`, which a streaming host sets so
+// that a long document's rules are not all kept) the head the pusher holds
+// is a snapshot of the child as it ended, linked to no rule after it.
 func childNode(r *tabnas.Rule) any {
 	child := r.Child
 	if child == nil || child == tabnas.NoRule {
 		return tabnas.Undefined
 	}
-	if final := chainEnd(child); final != child && !tabnas.IsUndefined(final.Node) {
-		return final.Node
-	}
 	return child.Node
-}
-
-// chainEnd is the last rule a rotation chain replaced `rule` with, or
-// `rule` itself when it never rotated.
-func chainEnd(rule *tabnas.Rule) *tabnas.Rule {
-	final := rule
-	for final.Next != nil && final.Next != tabnas.NoRule && final.Next.Prev == final {
-		final = final.Next
-	}
-	return final
 }
 
 // formatKey converts a value to a string suitable for use as a map key.
@@ -2489,8 +2481,8 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 		streamCurMeta = nil
 	}
 	// The document is read through childNode: a top-level implicit list
-	// (`"a" "b"`) rotates the pushed `val` into a `list`, and only the end
-	// of that chain holds every element.
+	// (`"a" "b"`) rotates the pushed `val` into a `list`, which hands the
+	// val every element when it closes.
 	pushChildDoc := func(r *tabnas.Rule) {
 		if node := childNode(r); !tabnas.IsUndefined(node) {
 			streamDocs = append(streamDocs, node)
@@ -4625,7 +4617,9 @@ func configureGrammarRules(j *tabnas.Tabnas, IN, EL tabnas.Tin, KEY []tabnas.Tin
 	// ===== State handlers (bo/ao/bc/ac) — kept in code for closure capture =====
 
 	// val rule: claim pending anchors (ao), handle empty (bc), resolve
-	// aliases and record anchors (ac), follow replacement chain (bc).
+	// aliases and record anchors (ac). jsonic's before-close takes a
+	// child's value from the child alone (`r.Child.Node`), as childNode
+	// does.
 	j.Rule("val", func(rs *tabnas.RuleSpec, _ *tabnas.Parser) {
 		rs.AddAO(func(r *tabnas.Rule, ctx *tabnas.Context) {
 			if len(*pendingAnchors) > 0 {
@@ -4639,15 +4633,6 @@ func configureGrammarRules(j *tabnas.Tabnas, IN, EL tabnas.Tin, KEY []tabnas.Tin
 				// this val's close (holdPruning).
 				holdPruning(ctx, 1)
 				nameAnchors(r, anchorsCopy, r.Node)
-			}
-		})
-		rs.AddBC(func(r *tabnas.Rule, ctx *tabnas.Context) {
-			// A child that rotated (an implicit list) left its value at
-			// the end of the chain; see childNode.
-			if child := r.Child; child != nil && child != tabnas.NoRule {
-				if final := chainEnd(child); final != child && !tabnas.IsUndefined(final.Node) {
-					r.Node = final.Node
-				}
 			}
 		})
 		rs.AddBC(func(r *tabnas.Rule, ctx *tabnas.Context) {
@@ -4791,6 +4776,24 @@ func configureGrammarRules(j *tabnas.Tabnas, IN, EL tabnas.Tin, KEY []tabnas.Tin
 				r.Parent.Name == "indent" {
 				r.Node = []any{}
 			}
+		})
+		// An implicit list (`"a" "b"`, a block scalar and the text after
+		// it, a stream of JSON objects) replaced the val that read its
+		// first value, and jsonic's before-open handed that val the list it
+		// promoted the value into (`r.Prev.Node = r.Node`). The elements
+		// grow the list through `r.Parent.Node`, this rule's own, so the
+		// val, which the rule that pushed it reads (childNode), still holds
+		// the one-element header. Once the last element is in, the val
+		// takes the whole list, as the canonical port's val holds it by
+		// reference all along. Under a bounded rule history `r.Prev` is
+		// the snapshot of the val that its pusher holds as its child, and
+		// the engine carries the write to the val itself.
+		rs.AddBC(func(r *tabnas.Rule, ctx *tabnas.Context) {
+			prev := r.Prev
+			if prev == nil || prev == tabnas.NoRule || prev.U["implist"] != true || tabnas.IsUndefined(r.Node) {
+				return
+			}
+			prev.Node = r.Node
 		})
 	})
 
