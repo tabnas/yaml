@@ -42,18 +42,29 @@ result, err := tabnasyaml.Parse("name: Alice\nitems:\n  - one\n  - two\n")
 ### `MakeJsonic`
 
 ```go
-func MakeJsonic(opts ...YamlOptions) *tabnasjsonic.Jsonic
+func MakeJsonic(opts ...YamlOptions) *tabnas.Tabnas
 ```
 
-Creates a `*tabnasjsonic.Jsonic` configured for YAML parsing. Pass an optional
-`YamlOptions` to configure the plugin (only the first is used). Reuse
-the returned instance for repeated parses, or to apply further engine
-options.
+Creates a `*tabnas.Tabnas` configured for YAML parsing: jsonic's grammar
+with the plugin installed. Pass an optional `YamlOptions` to configure
+the plugin (only the first is used). Reuse the returned instance for
+repeated parses, or to apply further engine options.
 
 ```go
 j := tabnasyaml.MakeJsonic(tabnasyaml.YamlOptions{Meta: true})
 result, err := j.Parse(src)
 ```
+
+The instance declares the engine option `lex.window`, so `ParseReader`
+reads an `io.Reader` a window at a time rather than whole, with the same
+values and errors as `Parse` of the same text:
+
+```go
+result, err := tabnasyaml.MakeJsonic().ParseReader(file)
+```
+
+`Yaml` itself declares nothing, because a host may install it beneath
+matchers of its own.
 
 ### `Yaml`
 

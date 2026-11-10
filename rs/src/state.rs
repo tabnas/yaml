@@ -21,6 +21,9 @@ use indexmap::IndexMap;
 use std::sync::Arc;
 use tabnas::{Context, Value};
 
+use crate::lex::BOM_TEXT;
+use crate::source::Src;
+
 /// Set once the first lexer call of a parse has run the reset that the
 /// canonical `seenLex` WeakSet stands in for.
 pub(crate) const INIT: &str = "yamlInit";
@@ -86,7 +89,18 @@ pub(crate) fn flag(context: &Context, key: &str) -> bool {
 }
 
 pub(crate) fn set_flag(context: &mut Context, key: &str, value: bool) {
-    context.u.insert(key.to_string(), Value::Bool(value));
+    put(context, key, Value::Bool(value));
+}
+
+/// Set the slot `key` to `value`, its key allocated only when the slot is
+/// new: the lexer sets a few slots at every token.
+fn put(context: &mut Context, key: &str, value: Value) {
+    match context.u.get_mut(key) {
+        Some(slot) => *slot = value,
+        None => {
+            context.u.insert(key.to_string(), value);
+        }
+    }
 }
 
 pub(crate) fn num(context: &Context, key: &str) -> Option<f64> {
@@ -97,7 +111,7 @@ pub(crate) fn num(context: &Context, key: &str) -> Option<f64> {
 }
 
 pub(crate) fn set_num(context: &mut Context, key: &str, value: f64) {
-    context.u.insert(key.to_string(), Value::Number(value));
+    put(context, key, Value::Number(value));
 }
 
 pub(crate) fn usize_at(context: &Context, key: &str) -> usize {
@@ -158,12 +172,56 @@ pub(crate) fn hold_pruning(context: &mut Context, by: f64) {
 /// occurs, for [`anchor_declared`].
 pub(crate) fn pend_anchor(context: &mut Context, name: &str, pending: Value) {
     list_push(context, PENDING_ANCHORS, pending);
-    map_set(
+    map_set_in_cut(
         context,
         DECLARED_ANCHORS,
         name.to_string(),
         Value::Bool(true),
     );
+}
+
+/// What the cut being made changed of the anchors, newest last, in a parse
+/// from a reader: `[key, name, had, old]` for each entry it set, so that a
+/// cut the engine makes again over a wider window can take it back
+/// (`crate::source::Kept::restore`). Present only while a cut over a
+/// window is being made.
+pub(crate) const UNDO: &str = "yamlUndo";
+
+/// [`map_set`] for an entry the lexer sets as it cuts a token: an anchor
+/// recorded or declared, noted in [`UNDO`] when a cut over a window is
+/// being made.
+pub(crate) fn map_set_in_cut(context: &mut Context, key: &str, entry: String, value: Value) {
+    if matches!(context.u.get(UNDO), Some(Value::Array(_))) {
+        let old = map_get(context, key, &entry);
+        let record = Value::array(vec![
+            Value::String(key.to_string()),
+            Value::String(entry.clone()),
+            Value::Bool(old.is_some()),
+            old.unwrap_or(Value::Undefined),
+        ]);
+        list_push(context, UNDO, record);
+    }
+    map_set(context, key, entry, value);
+}
+
+/// Take back what the cut being made set, newest first.
+pub(crate) fn undo(context: &mut Context) {
+    let records = list_take(context, UNDO);
+    for record in records.into_iter().rev() {
+        let Value::Array(items) = record else {
+            continue;
+        };
+        let (Some(Value::String(key)), Some(Value::String(name)), Some(had), Some(old)) =
+            (items.first(), items.get(1), items.get(2), items.get(3))
+        else {
+            continue;
+        };
+        if matches!(had, Value::Bool(true)) {
+            map_set(context, key, name.clone(), old.clone());
+        } else {
+            map_take(context, key, name);
+        }
+    }
 }
 
 /// Has an anchor named `name` occurred before this point of the parse?
@@ -280,7 +338,7 @@ pub(crate) fn initialise(context: &mut Context) {
 /// scalar's content lines, and, in block context, any `{` `[` `"` `'` that
 /// does not begin a node. The scan may run past `target` (to the end of a
 /// comment or a block scalar), since the lexer never stops inside either.
-pub(crate) fn update_flow(context: &mut Context, src: &str, target: usize) {
+pub(crate) fn update_flow(context: &mut Context, src: Src<'_>, target: usize) {
     // Each field is a hashed lookup in the context bag, so the scan reads
     // only what it needs and writes back only what changed. The lexer asks
     // at the same offset several times per token, and then nothing can have
@@ -303,11 +361,10 @@ pub(crate) fn update_flow(context: &mut Context, src: &str, target: usize) {
         double = false;
     }
     set_usize(context, FLOW_UPTO, target);
-    let bytes = src.as_bytes();
-    let target = target.min(bytes.len());
+    let target = src.clamp(target);
     let mut index = pos;
     while index < target {
-        let character = bytes[index];
+        let character = src.at(index) as u8;
         // Fast path: only ten bytes matter in any state.
         if !FLOW_SCAN_BYTES[usize::from(character)] {
             index += 1;
@@ -324,7 +381,7 @@ pub(crate) fn update_flow(context: &mut Context, src: &str, target: usize) {
         }
         if single {
             if character == b'\'' {
-                if index + 1 < bytes.len() && bytes[index + 1] == b'\'' {
+                if src.is(index + 1, b'\'') {
                     index += 1;
                 } else {
                     single = false;
@@ -333,8 +390,8 @@ pub(crate) fn update_flow(context: &mut Context, src: &str, target: usize) {
             index += 1;
             continue;
         }
-        if character == b'#' && (index == 0 || is_space(bytes[index - 1])) {
-            while index < bytes.len() && bytes[index] != b'\n' && bytes[index] != b'\r' {
+        if character == b'#' && (index == 0 || is_space(src.at(index - 1) as u8)) {
+            while src.has(index) && !src.is(index, b'\n') && !src.is(index, b'\r') {
                 index += 1;
             }
             continue;
@@ -346,7 +403,11 @@ pub(crate) fn update_flow(context: &mut Context, src: &str, target: usize) {
                 b'"' => double = true,
                 b'\'' => {
                     // An apostrophe inside a word does not open a scalar.
-                    let previous = if index > 0 { bytes[index - 1] } else { 0 };
+                    let previous = if index > 0 {
+                        src.at(index - 1) as u8
+                    } else {
+                        0
+                    };
                     if !previous.is_ascii_alphanumeric() {
                         single = true;
                     }
@@ -358,10 +419,10 @@ pub(crate) fn update_flow(context: &mut Context, src: &str, target: usize) {
         }
         // Block context: only a node's first character opens anything.
         if matches!(character, b'{' | b'[' | b'"' | b'\'' | b'|' | b'>') {
-            if !starts_node(bytes, index) {
+            if !starts_node(src, index) {
                 // Inside a plain scalar, which nothing can open until it
                 // ends at `: `, ` #` or the end of the line: skip to there.
-                index = plain_scalar_rest(bytes, index);
+                index = plain_scalar_rest(src, index);
                 continue;
             }
             match character {
@@ -369,7 +430,7 @@ pub(crate) fn update_flow(context: &mut Context, src: &str, target: usize) {
                 b'"' => double = true,
                 b'\'' => single = true,
                 _ => {
-                    let end = block_scalar_end(bytes, index);
+                    let end = block_scalar_end(src, index);
                     if end > index {
                         index = end;
                         continue;
@@ -407,10 +468,6 @@ const FLOW_SCAN_BYTES: [bool; 256] = {
     table
 };
 
-/// U+FEFF, the byte order mark, in UTF-8. A stream may open with it; the
-/// offset after it is a line start.
-const BOM_BYTES: &[u8] = "\u{FEFF}".as_bytes();
-
 fn is_space(byte: u8) -> bool {
     matches!(byte, b' ' | b'\t' | b'\n' | b'\r')
 }
@@ -420,39 +477,40 @@ fn is_space(byte: u8) -> bool {
 /// `---` marker, or a node property (`&anchor`, `!tag`) that itself starts
 /// a node. Anything else is inside a plain scalar. Mirrors the canonical
 /// `startsYamlNode`.
-fn starts_node(bytes: &[u8], index: usize) -> bool {
+fn starts_node(src: Src<'_>, index: usize) -> bool {
+    let byte = |k: usize| src.at(k) as u8;
     let mut p = index;
-    while p > 0 && matches!(bytes[p - 1], b' ' | b'\t') {
+    while p > 0 && matches!(byte(p - 1), b' ' | b'\t') {
         p -= 1;
     }
-    if p == 0 || matches!(bytes[p - 1], b'\n' | b'\r') || (p == 3 && bytes.starts_with(BOM_BYTES)) {
+    if p == 0 || matches!(byte(p - 1), b'\n' | b'\r') || (p == 3 && src.starts_with(0, BOM_TEXT)) {
         return true;
     }
     if p == index {
         return false;
     }
     let p = p - 1;
-    let pc = bytes[p];
+    let pc = byte(p);
     if pc == b':' {
         return true;
     }
     if pc == b'-' || pc == b'?' {
         if pc == b'-'
             && p >= 2
-            && bytes[p - 1] == b'-'
-            && bytes[p - 2] == b'-'
-            && (p < 3 || matches!(bytes[p - 3], b'\n' | b'\r'))
+            && byte(p - 1) == b'-'
+            && byte(p - 2) == b'-'
+            && (p < 3 || matches!(byte(p - 3), b'\n' | b'\r'))
         {
             return true;
         }
-        return starts_node(bytes, p);
+        return starts_node(src, p);
     }
     let mut w = p;
-    while w > 0 && !is_space(bytes[w - 1]) {
+    while w > 0 && !is_space(byte(w - 1)) {
         w -= 1;
     }
-    if bytes[w] == b'&' || bytes[w] == b'!' {
-        return starts_node(bytes, w);
+    if byte(w) == b'&' || byte(w) == b'!' {
+        return starts_node(src, w);
     }
     false
 }
@@ -460,13 +518,13 @@ fn starts_node(bytes: &[u8], index: usize) -> bool {
 /// From `index` inside a block-context plain scalar, the offset where it
 /// can end: the next line break, a `:` followed by whitespace or the end,
 /// or a `#` after whitespace. Mirrors the canonical `plainScalarRest`.
-fn plain_scalar_rest(bytes: &[u8], index: usize) -> usize {
+fn plain_scalar_rest(src: Src<'_>, index: usize) -> usize {
     let mut j = index + 1;
-    while j < bytes.len() {
-        match bytes[j] {
+    while src.has(j) {
+        match src.at(j) as u8 {
             b'\n' | b'\r' => return j,
-            b':' if bytes.get(j + 1).is_none_or(|next| is_space(*next)) => return j,
-            b'#' if matches!(bytes[j - 1], b' ' | b'\t') => return j,
+            b':' if !src.has(j + 1) || is_space(src.at(j + 1) as u8) => return j,
+            b'#' if matches!(src.at(j - 1) as u8, b' ' | b'\t') => return j,
             _ => {}
         }
         j += 1;
@@ -478,8 +536,11 @@ fn plain_scalar_rest(bytes: &[u8], index: usize) -> usize {
 /// indicators, then only a comment) at `index`: the offset just past its
 /// content lines, or `index` when it is not one. Mirrors the canonical
 /// `blockScalarEnd`.
-fn block_scalar_end(bytes: &[u8], index: usize) -> usize {
-    let at = |k: usize| bytes.get(k).copied();
+fn block_scalar_end(src: Src<'_>, index: usize) -> usize {
+    let at = |k: usize| {
+        let c = src.at(k);
+        (c >= 0).then_some(c as u8)
+    };
     let mut j = index + 1;
     let mut explicit = 0usize;
     for _ in 0..2 {
@@ -496,25 +557,22 @@ fn block_scalar_end(bytes: &[u8], index: usize) -> usize {
         j += 1;
     }
     if at(j) == Some(b'#') {
-        while j < bytes.len() && !matches!(bytes[j], b'\n' | b'\r') {
+        while matches!(at(j), Some(c) if c != b'\n' && c != b'\r') {
             j += 1;
         }
     }
-    if j < bytes.len() && !matches!(bytes[j], b'\n' | b'\r') {
+    if matches!(at(j), Some(c) if c != b'\n' && c != b'\r') {
         return index;
     }
-    let mut ls = index;
-    while ls > 0 && !matches!(bytes[ls - 1], b'\n' | b'\r') {
-        ls -= 1;
-    }
-    if ls == 0 && bytes.starts_with(BOM_BYTES) {
-        ls = BOM_BYTES.len();
+    let mut ls = src.line_start(index);
+    if ls == 0 && src.starts_with(0, BOM_TEXT) {
+        ls = BOM_TEXT.len();
     }
     let mut line_indent = 0usize;
     while at(ls + line_indent) == Some(b' ') {
         line_indent += 1;
     }
-    let is_root = ls + line_indent == index || bytes[ls..].starts_with(b"---");
+    let is_root = ls + line_indent == index || src.starts_with(ls, "---");
     // The indent a content line must exceed; None is the document root's -1.
     let parent: Option<usize> = if is_root && line_indent == 0 {
         None
@@ -535,14 +593,14 @@ fn block_scalar_end(bytes: &[u8], index: usize) -> usize {
         // `- ` before the key, not only the line's leading spaces.
         let mut base = parent.unwrap_or(0);
         let start = ls + line_indent;
-        let has_colon =
-            (start..index).any(|ci| bytes[ci] == b':' && matches!(at(ci + 1), Some(b' ' | b'\t')));
+        let has_colon = (start..index)
+            .any(|ci| at(ci) == Some(b':') && matches!(at(ci + 1), Some(b' ' | b'\t')));
         if has_colon {
             let mut si = start;
-            while si < index && bytes[si] == b'-' && matches!(at(si + 1), Some(b' ' | b'\t')) {
+            while si < index && at(si) == Some(b'-') && matches!(at(si + 1), Some(b' ' | b'\t')) {
                 base += 2;
                 si += 2;
-                while si < index && bytes[si] == b' ' {
+                while si < index && at(si) == Some(b' ') {
                     base += 1;
                     si += 1;
                 }
@@ -551,14 +609,14 @@ fn block_scalar_end(bytes: &[u8], index: usize) -> usize {
         block_indent = Some(base + explicit);
     }
     let mut end = pos;
-    while pos < bytes.len() {
+    while src.has(pos) {
         let mut n = 0usize;
         while at(pos + n) == Some(b' ') {
             n += 1;
         }
         let c = at(pos + n);
         let mut line_stop = pos + n;
-        while line_stop < bytes.len() && !matches!(bytes[line_stop], b'\n' | b'\r') {
+        while matches!(at(line_stop), Some(c) if c != b'\n' && c != b'\r') {
             line_stop += 1;
         }
         let mut next = line_stop;
@@ -585,7 +643,7 @@ fn block_scalar_end(bytes: &[u8], index: usize) -> usize {
         if n < indent {
             break;
         }
-        if n == 0 && (bytes[pos..].starts_with(b"---") || bytes[pos..].starts_with(b"...")) {
+        if n == 0 && (src.starts_with(pos, "---") || src.starts_with(pos, "...")) {
             break;
         }
         end = line_stop;
@@ -595,7 +653,7 @@ fn block_scalar_end(bytes: &[u8], index: usize) -> usize {
 }
 
 /// The flow depth at `target`, after bringing the cache up to it.
-pub(crate) fn flow_depth_at(context: &mut Context, src: &str, target: usize) -> usize {
+pub(crate) fn flow_depth_at(context: &mut Context, src: Src<'_>, target: usize) -> usize {
     update_flow(context, src, target);
     usize_at(context, FLOW_DEPTH)
 }

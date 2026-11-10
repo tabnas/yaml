@@ -36,6 +36,7 @@ use tabnas::{
 };
 
 mod lex;
+mod source;
 mod state;
 mod text;
 
@@ -778,25 +779,21 @@ fn token_number(value: &Value) -> Option<f64> {
 /// column. `- a: 1` starts at 2, `-   a: 1` and `- - a: 1` at 4, and
 /// `- &x a: 1` at 2, where the anchor starts the mapping ahead of its first
 /// key's own token.
-fn entry_column(src: &str, at: usize) -> usize {
-    let bytes = src.as_bytes();
-    let at = at.min(bytes.len());
-    let mut line = at;
-    while line > 0 && bytes[line - 1] != b'\n' && bytes[line - 1] != b'\r' {
-        line -= 1;
-    }
-    if line == 0 && src.starts_with('\u{feff}') {
-        line = '\u{feff}'.len_utf8();
+fn entry_column(src: source::Src<'_>, at: usize) -> usize {
+    let at = src.clamp(at);
+    let mut line = src.line_start(at);
+    if line == 0 && src.starts_with(0, lex::BOM_TEXT) {
+        line = lex::BOM_TEXT.len();
     }
     let (mut column, mut index) = (0, line);
-    while index < at && bytes[index] == b' ' {
+    while index < at && src.is(index, b' ') {
         column += 1;
         index += 1;
     }
-    while index < at && bytes[index] == b'-' && matches!(bytes.get(index + 1), Some(b' ' | b'\t')) {
+    while index < at && src.is(index, b'-') && matches!(src.at(index + 1), 0x20 | 0x09) {
         column += 2;
         index += 2;
-        while index < at && bytes[index] == b' ' {
+        while index < at && src.is(index, b' ') {
             column += 1;
             index += 1;
         }
@@ -913,7 +910,16 @@ fn register_refs(parser: &mut Tabnas) {
         // would instead make the comparison true at the outermost indent.
         let block = matches!(rule.name.as_str(), "yamlBlockList" | "yamlBlockElem");
         let indent = match rule.o0() {
-            Some(token) if block => entry_column(&context.source, token.site.si) as f64,
+            Some(token) if block => {
+                // The token's line, as the lexer read it: the whole text,
+                // or from a reader the lines the plugin keeps.
+                let windowed = context.source.is_empty();
+                let kept = source::Kept::load(context, windowed);
+                let touched = std::cell::Cell::new(false);
+                let column = entry_column(kept.src(&context.source, &touched), token.site.si);
+                kept.store(context);
+                column as f64
+            }
             _ => counter(rule, "in").map_or(f64::NAN, |value| f64::from(value + 2)),
         };
         rule.k_mut()
@@ -1797,6 +1803,16 @@ pub fn make_with(options: YamlOptions) -> Tabnas {
     parser
         .use_plugin(plugin(), Some(options.to_value()))
         .expect("the yaml grammar documents are fixed and valid");
+    // Read a reader a window at a time (admin ADR-30): the plugin's
+    // matcher and text check read the source through the window, asking
+    // the engine to cut again over a wider one where a scan reaches its
+    // end, and keep the lines before the cursor that their backward scans
+    // read (`source.rs`); jsonic's base cuts its tokens with the engine's
+    // own matchers. Set on the parser this crate makes whole, not in
+    // [`plugin`], which a host may install beneath matchers of its own.
+    parser
+        .set_options(|options| options.lex.window = true)
+        .expect("lex.window sets");
     parser
 }
 

@@ -20,11 +20,39 @@ npm install @tabnas/yaml @tabnas/jsonic @tabnas/parser
 
 ```typescript
 export { Yaml }            // the plugin function
+export { make }            // the whole parser, read a window at a time
 export type { YamlOptions }
 ```
 
 There is no standalone `parse()` export. Parsing happens through the
-Tabnas engine, after the plugin is registered with `.use()`.
+Tabnas engine, after the plugin is registered with `.use()`, or through
+the parser `make()` builds.
+
+
+## `make`
+
+```typescript
+function make(options?: YamlOptions): Tabnas
+```
+
+Builds the whole parser, `new Tabnas().use(jsonic).use(Yaml, options)`,
+and declares the engine option `lex.window` on it, so that
+`parseReader` reads a reader a window at a time rather than whole. A
+parse of a string is the same as the composition's.
+
+```js
+import { make } from '@tabnas/yaml'
+
+const j = make()
+j.parse('a: 1\nb: [x, y]')  // => { a: 1, b: ['x', 'y'] }
+```
+
+`j.parseReader(reader)` gives the same values and errors for the same
+text, where `reader` is any object whose `read(buf)` fills `buf` with the
+next bytes and answers how many it filled, 0 at the end.
+
+The window is declared on this parser only. `Yaml` itself declares
+nothing, because a host may install it beneath matchers of its own.
 
 
 ## `Yaml`

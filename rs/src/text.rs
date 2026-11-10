@@ -14,6 +14,7 @@
 //! here, because the canonical matcher reaches `!!str` and friends before
 //! the text check ever sees them.
 
+use std::cell::Cell;
 use std::sync::OnceLock;
 
 use regex::Regex;
@@ -21,34 +22,54 @@ use tabnas::{Context, Lexer, Rule, Token, Value};
 
 use crate::lex::{
     advance_cols, apply, at, blank, blank_line_end_or_eof, is, is_doc_marker, is_doc_marker_no_tab,
-    js_substring, js_substring_less_one_unit, line_end, trim_end, Act, Tok,
+    js_substring, js_substring_less_one_unit, line_end, ready, trim_end, Act, Src, Tok,
 };
+use crate::source::Kept;
 use crate::state;
 
 /// The reference name the grammar's `options.lex.match` entry uses.
 pub(crate) const MATCHER: &str = "@yaml-text";
 
 /// The matcher that stands in for `options.text.check`.
+///
+/// It reads the source as the YAML matcher, first in the same cut, left
+/// it ([`crate::source`]), and it never reads past what has been read: a
+/// read at its end, where the source may have more, asks the engine to
+/// cut the token again over a wider window, as the engine's own matchers
+/// ask. The number and comment matchers run before it and read only the
+/// window, so a scan of its that read the source on could leave a number
+/// or a comment one of them stopped short at the window's end to be read
+/// as text, the window then ending where the source does.
 pub(crate) fn yaml_text(
     lexer: &mut Lexer<'_>,
     _rule: &mut Rule,
     context: &mut Context,
 ) -> Option<Token> {
-    let (row, column) = crate::lex::virtual_point_for(lexer, context);
-    let start = lexer.point().site.si;
-    let act = {
-        let source = lexer.source();
-        check(source, (start, row, column), context)
+    let mut kept = Kept::load(context, lexer.windowed());
+    kept.extend(lexer);
+    let point = lexer.point();
+    let start = point.site.si;
+    let touched = Cell::new(false);
+    let ready = {
+        let src = kept.src(lexer.source(), &touched);
+        let (row, column) = crate::lex::virtual_point_for(src, &point, context);
+        check(src, (start, row, column), context).map(|act| ready(src, &point, act))
     };
-    let act = act?;
-    apply(lexer, context, act)
+    let windowed = kept.windowed();
+    kept.store(context);
+    let token = ready.and_then(|ready| apply(lexer, context, ready));
+    if windowed && touched.get() {
+        // Past the window's end, as the engine's own matchers ask.
+        lexer.advance_chars(usize::MAX);
+    }
+    token
 }
 
 /// The body of `options.text.check`: a block scalar, then the characters
 /// other matchers own, then a plain scalar.
-fn check(src: &str, cursor: (usize, usize, usize), context: &mut Context) -> Option<Act> {
-    let fwd = &src[cursor.0.min(src.len())..];
-    if fwd.is_empty() {
+fn check(src: Src<'_>, cursor: (usize, usize, usize), context: &mut Context) -> Option<Act> {
+    let fwd = src.from(src.clamp(cursor.0));
+    if !fwd.has(0) {
         return None;
     }
     let head = at(fwd, 0);
@@ -124,7 +145,7 @@ fn engine_number() -> &'static Regex {
 /// separators and applies the unary plus, and where that is `NaN` on a
 /// signed base-prefixed form, which `Number` does not accept, it
 /// converts the unsigned rest and applies the sign itself.
-fn number_run(src: &str, fwd: &str, cursor: (usize, usize, usize)) -> Option<Act> {
+fn number_run(src: Src<'_>, fwd: Src<'_>, cursor: (usize, usize, usize)) -> Option<Act> {
     let head = at(fwd, 0);
     let numeric = head == i32::from(b'-')
         || head == i32::from(b'+')
@@ -134,7 +155,7 @@ fn number_run(src: &str, fwd: &str, cursor: (usize, usize, usize)) -> Option<Act
         return None;
     }
     let mut end = 0;
-    while end < fwd.len() {
+    while fwd.has(end) {
         let byte = at(fwd, end);
         if blank_line_end_or_eof(byte)
             || byte == i32::from(b',')
@@ -149,7 +170,7 @@ fn number_run(src: &str, fwd: &str, cursor: (usize, usize, usize)) -> Option<Act
         }
         end += 1;
     }
-    let run = &fwd[..end];
+    let run = fwd.slice(0, end);
     if !engine_number().is_match(run) {
         return None;
     }
@@ -183,7 +204,7 @@ enum Chomp {
 /// A literal (`|`) or folded (`>`) block scalar. `None` means the
 /// indicator is not one, and the caller falls through to a plain scalar.
 #[allow(clippy::too_many_lines)]
-fn block_scalar(src: &str, fwd: &str, cursor: (usize, usize, usize)) -> Option<Act> {
+fn block_scalar(src: Src<'_>, fwd: Src<'_>, cursor: (usize, usize, usize)) -> Option<Act> {
     let fold = is(fwd, 0, b'>');
     let mut chomp = Chomp::Clip;
     let mut explicit_indent = 0usize;
@@ -207,11 +228,11 @@ fn block_scalar(src: &str, fwd: &str, cursor: (usize, usize, usize)) -> Option<A
         idx += 1;
     }
     if is(fwd, idx, b'#') {
-        while idx < fwd.len() && !line_end(at(fwd, idx)) {
+        while fwd.has(idx) && !line_end(at(fwd, idx)) {
             idx += 1;
         }
     }
-    if !line_end(at(fwd, idx)) && idx < fwd.len() {
+    if !line_end(at(fwd, idx)) && fwd.has(idx) {
         // Text on the indicator's own line: not a block scalar.
         return None;
     }
@@ -227,13 +248,13 @@ fn block_scalar(src: &str, fwd: &str, cursor: (usize, usize, usize)) -> Option<A
     let mut block_indent = 0usize;
     if explicit_indent == 0 {
         let mut probe = idx;
-        while probe < fwd.len() {
+        while fwd.has(probe) {
             let mut spaces = 0;
             while is(fwd, probe + spaces, b' ') {
                 spaces += 1;
             }
             let after = probe + spaces;
-            if after >= fwd.len() || line_end(at(fwd, after)) {
+            if !fwd.has(after) || line_end(at(fwd, after)) {
                 probe = after;
                 if is(fwd, probe, b'\r') {
                     probe += 1;
@@ -331,14 +352,14 @@ fn block_scalar(src: &str, fwd: &str, cursor: (usize, usize, usize)) -> Option<A
         }
     }
 
-    if block_indent <= containing_indent && !is_doc_start && !is_doc_root && idx < fwd.len() {
+    if block_indent <= containing_indent && !is_doc_start && !is_doc_root && fwd.has(idx) {
         // The content is not indented enough: the scalar is empty. With
         // keep chomping the trailing blank lines still count.
         let mut value = String::new();
         let mut end = idx;
         if chomp == Chomp::Keep {
             let mut blanks = 0;
-            while end < fwd.len() {
+            while fwd.has(end) {
                 if is(fwd, end, b'\n') {
                     blanks += 1;
                     end += 1;
@@ -354,7 +375,7 @@ fn block_scalar(src: &str, fwd: &str, cursor: (usize, usize, usize)) -> Option<A
             }
             value = "\n".repeat(blanks.max(1));
         }
-        let source = fwd[..end].to_string();
+        let source = fwd.slice(0, end).to_string();
         return Some(Act::moved(
             (cursor.0 + end, cursor.1 + 1, 0),
             Some(Tok::new("#TX", Value::String(value), source, cursor)),
@@ -366,16 +387,16 @@ fn block_scalar(src: &str, fwd: &str, cursor: (usize, usize, usize)) -> Option<A
     let mut pos = idx;
     let mut rows = 1usize;
     let mut last_newline = idx;
-    while pos < fwd.len() {
+    while fwd.has(pos) {
         let mut line_indent = 0;
         while is(fwd, pos + line_indent, b' ') {
             line_indent += 1;
         }
         let after = pos + line_indent;
-        if after >= fwd.len() || line_end(at(fwd, after)) {
+        if !fwd.has(after) || line_end(at(fwd, after)) {
             // A blank line keeps whatever sits past the block indent.
             if line_indent > block_indent {
-                lines.push(fwd[pos + block_indent..after].to_string());
+                lines.push(fwd.slice(pos + block_indent, after).to_string());
             } else {
                 lines.push(String::new());
             }
@@ -400,10 +421,10 @@ fn block_scalar(src: &str, fwd: &str, cursor: (usize, usize, usize)) -> Option<A
         }
         let line_start = pos + block_indent;
         let mut line_stop = line_start;
-        while line_stop < fwd.len() && !line_end(at(fwd, line_stop)) {
+        while fwd.has(line_stop) && !line_end(at(fwd, line_stop)) {
             line_stop += 1;
         }
-        lines.push(fwd[line_start..line_stop].to_string());
+        lines.push(fwd.slice(line_start, line_stop).to_string());
         last_newline = line_stop;
         pos = line_stop;
         if is(fwd, pos, b'\r') {
@@ -445,7 +466,7 @@ fn block_scalar(src: &str, fwd: &str, cursor: (usize, usize, usize)) -> Option<A
     // handler so the grammar still sees where the next line starts.
     let mut end_pos = pos;
     let mut end_rows = rows;
-    if pos < fwd.len() && pos > last_newline {
+    if fwd.has(pos) && pos > last_newline {
         let mut next_indent = 0;
         let mut probe = pos;
         while is(fwd, probe, b' ') {
@@ -461,7 +482,7 @@ fn block_scalar(src: &str, fwd: &str, cursor: (usize, usize, usize)) -> Option<A
         }
     }
 
-    let source = fwd[..end_pos].to_string();
+    let source = fwd.slice(0, end_pos).to_string();
     Some(Act::moved(
         (cursor.0 + end_pos, cursor.1 + end_rows, 0),
         Some(Tok::new("#TX", Value::String(value), source, cursor)),
@@ -528,8 +549,8 @@ fn fold_lines(lines: &[String]) -> String {
 /// lines a multi-line plain scalar folds in.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn plain_scalar(
-    src: &str,
-    fwd: &str,
+    src: Src<'_>,
+    fwd: Src<'_>,
     cursor: (usize, usize, usize),
     context: &mut Context,
 ) -> Act {
@@ -565,10 +586,10 @@ pub(crate) fn plain_scalar(
     };
 
     let mut index = 0usize;
-    let scan_line = |fwd: &str, index: &mut usize| -> String {
+    let scan_line = |fwd: Src<'_>, index: &mut usize| -> String {
         let start = *index;
         let mut stop = *index;
-        while stop < fwd.len() {
+        while fwd.has(stop) {
             let byte = at(fwd, stop);
             if line_end(byte) {
                 break;
@@ -588,16 +609,16 @@ pub(crate) fn plain_scalar(
             stop += 1;
         }
         *index = stop;
-        trim_end(&fwd[start..stop]).to_string()
+        trim_end(fwd.slice(start, stop)).to_string()
     };
 
     let mut text = scan_line(fwd, &mut index);
     let mut total_consumed = index;
     let mut rows = 0usize;
 
-    while index < fwd.len() && line_end(at(fwd, index)) {
+    while fwd.has(index) && line_end(at(fwd, index)) {
         let mut blank_lines = 0usize;
-        while index < fwd.len() && line_end(at(fwd, index)) {
+        while fwd.has(index) && line_end(at(fwd, index)) {
             if is(fwd, index, b'\r') {
                 index += 1;
             }
@@ -608,7 +629,7 @@ pub(crate) fn plain_scalar(
             while blank(at(fwd, index + leading)) {
                 leading += 1;
             }
-            if index + leading >= fwd.len() || line_end(at(fwd, index + leading)) {
+            if !fwd.has(index + leading) || line_end(at(fwd, index + leading)) {
                 blank_lines += 1;
                 index += leading;
                 continue;
@@ -641,7 +662,7 @@ pub(crate) fn plain_scalar(
         }
 
         let can_continue = if in_flow {
-            index < fwd.len()
+            fwd.has(index)
                 && !line_end(at(fwd, index))
                 && !is(fwd, index, b'#')
                 && !is(fwd, index, b'{')
@@ -650,7 +671,7 @@ pub(crate) fn plain_scalar(
                 && !is(fwd, index, b']')
         } else {
             line_indent >= minimum_indent
-                && index < fwd.len()
+                && fwd.has(index)
                 && !line_end(at(fwd, index))
                 && !is(fwd, index, b'#')
                 && !doc_marker
@@ -661,7 +682,7 @@ pub(crate) fn plain_scalar(
             // A line holding `: ` is a new pair, not a continuation.
             let mut peek = index;
             let mut is_pair = false;
-            while peek < fwd.len() && !line_end(at(fwd, peek)) {
+            while fwd.has(peek) && !line_end(at(fwd, peek)) {
                 if is(fwd, peek, b':') && blank_line_end_or_eof(at(fwd, peek + 1)) {
                     is_pair = true;
                     break;
@@ -715,8 +736,9 @@ pub(crate) fn plain_scalar(
         }
     }
 
-    let source = fwd[..total_consumed].to_string();
-    let columns = src[cursor.0..(cursor.0 + total_consumed).min(src.len())]
+    let source = fwd.slice(0, total_consumed).to_string();
+    let columns = src
+        .slice(cursor.0, src.clamp(cursor.0 + total_consumed))
         .chars()
         .count();
     Act::moved(
@@ -737,13 +759,13 @@ pub(crate) fn plain_scalar(
 /// tag, applied to the value that follows. `Ok` means the tag was
 /// consumed and the value is on a later line; `Err` carries the token.
 pub(crate) fn type_tag(
-    src: &str,
-    fwd: &str,
+    src: Src<'_>,
+    fwd: Src<'_>,
     cursor: (usize, usize, usize),
     context: &mut Context,
 ) -> Result<(usize, usize, usize), Box<Act>> {
     let mut tag_end = 2;
-    while tag_end < fwd.len() {
+    while fwd.has(tag_end) {
         let byte = at(fwd, tag_end);
         // A tab does not end a tag name here either.
         if byte == i32::from(b' ')
@@ -757,7 +779,7 @@ pub(crate) fn type_tag(
         }
         tag_end += 1;
     }
-    let tag = fwd[2..tag_end].to_string();
+    let tag = fwd.slice(2, tag_end).to_string();
     let mut value_start = tag_end;
     if is(fwd, value_start, b' ') {
         value_start += 1;
@@ -772,11 +794,10 @@ pub(crate) fn type_tag(
         // the anchor scan the lexer's own `&name` handler runs, which
         // stops at a tab and at a flow indicator too.
         let mut anchor_end = value_start + 1;
-        while anchor_end < fwd.len() && !is(fwd, anchor_end, b' ') && !line_end(at(fwd, anchor_end))
-        {
+        while fwd.has(anchor_end) && !is(fwd, anchor_end, b' ') && !line_end(at(fwd, anchor_end)) {
             anchor_end += 1;
         }
-        anchor_name = fwd[value_start + 1..anchor_end].to_string();
+        anchor_name = fwd.slice(value_start + 1, anchor_end).to_string();
         let mut pending = indexmap::IndexMap::new();
         pending.insert("n".to_string(), Value::String(anchor_name.clone()));
         pending.insert("i".to_string(), Value::Bool(true));
@@ -797,7 +818,7 @@ pub(crate) fn type_tag(
     if is(fwd, value_start, b'"') || is(fwd, value_start, b'\'') {
         let quote = at(fwd, value_start);
         value_end = value_start + 1;
-        while value_end < fwd.len() && at(fwd, value_end) != quote {
+        while fwd.has(value_end) && at(fwd, value_end) != quote {
             if is(fwd, value_end, b'\\') && quote == i32::from(b'"') {
                 value_end += 1;
             }
@@ -812,13 +833,13 @@ pub(crate) fn type_tag(
         // directly, and stepping one BYTE back from the end lands inside
         // a multibyte character where the canonical steps one UTF-16
         // unit.
-        let raw = js_substring_less_one_unit(fwd, value_start + 1, value_end);
+        let raw = js_substring_less_one_unit(fwd.up_to(value_end + 4), value_start + 1, value_end);
         let value = convert_tag(&tag, &raw, redefined, true);
         if !anchor_name.is_empty() {
-            state::map_set(context, state::ANCHORS, anchor_name, value.clone());
+            state::map_set_in_cut(context, state::ANCHORS, anchor_name, value.clone());
         }
         let name = token_name_for(&value, false);
-        let source = js_substring(fwd, 0, value_end).to_string();
+        let source = js_substring(fwd.up_to(value_end + 4), 0, value_end).to_string();
         let next = advance_cols(src, cursor, value_end);
         return Err(Box::new(Act::moved(
             next,
@@ -827,7 +848,7 @@ pub(crate) fn type_tag(
     }
 
     // The value is on the next line: consume the tag and look again.
-    if line_end(at(fwd, value_start)) && value_start + 1 < fwd.len() {
+    if line_end(at(fwd, value_start)) && fwd.has(value_start + 1) {
         let mut newline = value_start;
         if is(fwd, newline, b'\r') {
             newline += 1;
@@ -841,7 +862,7 @@ pub(crate) fn type_tag(
     // An unquoted value, to `: `, ` #`, the line end or a flow indicator.
     // A `#` straight after the tag's space starts a comment, so the value
     // is empty (`!!str #c` is "").
-    while value_end < fwd.len() {
+    while fwd.has(value_end) {
         let byte = at(fwd, value_end);
         if value_end == value_start
             && byte == i32::from(b'#')
@@ -872,13 +893,13 @@ pub(crate) fn type_tag(
         }
         value_end += 1;
     }
-    let raw = trim_end(&fwd[value_start..value_end]).to_string();
+    let raw = trim_end(fwd.slice(value_start, value_end)).to_string();
     let value = convert_tag(&tag, &raw, redefined, false);
     if !anchor_name.is_empty() {
-        state::map_set(context, state::ANCHORS, anchor_name, value.clone());
+        state::map_set_in_cut(context, state::ANCHORS, anchor_name, value.clone());
     }
     let name = token_name_for(&value, true);
-    let source = fwd[..value_end].to_string();
+    let source = fwd.slice(0, value_end).to_string();
     let next = advance_cols(src, cursor, value_end);
     Err(Box::new(Act::moved(
         next,
