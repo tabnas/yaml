@@ -51,8 +51,8 @@ j.parse('a: 1\nb: [x, y]')  // => { a: 1, b: ['x', 'y'] }
 text, where `reader` is any object whose `read(buf)` fills `buf` with the
 next bytes and answers how many it filled, 0 at the end.
 
-The window is declared on this parser only. `Yaml` itself declares
-nothing, because a host may install it beneath matchers of its own.
+Only this parser declares the window. `Yaml` itself declares nothing,
+because a host may install it beneath matchers of its own.
 
 
 ## `Yaml`
