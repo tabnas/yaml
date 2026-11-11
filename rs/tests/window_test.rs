@@ -154,10 +154,12 @@ fn fixture_rows() -> Vec<(String, String)> {
 
 /// The parser `make()` stands for: jsonic's base with the plugin
 /// installed, which dmog composed before `make()` declared the window.
+/// jsonic's base declares the window itself (tabnas/jsonic#121), so it is
+/// turned off here.
 fn composed(options: tabnas_yaml::YamlOptions) -> tabnas::Tabnas {
     let mut bag = indexmap::IndexMap::new();
     bag.insert("meta".to_string(), tabnas::Value::Bool(options.meta));
-    let mut parser = tabnas_jsonic::make();
+    let mut parser = tabnas_jsonic::make_with(|options| options.lex.window = false);
     parser
         .use_plugin(tabnas_yaml::plugin(), Some(tabnas::Value::object(bag)))
         .expect("the plugin installs");
