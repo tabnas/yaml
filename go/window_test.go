@@ -200,7 +200,10 @@ func TestMakeJsonicDeclaresTheWindow(t *testing.T) {
 	if withoutWindow().Config().Window {
 		t.Error("the window is still declared with it turned off")
 	}
-	plain := jsonic.Make()
+	// jsonic's base declares the window itself (tabnas/jsonic#121), so the
+	// plugin goes on that base with the window turned off.
+	no := false
+	plain := jsonic.Make(tabnas.Options{Lex: &tabnas.LexOptions{Window: &no}})
 	if err := plain.Use(Yaml, nil); err != nil {
 		t.Fatal(err)
 	}
