@@ -1740,6 +1740,14 @@ line's depth cannot be read. Indent the line with spaces.`,
 
               // Blank line (only whitespace before newline or end).
               let afterSpaces = pos + lineIndent
+              // Indentation the source ends in is not a line: no line
+              // break ends it, so it is nothing a keep indicator keeps.
+              // Counted as an empty line, `|+` gave one line break too
+              // many for a text that ends in its indentation.
+              if (F(afterSpaces) === undefined && lineIndent <= blockIndent) {
+                pos = afterSpaces
+                break
+              }
               if (F(afterSpaces) === undefined || F(afterSpaces) === '\n' || F(afterSpaces) === '\r') {
                 // Preserve spaces beyond block indent on blank lines.
                 if (lineIndent > blockIndent) {
@@ -3223,6 +3231,22 @@ line's depth cannot be read. Indent the line with spaces.`,
                   return null as any
                 }
 
+                // A scalar that runs on to the next line is one plain
+                // scalar, and so a string: `a: 12` with `more` indented
+                // below it is "12 more", and so are `12:30` and `1,2` with
+                // a line below them. The number matcher took the 12, or
+                // this branch the `12:30`, and the next line then failed
+                // the parse, or in a flow collection was read as a second
+                // member. Only a token that ends its line can run on, so
+                // only then is the scalar scanned as the text handler
+                // scans it.
+                let rest = tokenEnd
+                while (F(rest) === ' ' || F(rest) === '\t') rest++
+                if ((F(rest) === '\n' || F(rest) === '\r') && plainScalarAt(pnt.sI).rows > 0) {
+                  skipNumberMatch = true
+                  return null as any
+                }
+
                 if (hasEmbeddedColon || hasBlockComma) {
                   // Scan to end of plain scalar token (space, tab, newline,
                   // eof, or in a flow collection its `,` `]` `}`: `[1, 12:30]`
@@ -3247,19 +3271,6 @@ line's depth cannot be read. Indent the line with spaces.`,
                   return null as any
                 }
 
-                // A scalar that runs on to the next line is one plain
-                // scalar, and so a string: `a: 12` with `more` indented
-                // below it is "12 more". The number matcher took the 12,
-                // and the next line then failed the parse, or in a flow
-                // mapping was read as a second member. Only a number that
-                // ends its line can run on, so only then is the scalar
-                // scanned as the text handler scans it.
-                let rest = tokenEnd
-                while (F(rest) === ' ' || F(rest) === '\t') rest++
-                if ((F(rest) === '\n' || F(rest) === '\r') && plainScalarAt(pnt.sI).rows > 0) {
-                  skipNumberMatch = true
-                  return null as any
-                }
               }
 
               // YAML element marker: "- " or "-\t" or "-\n" or "-" at end.
