@@ -115,8 +115,9 @@ non-decimal integer literals (`0x`, `0o`, `0b`).
 Not handled: non-scalar complex mapping keys, set (`!!set`) and ordered
 map (`!!omap`) shorthand, and some folding corner cases. Keyword
 handling is deliberately YAML-1.1-flavoured, so `yes`/`no` are booleans;
-quote them when you need the literal strings. There is no "safe" mode or
-tag restriction.
+quote them when you need the literal strings, or set `Schema: "core"`,
+under which a plain scalar resolves as the YAML 1.2 core schema says and
+no other way. There is no "safe" mode or tag restriction.
 
 
 ## Differences from the TS version
@@ -132,7 +133,7 @@ empty-input representation.
 | ---- | ---------- | -- |
 | Entry point | register `Yaml` on an engine, then `j.parse(src)` | top-level `tabnasyaml.Parse(src) (any, error)`, or build with `MakeJsonic` |
 | Plugin signature | `(tabnas, opts) => void` | `func(j *tabnasjsonic.Jsonic, opts map[string]any) error` |
-| Options | `{ meta?: boolean }` passed to `.use(Yaml, opts)` | `YamlOptions{ Meta bool }` passed to `MakeJsonic` |
+| Options | `{ meta?: boolean, schema?: 'core' }` passed to `.use(Yaml, opts)` | `YamlOptions{ Meta bool; Schema string }` passed to `MakeJsonic` |
 | Parse errors | thrown | returned as `error` (never panics) |
 | Exclude the grammar | `j.options({ rule: { exclude: 'yaml' } })` | `j.SetOptions(tabnasjsonic.Options{Rule: &tabnasjsonic.RuleOptions{Exclude: "yaml"}})` |
 

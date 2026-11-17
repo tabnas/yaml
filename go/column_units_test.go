@@ -30,7 +30,7 @@ package tabnasyaml
 // too far, so each column below is one less than it was before that
 // repair, and each is checked against the diagnostic's own offset too.
 //
-// ts/test/column-units.test.ts asserts the same sixteen cases. Fifteen
+// ts/test/column-units.test.ts asserts the same fifteen cases. Fourteen
 // of them agree exactly; the astral row is the recorded engine
 // divergence — TypeScript counts UTF-16 units (an astral character is
 // 2), Go counts runes (1). See parser/DIVERGENCE.md, "Column positions

@@ -81,6 +81,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+With the `schema` option set to `Schema::Core`, a plain scalar resolves
+as the YAML 1.2 core schema says and no other way. Without it the plugin
+also reads the YAML 1.1 booleans `yes`, `no`, `on` and `off`, and
+jsonic's number syntax, such as `1_000` and `0b11`. Under it those are
+strings.
+
+```rust
+use tabnas_yaml::{make_with, Schema, YamlOptions};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let core = make_with(YamlOptions { schema: Some(Schema::Core), ..Default::default() });
+    let value = core.parse("{a: yes, b: 1_000, c: true, d: 12}")?;
+    assert_eq!(
+        value.to_string(),
+        r#"{"a":"yes","b":"1_000","c":true,"d":12}"#
+    );
+    Ok(())
+}
+```
+
 `make()` and `make_with()` declare the engine option `lex.window`, so
 `parse_reader` reads a reader a window at a time rather than whole, with
 the same values and errors as `parse` of the same text:
@@ -116,7 +136,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 Parse errors are the engine's `TabnasError`, re-exported as `YamlError`,
 with `code`, `row`, `col` and a report that shows the offending source
-with a caret under it.
+with a caret under it. The plugin adds three codes of its own to the
+engine's and jsonic's: `yaml_undefined_alias`, for an alias that names
+no anchor before it, `yaml_recursive_alias`, for an alias inside the
+node it names, and `yaml_tab_indent`, for a tab in a line's indentation
+before a mapping key or a sequence entry.
+
+```rust
+fn main() {
+    let error = tabnas_yaml::parse("a:\n\tb: 1").unwrap_err();
+    assert_eq!(error.code, "yaml_tab_indent");
+    assert_eq!((error.row, error.col), (2, 1));
+}
+```
 
 The crate also carries what a host needs to write YAML from another
 format. `render_text()` is YAML's render, a library in the
@@ -232,9 +264,9 @@ them written up with a measured table in
   unbounded document ends the caller's process rather than returning an
   error. TypeScript and Go have no limit.
 - **A refusal after a carriage return by itself can report the engine's
-  row.** A token this plugin builds stands where its offset says. A
-  number after a quoted scalar or a closed flow collection is cut by the
-  engine at its own cursor, which counts a row at `\n` alone. Where a
+  row.** A token this plugin builds stands where its offset says. The
+  engine cuts a number after a quoted scalar or a closed flow collection
+  at its own cursor, which counts a row at `\n` alone. Where a
   document's line breaks are `\r` by itself and that number is what the
   parse refuses, the diagnostic has the code and the offset TypeScript
   and Go give, and the engine's row and column. No document's **value**

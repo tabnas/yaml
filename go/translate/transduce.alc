@@ -21,16 +21,15 @@
 ; value the close carries, so that adjacent scalars (`"a" "b"`), an
 ; implicit list the close replaces the val with `list` for, start the
 ; array before the first and the list's open starts no second one. An
-; undefined value (`a:`, `- a:`, `- `, an alias whose anchor's node is
-; still open) is null in a mapping, at the root and as a block sequence's
-; item, and nothing in a flow sequence, as the grammar keeps each; a pair
-; opened on a key with no value in a flow mapping (`{a, b: c}`) is a null
-; member at once, as the grammar stores it; an `indent` opened on a plain
-; scalar (`a:` and the scalar on the next line, indented) yields it at its
-; close, as a `val` does; an `elem` opened on a separator with no value
-; (`[a, , b]`) is a null element; a stream of directives and document
-; markers alone (`...`) makes a `stream` pass and no value, null at
-; `finish`, as the empty document is.
+; undefined value (`a:`, `- a:`, `- `) is null in a mapping, at the root
+; and as a block sequence's item, and nothing in a flow sequence, as the
+; grammar keeps each; a pair opened on a key with no value in a flow
+; mapping (`{a, b: c}`) is a null member at once, as the grammar stores
+; it; an `indent` opened on a plain scalar (`a:` and the scalar on the
+; next line, indented) yields it at its close, as a `val` does; an `elem`
+; opened on a separator with no value (`[a, , b]`) is a null element; a
+; stream of directives and document markers alone (`...`) makes a
+; `stream` pass and no value, null at `finish`, as the empty document is.
 ;
 ; Anchors and aliases. The lexer reads `&name` and hands it to the val
 ; that claims it, so no pass carries it; the grammar names it instead in
@@ -46,10 +45,11 @@
 ; is a token whose value the grammar resolved: a scalar's the val's close
 ; carries; a collection's are the events recorded under the alias's name,
 ; written again at the val's close, after checking that the token's value
-; is a collection of that kind and size; and an alias read while its
-; anchor's node was still open (`&a [*a]`) is undefined, as the grammar
-; reads it. Every value the part keeps is held in its state, under
-; max_metadata_bytes, past which the run fails with
+; is a collection of that kind and size. An alias read while its
+; anchor's node was still open (`&a [*a]`) is inside the node it names:
+; the grammar refuses it, as `yaml_recursive_alias`, and the parse's
+; error ends the run. Every value the part keeps is held in its state,
+; under max_metadata_bytes, past which the run fails with
 ; RESOURCE_LIMIT_EXCEEDED naming it, and the anchored values are kept for
 ; the rest of the document, as the grammar keeps them.
 ;

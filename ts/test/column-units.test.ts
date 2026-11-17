@@ -26,7 +26,7 @@ import { Yaml } from '../dist/yaml'
 // a port review: a transliteration is not a port when the two languages
 // index strings differently. Found by the fleet parity probe.
 //
-// go/column_units_test.go asserts the same sixteen cases. Fifteen agree
+// go/column_units_test.go asserts the same fifteen cases. Fourteen agree
 // exactly; the astral row is the recorded engine divergence — this port
 // counts UTF-16 units (an astral character is 2), Go counts runes (1).
 // See parser/DIVERGENCE.md, "Column positions for astral characters".
@@ -34,7 +34,7 @@ import { Yaml } from '../dist/yaml'
 // defect was hiding inside a difference the register already excused.
 //
 // Deliberately its own file: `yaml-test-suite.test.ts` needs a fetched
-// corpus, and these sixteen short strings need nothing.
+// corpus, and these fifteen short strings need nothing.
 
 describe('column-units', () => {
   test('error columns count characters, not bytes', () => {

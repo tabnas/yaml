@@ -128,7 +128,9 @@ non-decimal integer literals (`0x`, `0o`, `0b`).
 Not handled: non-scalar complex mapping keys, set (`!!set`) and ordered
 map (`!!omap`) shorthand, and some folding corner cases. Keyword
 handling is deliberately YAML-1.1-flavoured, so `yes`/`no` are booleans;
-quote them when you need the literal strings. There is no "safe" mode or
+quote them when you need the literal strings, or set `schema: 'core'`,
+under which a plain scalar resolves as the YAML 1.2 core schema says and
+no other way. There is no "safe" mode or
 tag restriction; review parsed output before trusting untrusted input.
 
 

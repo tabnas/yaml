@@ -152,6 +152,31 @@ j.parse("{mask: 0xff, perm: 0o755, flags: 0b1010}")   // => { mask: 255, perm: 4
 ```
 
 
+## Read plain scalars as the YAML 1.2 core schema does
+
+Without options the plugin reads `yes`, `no`, `on` and `off` as
+booleans, as YAML 1.1 did, and takes jsonic's number syntax, so `1_000`
+is a number. A document written for YAML 1.2 means those as strings: a
+list of country codes that holds `NO`, or a property named `on`. Set
+`schema: 'core'` and a plain scalar resolves as the core schema says:
+
+```js
+import { Tabnas } from '@tabnas/parser'
+import { jsonic } from '@tabnas/jsonic'
+import { Yaml } from '@tabnas/yaml'
+
+const core = new Tabnas().use(jsonic).use(Yaml, { schema: 'core' })
+
+core.parse("countries: [NO, SE, DK]")   // => { countries: ['NO', 'SE', 'DK'] }
+core.parse("{on: yes, id: 1_000}")      // => { on: 'yes', id: '1_000' }
+core.parse("{ok: true, n: 12, x: 0x1f, none: ~}")   // => { ok: true, n: 12, x: 31, none: null }
+```
+
+The option changes how a plain scalar resolves and nothing else. A
+quoted scalar reads as before, and so does a tagged one such as
+`!!int 0x1f`.
+
+
 ## Handle multi-document streams
 
 `---` starts a document; `...` ends one. One document parses to its
@@ -235,7 +260,26 @@ try {
 The error type is the engine's `TabnasError` (re-exported by `jsonic`
 under its historic name `JsonicError`). The `message` is a human
 report; the `code`/`lineNumber`/`columnNumber` fields are for your code
-to branch on.
+to branch on. The plugin has three codes of its own, which the
+[reference](reference.md#error-codes) lists: an alias that names no
+anchor, an alias inside the node it names, and a tab used as
+indentation.
+
+```js
+import { Tabnas } from '@tabnas/parser'
+import { jsonic } from '@tabnas/jsonic'
+import { Yaml } from '@tabnas/yaml'
+
+const j = new Tabnas().use(jsonic).use(Yaml)
+
+let code
+try {
+  j.parse("a:\n\tb: 1")
+} catch (err) {
+  code = err.code
+}
+code   // => 'yaml_tab_indent'
+```
 
 
 ## Parse relaxed JSON without the YAML grammar

@@ -92,12 +92,14 @@ Options passed as the second argument to `.use(Yaml, options)`:
 ```typescript
 type YamlOptions = {
   meta?: boolean
+  schema?: 'core'
 }
 ```
 
 | Option | Type      | Default | Effect |
 | ------ | --------- | ------- | ------ |
 | `meta` | `boolean` | `false` | When `false`, `parse` returns the bare document value (or an array of values for a multi-document stream). When `true`, `parse` returns a `{ meta, content }` envelope (see below). |
+| `schema` | `'core'` | unset | How a plain scalar resolves. Unset, the plugin reads the YAML 1.2 core schema and two things more: the YAML 1.1 booleans `yes`, `no`, `on` and `off`, and jsonic's number syntax, such as `1_000` and `0b11`. With `'core'` it reads the core schema and nothing more, so those are strings: see [Value keywords](#value-keywords). The plugin refuses any other value when you register it. |
 
 ```js
 import { Tabnas } from '@tabnas/parser'
@@ -107,6 +109,16 @@ import { Yaml } from '@tabnas/yaml'
 const j = new Tabnas().use(jsonic).use(Yaml, { meta: true })
 
 j.parse("a: 1")   // => { meta: { directives: [], explicit: false, ended: false }, content: { a: 1 } }
+```
+
+```js
+import { Tabnas } from '@tabnas/parser'
+import { jsonic } from '@tabnas/jsonic'
+import { Yaml } from '@tabnas/yaml'
+
+const core = new Tabnas().use(jsonic).use(Yaml, { schema: 'core' })
+
+core.parse("{a: yes, b: 1_000, c: true, d: 12}")   // => { a: 'yes', b: '1_000', c: true, d: 12 }
 ```
 
 
@@ -174,8 +186,9 @@ type DocMeta = {
 | `%TAG` directive       | `%TAG !e! tag:example.com/`   | captured (see `meta.directives`) |
 | Explicit flow key      | `{? k : v}`                   | `{ k: 'v' }` |
 | Document start / end   | `---`, `...`                  | document boundaries |
-| Value keywords         | `true`, `null`, `yes`, `~`    | `true`, `null`, `true`, `null` |
-| Non-decimal integers   | `0xff`, `0o755`, `0b1010`     | `255`, `493`, `10` |
+| Value keywords         | `true`, `null`, `yes`, `~`    | `true`, `null`, `true`, `null`. Under `schema: 'core'`, `yes` is `'yes'` |
+| Non-decimal integers   | `0xff`, `0o755`, `0b1010`     | `255`, `493`, `10`. Under `schema: 'core'`, `0b1010` is a string |
+| Line breaks            | `\n`, `\r\n`, `\r`            | each is one line break |
 | Line comments          | `# comment`                   | ignored |
 
 ### Value keywords
@@ -190,6 +203,34 @@ These plain scalars resolve to non-string values (case variants like
 | `null` / `~`                        | `null`       |
 | `.inf` / `-.inf`                    | `±Infinity`  |
 | `.nan`                              | `NaN`        |
+
+`yes`, `no`, `on` and `off` are the YAML 1.1 booleans. The YAML 1.2 core
+schema reads them as strings, and so does the plugin under
+`schema: 'core'`. Under that option a number is one the core schema
+names and no other: a decimal integer or float, a `0o` octal integer or
+a `0x` hexadecimal one. So `1_000`, `0b11`, `0X1F`, `-0x30` and
+`Infinity` are strings there. The
+[YAML Test Schema](https://github.com/perlpunk/yaml-test-schema) corpus
+defines the option: under it, every one of the corpus's 245 scalars
+reads as the core schema says.
+
+
+## Error codes
+
+A refused document throws the engine's `TabnasError`, whose `code` is
+stable. The plugin adds three codes of its own to the engine's and
+jsonic's:
+
+| Code | Raised when |
+| ---- | ----------- |
+| `yaml_undefined_alias` | An alias such as `*name` names an anchor that doesn't occur before it in the document. |
+| `yaml_recursive_alias` | An alias is inside the node its anchor names, as in `&a [*a]`, so the node would hold itself. The plugin gives a tree, which can't. |
+| `yaml_tab_indent` | A tab stands in a line's indentation before a mapping key or a sequence entry. YAML indents block structure with spaces alone. A tab before a scalar, a flow collection or a comment is white space. |
+
+Every other refusal carries one of the engine's codes, most often
+`unexpected`. An error's `lineNumber` and `columnNumber` are the place
+its offset has in the source: the line, from 1, and how far along it,
+from 1.
 
 
 ## Tokens
@@ -246,7 +287,10 @@ installed grammar as a railroad diagram is
 - A core subset of YAML 1.2, not the full specification. Non-scalar
   complex keys, set (`!!set`) and ordered-map (`!!omap`) shorthand, and
   some folding corner cases are not handled.
-- Keyword handling is YAML-1.1-flavoured: `yes`/`no`/`on`/`off` are
-  booleans. Quote them if you need them as strings.
+- Keyword handling is YAML-1.1-flavoured unless you ask otherwise:
+  `yes`/`no`/`on`/`off` are booleans. Quote them if you need them as
+  strings, or set `schema: 'core'`.
+- The plugin refuses an alias inside the node it names. YAML allows it,
+  and it describes a node that holds itself, which a tree can't.
 - No "safe" mode or tag restriction. Review parsed results before using
   them as a deserializer for untrusted input.

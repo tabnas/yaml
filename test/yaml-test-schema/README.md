@@ -34,6 +34,11 @@ which gives the reason for each. A listed input must still read
 differently, so a fix fails the test until its line is deleted, and a
 census pins the corpus at 245 cases so a truncated copy cannot pass.
 
+The corpus is also what the plugin's option `schema: 'core'` means.
+Every runner asserts all 245 cases a second time under that option, and
+there the ledger does not apply: each input, the listed ones included,
+must read exactly as the core schema says.
+
 ## Refreshing
 
 Do not edit the vendored files. To take a newer upstream:

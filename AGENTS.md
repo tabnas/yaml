@@ -67,7 +67,9 @@ anchors (`&name`) / aliases (`*name`) / merge keys (`<<`), multi-document
 streams (`---` / `...`), YAML value keywords
 (`true`/`false`/`yes`/`no`/`on`/`off`, `null`/`~`, `.inf`, `.nan`),
 comments (`#`), tags and `%TAG` directives, and hex/octal/binary integer
-literals.
+literals. Under the option `schema: 'core'` a plain scalar resolves as
+the YAML 1.2 core schema says and no other way, so `yes`/`no`/`on`/`off`
+and jsonic's number syntax (`1_000`, `0b11`) are strings.
 
 ### The conformance bar, measured
 
@@ -81,8 +83,8 @@ runtimes. Exactly what that suite measures here:
 | Suite bucket | Cases | Result |
 |---|---|---|
 | Valid parse (case has `in.json`) | 279 | **279 pass** — a STRICT structural comparison (no `1`/`"1"` coercion) across *every* document in the stream, not just the first |
-| Expected error (case has `error`) | 94 | **24 rejected**; the other **70 are accepted** (see below) |
-| No expected output (neither file) | 29 | No value is published, so only "a valid document parses" can be checked: **8 parse**, the other **21 are rejected** and listed in [`test/yaml-test-suite-unparsed.tsv`](test/yaml-test-suite-unparsed.tsv) |
+| Expected error (case has `error`) | 94 | **28 rejected**; the other **66 are accepted** (see below) |
+| No expected output (neither file) | 29 | No value is published, so only "a valid document parses" can be checked: **9 parse**, the other **20 are rejected** and listed in [`test/yaml-test-suite-unparsed.tsv`](test/yaml-test-suite-unparsed.tsv) |
 | **Total** | **402** | |
 
 Every one of the 402 is asserted. There is no skip list in any runner,
@@ -91,13 +93,13 @@ run reports green while measuring nothing. A `suite-census` test pins the
 four counts above, so a truncated corpus cannot shrink the denominator and
 improve every ratio for free.
 
-Those 70 accepted-but-spec-invalid cases are the plugin's **leniency
+Those 66 accepted-but-spec-invalid cases are the plugin's **leniency
 boundary**, and it is a checked one rather than a hand-wave: every id is
 listed in
 [`test/yaml-test-suite-lenient.tsv`](test/yaml-test-suite-lenient.tsv),
 all three runners read that one file, and the error-case test fails if a
 listed case starts being *rejected* or if an unlisted `error` case is
-*accepted*. The 21 valid-but-rejected parse-only cases are held by the
+*accepted*. The 20 valid-but-rejected parse-only cases are held by the
 same discipline in
 [`test/yaml-test-suite-unparsed.tsv`](test/yaml-test-suite-unparsed.tsv). Tightening the parser therefore means deleting lines from
 that file; nothing can drift silently, and the three runtimes cannot
@@ -116,7 +118,10 @@ are listed, with a reason each, in
 [`test/yaml-test-schema-deviations.tsv`](test/yaml-test-schema-deviations.tsv),
 under the same discipline as the suite's ledgers. The 25 listed are the
 documented YAML 1.1 booleans and jsonic's number syntax (`1_000`, `0b1`);
-the other 220 read exactly as the core schema says. Attribution for both corpora is
+the other 220 read exactly as the core schema says. The corpus also
+defines the option `schema: 'core'`: under it every runner asserts all
+245 a second time, with no ledger, and each reads as the core schema
+says. Attribution for both corpora is
 in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
 
 Unlike most tabnas grammar plugins, this one is **layered on top of
@@ -290,9 +295,17 @@ constructor; Go exposes convenience entry points):
   `ts/package.json` and fail (never skip) on drift. The Rust test also
   holds `rs/Cargo.toml` and `go/yaml.go` to the same value. The release
   orchestrator rewrites every constant — never bump one by hand.
-- `YamlOptions{ meta }` exists in both: with `meta: true`, parsing
+- `YamlOptions{ meta }` exists in all three: with `meta: true`, parsing
   returns `{ meta, content }` (per-document `{directives, explicit,
   ended}`) instead of bare content.
+- `YamlOptions{ schema }` exists in all three, and has one value: `'core'`
+  (TS), `Schema: "core"` (Go), `Some(Schema::Core)` (Rust). Under it a
+  plain scalar resolves as the YAML 1.2 core schema says and no other
+  way. Any other name is refused when the plugin is installed, so that a
+  misspelling cannot leave the default on: TS throws, Go's `Use` returns
+  the error and `MakeJsonic`, which has none to return, panics with it,
+  and Rust's struct cannot name one, with `plugin()` refusing an option
+  bag that does.
 
 ## Reading from a reader
 
@@ -584,6 +597,41 @@ Keep the naming rule when you change the render.
   `{"a": "> x"}`. Both runtimes do this — Go's `textCheck` must fall
   through to `handlePlainScalar` when `handleBlockScalar` returns nil,
   or it rejects what TS accepts (yaml-test-suite S4GJ).
+- **A token's row and column are its offset's.** The matcher sets the
+  cursor's row and column from its offset wherever it cuts a token
+  (`place` in `ts/src/yaml.ts`, and its twins): the row is one more than
+  the line breaks before it, a `\r\n` being one, and the column is how
+  far it stands past its line's start, from 1. Kept up token by token,
+  they drifted: a column too far after every `: `, no row for a line
+  break inside a quoted scalar, column 0 after a block scalar. A token is
+  also cut where it starts, the document markers, directives and the
+  explicit key included. `ts/test/reading.test.ts` holds every token and
+  every error of every fixture row, suite case and schema input to its
+  offset, `go/reading_test.go` and `rs/tests/reading_test.rs` hold every
+  error, and `@val-set-el-in` reads a dash's column from its token. One
+  token cannot follow: a number the Rust engine cuts after a carriage
+  return by itself, which [`DIVERGENCE.md`](DIVERGENCE.md) records.
+- **A line break is `\n`, `\r\n`, or `\r` by itself**, in every scan
+  (YAML 1.2.2, 5.4). The `reading` tests read every fixture row, suite
+  case and schema input with each kind, and hold the three to one
+  result.
+- **A block sequence does not start on its key's line.** `key: - a` is
+  refused: the `val` rule opens a block sequence on a bare `#EL` only for
+  a sequence entry or a document's root (`@val-not-pair-value`). The
+  yaml-test-suite case 5U3A depends on it, and before the columns were
+  exact it was refused only because they had drifted.
+- **A pass that steps to the source's end cuts the end token.** The
+  matcher steps over things that have no token of their own: an anchor,
+  a tag, blanks after a value. When that brings it to the end of the
+  source it emits `#ZZ` itself, outside a flow collection. Left to the
+  engine's matchers, which cut from where the pass began, the end was a
+  bad token, and a document that ended in a tab, or in an anchor or a tag
+  with no node after it, was refused.
+- **A scalar tag that ends its line** (`!!str`, `!!int` and the rest)
+  takes the next line's node only when that line is indented past the
+  tag's, or at least as far when the tag stands first on its line.
+  Otherwise the tagged node is empty and the line break stays for the
+  indent token: `a: !!str` then `b: 1` is two members.
 - **A `...` with no document open produces no document.** Only a `...`
   that *terminates* something closes a document; a stray or
   comment-only `...` region is not a document (`a\n...\n...` is one
@@ -952,16 +1000,18 @@ They stay in the Makefile because removing them is a separate change.
 
 ## Error codes
 
-This package declares one error code of its own, with a template and a
-hint, in every runtime's `options.error` and `options.hint`:
+This package declares three error codes of its own, each with a template
+and a hint, in every runtime's `options.error` and `options.hint`:
 
 | Code | Raised when |
 |---|---|
-| `yaml_undefined_alias` | an alias, as a value or as a key, names an anchor that does not occur before it in the document (YAML 1.2.2, 7.1). The lexer checks the alias against the names of the anchors it has passed, not against the anchors table: a value is recorded only when its node closes, so `&a [*a]` names an anchor that occurs before it but is not recorded yet, and stays accepted. |
+| `yaml_undefined_alias` | an alias, as a value or as a key, names an anchor that does not occur before it in the document (YAML 1.2.2, 7.1). The lexer checks the alias against the names of the anchors it has passed, not against the anchors table: a value is recorded only when its node closes, so `&a [*a]` names an anchor that occurs before it but is not recorded yet. That one is the next code's. |
+| `yaml_recursive_alias` | an alias, as a value or as a key, names an anchor whose node is still open: the alias is inside the node it names (`&a [*a]`, `a: &x {b: *x}`). YAML allows it and means a node that holds itself. Every runtime here gives a tree, and an anchored node is copied where it is aliased, so there is nothing to give. It was once read as nothing, a null where the document has a value. The rules count the anchors whose val has opened and not closed (`openAnchors` in `ts/src/yaml.ts`, and its twins), and a val or a pair whose alias names one of them fails with the code. |
+| `yaml_tab_indent` | a tab stands in a line's leading blanks before block structure: a mapping key, a `- ` or a `? ` (YAML 1.2.2, 6.1). The line's depth cannot be read, and the key was once read as its parent's sibling. A tab before a scalar, a flow collection or a comment is white space, as YAML has it, and so is a tab after a value. |
 
-`test/spec/anchors-aliases.tsv` and `test/spec/merge-key.tsv` pin it with
-`ERROR:yaml_undefined_alias` rows (the format is in
-[`test/AGENTS.md`](test/AGENTS.md)). Every other rejection surfaces
+`test/spec/anchors-aliases.tsv`, `test/spec/merge-key.tsv` and
+`test/spec/indentation.tsv` pin them with `ERROR:<code>` rows (the format
+is in [`test/AGENTS.md`](test/AGENTS.md)). Every other rejection surfaces
 whatever code the engine and `@tabnas/jsonic` raise, unpinned: the YAML
 Test Suite's `error` bucket and its leniency ledger assert *that* a case is
 rejected, never with which code. That is a weak spot, and adding

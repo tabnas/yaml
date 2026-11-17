@@ -37,7 +37,9 @@
     ]
   },
   "errorCodes": [
-    "yaml_undefined_alias"
+    "yaml_undefined_alias",
+    "yaml_recursive_alias",
+    "yaml_tab_indent"
   ],
   "docs": "https://tabnas.dev/docs/packages",
   "repository": "https://github.com/tabnas/yaml",

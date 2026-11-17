@@ -48,7 +48,8 @@ func MakeJsonic(opts ...YamlOptions) *tabnas.Tabnas
 Creates a `*tabnas.Tabnas` configured for YAML parsing: jsonic's grammar
 with the plugin installed. Pass an optional `YamlOptions` to configure
 the plugin (only the first is used). Reuse the returned instance for
-repeated parses, or to apply further engine options.
+repeated parses, or to apply further engine options. `MakeJsonic` has no
+error to return, so it panics on a `Schema` the plugin doesn't know.
 
 ```go
 j := tabnasyaml.MakeJsonic(tabnasyaml.YamlOptions{Meta: true})
@@ -76,7 +77,9 @@ The raw plugin function. Install it on an existing `*tabnasjsonic.Jsonic` with
 `j.Use(tabnasyaml.Yaml, opts)`. `MakeJsonic` is the convenience wrapper around
 this; reach for `Yaml` directly only when you build the engine yourself.
 The `opts` map honours the key `"meta"` (a `bool`), matching
-`YamlOptions.Meta`.
+`YamlOptions.Meta`, and the key `"schema"`, whose one value is the
+string `"core"`, matching `YamlOptions.Schema`. `Use` returns an error
+for any other schema.
 
 
 ## Types
@@ -85,13 +88,21 @@ The `opts` map honours the key `"meta"` (a `bool`), matching
 
 ```go
 type YamlOptions struct {
-    Meta bool
+    Meta   bool
+    Schema string
 }
 ```
 
-| Field  | Type   | Default | Effect |
-| ------ | ------ | ------- | ------ |
-| `Meta` | `bool` | `false` | When `false`, `Parse` returns the bare document value (or `[]any` for a multi-document stream). When `true`, `Parse` returns a `*MetaResult` envelope (see below). |
+| Field    | Type     | Default | Effect |
+| -------- | -------- | ------- | ------ |
+| `Meta`   | `bool`   | `false` | When `false`, `Parse` returns the bare document value (or `[]any` for a multi-document stream). When `true`, `Parse` returns a `*MetaResult` envelope (see below). |
+| `Schema` | `string` | `""`    | How a plain scalar resolves. Empty, the plugin reads the YAML 1.2 core schema and two things more: the YAML 1.1 booleans `yes`, `no`, `on` and `off`, and jsonic's number syntax, such as `1_000` and `0b11`. With `"core"` it reads the core schema and nothing more, so those are strings: see [Value keywords](#value-keywords). The plugin refuses any other value when you install it. |
+
+```go
+core := tabnasyaml.MakeJsonic(tabnasyaml.YamlOptions{Schema: "core"})
+core.Parse("{a: yes, b: 1_000, c: true, d: 12}")
+// map[a:yes b:1_000 c:true d:12]
+```
 
 ### `MetaResult`
 
@@ -189,9 +200,10 @@ All numbers (including hex/octal/binary integers) come back as
 | `%TAG` directive       | `%TAG !e! tag:example.com/`   | captured (see `Meta.Directives`) |
 | Explicit flow key      | `{? k : v}`                   | `map[k:v]` |
 | Document start / end   | `---`, `...`                  | document boundaries |
-| Value keywords         | `true`, `null`, `yes`, `~`    | `true`, `nil`, `true`, `nil` |
-| Non-decimal integers   | `0xff`, `0o755`, `0b1010`     | `255`, `493`, `10` |
+| Value keywords         | `true`, `null`, `yes`, `~`    | `true`, `nil`, `true`, `nil`. Under `Schema: "core"`, `yes` is `"yes"` |
+| Non-decimal integers   | `0xff`, `0o755`, `0b1010`     | `255`, `493`, `10`. Under `Schema: "core"`, `0b1010` is a string |
 | Line comments          | `# comment`                   | ignored |
+| Line breaks            | `\n`, `\r\n`, `\r`            | each is one line break |
 
 ### Value keywords
 
@@ -205,6 +217,32 @@ These plain scalars resolve to non-string values (case variants like
 | `null` / `~`           | `nil`         |
 | `.inf` / `-.inf`       | `math.Inf(±1)`|
 | `.nan`                 | `math.NaN()`  |
+
+`yes`, `no`, `on` and `off` are the YAML 1.1 booleans. The YAML 1.2 core
+schema reads them as strings, and so does the plugin under
+`Schema: "core"`. Under that option a number is one the core schema
+names and no other: a decimal integer or float, a `0o` octal integer or
+a `0x` hexadecimal one. So `1_000`, `0b11`, `0X1F`, `-0x30` and
+`Infinity` are strings there. The
+[YAML Test Schema](https://github.com/perlpunk/yaml-test-schema) corpus
+defines the option: under it, every one of the corpus's 245 scalars
+reads as the core schema says.
+
+## Error codes
+
+A refused document returns the engine's `*tabnas.TabnasError`, whose
+`Code` is stable. The plugin adds three codes of its own to the engine's
+and jsonic's:
+
+| Code | Raised when |
+| ---- | ----------- |
+| `yaml_undefined_alias` | An alias such as `*name` names an anchor that doesn't occur before it in the document. |
+| `yaml_recursive_alias` | An alias is inside the node its anchor names, as in `&a [*a]`, so the node would hold itself. The plugin gives a tree, which can't. |
+| `yaml_tab_indent` | A tab stands in a line's indentation before a mapping key or a sequence entry. YAML indents block structure with spaces alone. A tab before a scalar, a flow collection or a comment is white space. |
+
+Every other refusal carries one of the engine's codes, most often
+`unexpected`. An error's `Row` and `Col` are the place its offset has in
+the source: the line, from 1, and how far along it in characters, from 1.
 
 
 ## Tokens
@@ -257,8 +295,11 @@ in [`ts/doc/grammar.txt`](../../ts/doc/grammar.txt).
 - A core subset of YAML 1.2, not the full specification. Non-scalar
   complex keys, set (`!!set`) and ordered-map (`!!omap`) shorthand, and
   some folding corner cases are not handled.
-- Keyword handling is YAML-1.1-flavoured: `yes`/`no`/`on`/`off` are
-  booleans. Quote them if you need them as strings.
+- Keyword handling is YAML-1.1-flavoured unless you ask otherwise:
+  `yes`/`no`/`on`/`off` are booleans. Quote them if you need them as
+  strings, or set `Schema: "core"`.
+- The plugin refuses an alias inside the node it names. YAML allows it,
+  and it describes a node that holds itself, which a tree can't.
 - All numbers are `float64`; cast to `int` at the call site.
 - No "safe" mode or tag restriction. Review parsed results before using
   them as a deserializer for untrusted input.
