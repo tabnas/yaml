@@ -23,6 +23,11 @@ type YamlOptions = {
   //   docs, or an array of such objects for multi-doc streams.
   // - content is the same value/array the no-meta path returns.
   meta?: boolean
+  // 'core': a plain scalar resolves as the YAML 1.2 core schema says
+  // (YAML 1.2.2, 10.3.2) and no other way. Without it the plugin also reads
+  // the YAML 1.1 booleans (yes, no, on, off) and jsonic's number syntax
+  // (1_000, 0b11), as test/yaml-test-schema-deviations.tsv lists.
+  schema?: 'core'
 }
 
 type DocMeta = {
@@ -57,8 +62,10 @@ const grammarText = `
       { s: '#ZZ' b: 1 a: '@val-set-null' g: yaml }
       # Same or lesser indent after a colon means empty value — backtrack.
       { s: '#IN' b: 1 u: { yamlEmpty: true } g: yaml }
-      # This value is a list.
-      { s: '#EL' p: yamlBlockList a: '@val-set-el-in' g: yaml }
+      # This value is a list: a sequence's entry, or a document's root. A
+      # block sequence cannot start on the line of the key it is the value
+      # of (key: - a), so a pair's value is not one here.
+      { s: '#EL' c: '@val-not-pair-value' p: yamlBlockList a: '@val-set-el-in' g: yaml }
     ]
     inject: { append: false }
   }
@@ -293,6 +300,53 @@ function yamlTagFloat(raw: string): number {
 }
 
 
+// The plain scalars that are a value and not a string: the YAML 1.2 core
+// schema's (YAML 1.2.2, 10.3.2), and then the YAML 1.1 booleans, which the
+// plugin reads too unless `schema: 'core'` is set. The tables have no
+// prototype: a plain scalar is looked up by its text, and `toString` or
+// `constructor` is a string, not the member a plain object inherits.
+function valueTable(entries: [any, string[]][]): Record<string, any> {
+  const table: Record<string, any> = Object.create(null)
+  for (const [value, texts] of entries) {
+    for (const text of texts) table[text] = value
+  }
+  return table
+}
+
+const CORE_VALUES: [any, string[]][] = [
+  [true, ['true', 'True', 'TRUE']],
+  [false, ['false', 'False', 'FALSE']],
+  [null, ['null', 'Null', 'NULL', '~']],
+  [Infinity, ['.inf', '.Inf', '.INF', '+.inf', '+.Inf', '+.INF']],
+  [-Infinity, ['-.inf', '-.Inf', '-.INF']],
+  [NaN, ['.nan', '.NaN', '.NAN']],
+]
+
+const VALUES_CORE = valueTable(CORE_VALUES)
+
+const VALUES = valueTable(CORE_VALUES.concat([
+  [true, ['yes', 'Yes', 'YES', 'on', 'On', 'ON']],
+  [false, ['no', 'No', 'NO', 'off', 'Off', 'OFF']],
+]))
+
+// The plain scalars the core schema reads as a number: a decimal integer,
+// an octal one (0o17), a hexadecimal one (0x1f), and a decimal float. Every
+// other text is a string under it, `0b11`, `1_000`, `0X1F`, `-0x30` and
+// `Infinity` among them.
+const CORE_DECIMAL = /^[-+]?(\.[0-9]+|[0-9]+(\.[0-9]*)?)([eE][-+]?[0-9]+)?$/
+const CORE_OCTAL = /^0o[0-7]+$/
+const CORE_HEX = /^0x[0-9a-fA-F]+$/
+
+// The number the core schema reads `text` as, or undefined when it reads a
+// string.
+function coreNumber(text: string): number | undefined {
+  if (CORE_DECIMAL.test(text)) return Number(text)
+  if (CORE_OCTAL.test(text)) return parseInt(text.substring(2), 8)
+  if (CORE_HEX.test(text)) return parseInt(text.substring(2), 16)
+  return undefined
+}
+
+
 // A member this grammar stores itself, outside the engine's pair rule: a
 // key with no value in a flow mapping, a sequence entry's pair, a merge
 // key's members. A key the mapping holds already is combined as the pair
@@ -423,6 +477,16 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
   // returns here. options() does not re-run plugins, and make() builds a
   // fresh child that installs its own.
   if ((tabnas as any).__yamlInstalled) return
+
+  // The schema a plain scalar resolves by. A name this plugin does not
+  // know is refused, so that a misspelling cannot leave the default on.
+  if (null != options?.schema && 'core' !== options.schema) {
+    throw new Error('@tabnas/yaml: unknown schema ' +
+      JSON.stringify(options.schema) + ", expected 'core'")
+  }
+  const core = 'core' === options?.schema
+  const VALUE = core ? VALUES_CORE : VALUES
+
   ;(tabnas as any).__yamlInstalled = true
 
   // Human descriptions for YAML tokens, surfaced in railroad diagram legends
@@ -450,12 +514,22 @@ const Yaml: Plugin = (tabnas: Tabnas, options: YamlOptions) => {
   tabnas.options({
     error: {
       yaml_undefined_alias: 'undefined alias: {src}',
+      yaml_recursive_alias: 'recursive alias: {src}',
+      yaml_tab_indent: 'tab in indentation',
     },
     hint: {
       yaml_undefined_alias: `
 The alias {src} names no anchor that occurs before it in the document.
 An anchor is written &name on the node it names, and an alias can only
 name an anchor defined earlier.`,
+      yaml_recursive_alias: `
+The alias {src} names the anchor of a node it is inside, so the node
+would hold itself. This parser gives a tree, which cannot. Anchor the
+part that repeats, and name that from outside it.`,
+      yaml_tab_indent: `
+A tab stands in this line's indentation, before a mapping key or a
+sequence entry. YAML indents block structure with spaces alone, so the
+line's depth cannot be read. Indent the line with spaces.`,
     },
   })
 
@@ -482,6 +556,12 @@ name an anchor defined earlier.`,
   // cannot answer that: a value is recorded only when its node closes, so
   // `&a [*a]` names an anchor that occurs before it but is not recorded yet.
   let declaredAnchors: Set<string> = new Set()
+  // The anchors whose node is open: claimed by a val that has not closed
+  // yet, each with how many such vals hold it. An alias to one of them is
+  // inside the node it names (`&a [*a]`), and names a node that would hold
+  // itself. The anchors table records a node only when it closes, so the
+  // alias once read as nothing, a null where the document has a value.
+  let openAnchors: Map<string, number> = new Map()
   const pendAnchor = (name: string, inline: boolean) => {
     pendingAnchors.push({ name, inline })
     if (!declaredAnchors.has(name)) {
@@ -559,6 +639,12 @@ name an anchor defined earlier.`,
   let jSkip = false
   let jComment = false
   let jPrev = -1
+  // The line breaks `histSync` has passed, counted: a `\n`, a `\r` by
+  // itself, or a `\r\n` is one (`rowCR`: the last character passed was a
+  // `\r`, whose `\n`, if it follows, is the rest of the same break). The
+  // cursor's row is one more than the breaks before it.
+  let rowsPassed = 0
+  let rowCR = false
   // The cut the matcher last began: its lexer, its source position, and how
   // many tokens the parser had taken by then. The engine cuts a token again
   // over a wider window when a read reached the window's end, from the same
@@ -579,6 +665,8 @@ name an anchor defined earlier.`,
   let s_histLen = 0
   let s_breaks = 0
   let s_j = [0, 0, 0, 0, 0]
+  let s_rows = 0
+  let s_rowCR = false
 
   // Whether a read past the window's end reads the source on. The matcher
   // runs first in a cut, and reads on. The text check runs after the
@@ -670,6 +758,9 @@ name an anchor defined earlier.`,
       if (windowed) hist[histLen++] = c
       if (10 === c || 13 === c) {
         breaks.push(a)
+        if (13 === c) { rowsPassed++; rowCR = true }
+        else if (rowCR) rowCR = false
+        else rowsPassed++
         // Line breaks are lines' ends in every scan here, and neither is
         // blank or in a comment to the flow colon.
         jQuote = 0
@@ -678,6 +769,7 @@ name an anchor defined earlier.`,
         jPrev = -1
         continue
       }
+      rowCR = false
       if (jComment) continue
       const blank = 32 === c || 9 === c
       if (jSkip) {
@@ -698,6 +790,23 @@ name an anchor defined earlier.`,
       if (!blank) jSig = c
       jPrev = c
     }
+  }
+
+  // The cursor's row and column, set from its offset: one more than the
+  // line breaks before it, and how far it stands past its line's start,
+  // from 1. The matcher sets them wherever it cuts a token, so a token's
+  // place is its offset's, whatever the tokens before it took. Kept up as
+  // each token was taken, they drifted: a column too far after every `: `,
+  // no row for a line break inside a quoted scalar, and column 0 after a
+  // block scalar.
+  function place(lex: Lex): void {
+    const pnt = lex.pnt
+    const pos = viewBase + pnt.sI
+    histSync(pos)
+    let ls = lineStartOf(pos)
+    if (0 === ls && 0xFEFF === absCode(0)) ls = 1
+    pnt.rI = 1 + rowsPassed
+    pnt.cI = pos < ls ? 1 : pos - ls + 1
   }
 
   // The lines `hist` keeps: the text after the HIST_BREAKS-th last line
@@ -803,6 +912,8 @@ name an anchor defined earlier.`,
     s_j[2] = jSkip ? 1 : 0
     s_j[3] = jComment ? 1 : 0
     s_j[4] = jPrev
+    s_rows = rowsPassed
+    s_rowCR = rowCR
   }
 
   function restore(): void {
@@ -829,6 +940,8 @@ name an anchor defined earlier.`,
     jSkip = 1 === s_j[2]
     jComment = 1 === s_j[3]
     jPrev = s_j[4]
+    rowsPassed = s_rows
+    rowCR = s_rowCR
   }
 
   // A parse begins, over the lexer `lex`: nothing kept of the last.
@@ -843,6 +956,8 @@ name an anchor defined earlier.`,
     jSkip = false
     jComment = false
     jPrev = -1
+    rowsPassed = 0
+    rowCR = false
     cutLex = null
     cutPos = -1
     cutTaken = -1
@@ -863,7 +978,7 @@ name an anchor defined earlier.`,
         let q = a
         while (' ' === absAt(q) || '\t' === absAt(q)) q++
         if ('#' === absAt(q)) {
-          while (undefined !== absAt(q) && '\n' !== absAt(q)) q++
+          while (undefined !== absAt(q) && '\n' !== absAt(q) && '\r' !== absAt(q)) q++
           if (undefined === absAt(q)) return true
           a = q + 1
           continue
@@ -987,6 +1102,27 @@ name an anchor defined earlier.`,
     '\\': '\\', N: '\u0085', _: '\u00a0', L: '\u2028', P: '\u2029',
   }
 
+  // Whether block structure starts at source position `i`, the first
+  // character after a line's leading blanks: a sequence entry (`- `), an
+  // explicit key (`? `), or an implicit key, quoted or plain, which is a
+  // scalar its line follows with `: `. A tab among those blanks is then a
+  // tab in indentation, which YAML forbids (YAML 1.2.2, 6.1): the line's
+  // depth cannot be read, and the key was once read as its parent's
+  // sibling. A plain or quoted scalar, a flow collection and a comment may
+  // follow a tab.
+  function blockStartAt(i: number): boolean {
+    const c = absAt(i)
+    if (c === undefined || c === '\n' || c === '\r' || c === '#') return false
+    if (c === '-' || c === '?') {
+      const n = absAt(i + 1)
+      if (n === undefined || isYamlSpace(n)) return true
+    }
+    if (c === '"' || c === "'") return quotedKeyAt(i)
+    if (c === '{' || c === '}' || c === '[' || c === ']' || c === ',') return false
+    if (c === ':' && (absAt(i + 1) === undefined || isYamlSpace(absAt(i + 1)))) return true
+    return 58 === absCode(plainScalarRest(i))
+  }
+
   // `text` with its quotes removed when the whole of it is one quoted
   // scalar on one line; otherwise `text` unchanged. Single quotes take ''
   // for a quote. Double quotes take every escape YAML 1.2 defines: the
@@ -1027,7 +1163,10 @@ name an anchor defined earlier.`,
             j += 6
           }
         }
-        if ((cp >= 0xd800 && cp <= 0xdfff) || cp > 0x10ffff) return text
+        if (cp > 0x10ffff) return text
+        // Half of a surrogate pair by itself is the code unit it spells,
+        // as it is in a quoted scalar anywhere else (`"\ud800"`). It was
+        // once refused here, and the key was then read with its quotes.
         out += String.fromCodePoint(cp)
       } else {
         out += c
@@ -1186,6 +1325,190 @@ name an anchor defined earlier.`,
   }
 
 
+  // The plain scalar that starts at window position `at`: its text, with
+  // its lines folded as YAML folds a plain scalar's, how many characters it
+  // takes, and how many line breaks are among them. It ends at a `: `, at a
+  // ` #`, in a flow collection at `,` `]` `}`, or before a line that does
+  // not continue it. The text check reads every plain scalar through this,
+  // and the matcher asks it whether a scalar that starts as a number runs
+  // on to the next line.
+  function plainScalarAt(at: number): { text: string, consumed: number, rows: number } {
+    const F = (i: number): string => srcAt(at + i)
+    // Match text to end of line, stopping at `: `, `:\n`, ` #`, or newline.
+    // This handles YAML plain scalars with multiline continuation.
+    const here = viewBase + at
+    updateFlowState(here)
+    let inFlowCtx = _flowDepth > 0
+    // Find key indent and determine context for multiline scalars.
+    let lineStart = lineStartOf(here)
+    if (0 === lineStart && 0xFEFF === absCode(0)) lineStart = 1
+
+    // Current line indent (indent of the line where text starts).
+    let currentLineIndent = 0
+    {
+      let ci = lineStart
+      while (ci < here && absAt(ci) === ' ') { currentLineIndent++; ci++ }
+    }
+
+    // Check if text is preceded by ": " on the same line (map value context).
+    let isMapValue = false
+    {
+      let ci = here - 1
+      // Skip whitespace before text
+      while (ci >= lineStart && (absAt(ci) === ' ' || absAt(ci) === '\t')) ci--
+      if (ci >= lineStart && absAt(ci) === ':') isMapValue = true
+    }
+
+    // A sequence entry's scalar (`- text`): the column of the `-` it
+    // follows, the nearest when several lead the line (`- - text`).
+    let entryIn = -1
+    {
+      let ci = here - 1
+      while (ci >= lineStart && (absAt(ci) === ' ' || absAt(ci) === '\t')) ci--
+      if (ci >= lineStart && ci < here - 1 && absAt(ci) === '-' &&
+          (ci === lineStart || absAt(ci - 1) === ' ' || absAt(ci - 1) === '\t')) {
+        entryIn = ci - lineStart
+      }
+    }
+
+    // The minimum indent for continuation lines.
+    // For map values: continuation requires indent > the colon's line
+    // indent. For a sequence entry's scalar: indent > its `-`, so that a
+    // line at the sequence's own indent, or an enclosing one's, is the next
+    // entry and never more of this scalar (`- - x` then `- - y`). For
+    // standalone scalars, indent >= the current line's.
+    let minContinuationIndent = isMapValue ? currentLineIndent + 1
+      : entryIn >= 0 ? entryIn + 1 : currentLineIndent
+    let text = ''
+    let i = 0
+    let totalConsumed = 0
+    let rows = 0
+    let scanLine = () => {
+      let line = ''
+      while (F(i) !== undefined) {
+        let c = F(i)
+        if (c === '\n' || c === '\r') break
+        if (c === ':' && (F(i + 1) === ' ' || F(i + 1) === '\t' || F(i + 1) === '\n' ||
+            F(i + 1) === '\r' || F(i + 1) === undefined)) break
+        if ((c === ' ' || c === '\t') && F(i + 1) === '#') break
+        if (inFlowCtx && (c === ']' || c === '}')) break
+        if (c === ',' && inFlowCtx) break
+        line += c
+        i++
+      }
+      return line.replace(/\s+$/, '')
+    }
+
+    text = scanLine()
+    totalConsumed = i
+
+    // Check for continuation lines (multiline plain scalars).
+    // Blank lines (whitespace-only) within a scalar become newlines.
+    while (F(i) === '\n' || F(i) === '\r') {
+      let nlPos = i
+      // Count blank lines (lines with only whitespace).
+      let blankLines = 0
+      while (F(i) === '\n' || F(i) === '\r') {
+        if (F(i) === '\r') i++
+        if (F(i) === '\n') i++
+        // Count indent of next line.
+        let li = 0
+        while (F(i + li) === ' ' || F(i + li) === '\t') li++
+        if (F(i + li) === undefined || F(i + li) === '\n' || F(i + li) === '\r') {
+          // Blank line — count it and skip.
+          blankLines++
+          i += li
+          continue
+        }
+        break
+      }
+      // Count indent of the content line after blank lines.
+      let lineIndent = 0
+      while (F(i) === ' ' || F(i) === '\t') { lineIndent++; i++ }
+      // In flow context, continuation is allowed regardless of indent
+      // (as long as the next line doesn't start a flow indicator or comment).
+      // In block context, must be more indented than the key.
+      // Check for document markers (--- or ...) at column 0.
+      let isDocMarker = lineIndent === 0 &&
+        ((F(i) === '-' && F(i+1) === '-' && F(i+2) === '-' &&
+          (F(i+3) === ' ' || F(i+3) === '\t' || F(i+3) === '\n' ||
+           F(i+3) === '\r' || F(i+3) === undefined)) ||
+         (F(i) === '.' && F(i+1) === '.' && F(i+2) === '.' &&
+          (F(i+3) === ' ' || F(i+3) === '\t' || F(i+3) === '\n' ||
+           F(i+3) === '\r' || F(i+3) === undefined)))
+      // Check for sequence marker "- ". Only treat as a new sequence
+      // entry when the indent matches an enclosing sequence's level.
+      // Find the nearest "- " sequence marker preceding the text on
+      // the first line to determine the relevant sequence indent.
+      let isSeqMarker = false
+      if (F(i) === '-' &&
+          (F(i+1) === ' ' || F(i+1) === '\t' || F(i+1) === '\n' ||
+           F(i+1) === '\r' || F(i+1) === undefined)) {
+        // Determine the sequence indent from the first line's context.
+        // Look backward from the text's start to find "- " markers before it.
+        let seqIndent = -1
+        let si = here - 1
+        while (si >= lineStart) {
+          if (absAt(si) === '-' && (absAt(si+1) === ' ' || absAt(si+1) === '\t')) {
+            seqIndent = si - lineStart
+            break
+          }
+          si--
+        }
+        // isSeqMarker if the continuation "- " matches a known sequence
+        // indent, or if it's at the current line indent level.
+        isSeqMarker = (seqIndent >= 0 && lineIndent === seqIndent) ||
+                      (seqIndent < 0 && lineIndent <= currentLineIndent)
+      }
+      let canContinue = inFlowCtx
+        ? (F(i) !== undefined && F(i) !== '\n' && F(i) !== '\r' &&
+           F(i) !== '#' && F(i) !== '{' && F(i) !== '}' &&
+           F(i) !== '[' && F(i) !== ']')
+        : (lineIndent >= minContinuationIndent && F(i) !== undefined &&
+           F(i) !== '\n' && F(i) !== '\r' && F(i) !== '#' &&
+           !isDocMarker && !isSeqMarker)
+      if (canContinue) {
+        // Check if this line is a key-value pair (contains ": ").
+        let peekJ = i
+        let isKV = false
+        while (F(peekJ) !== undefined && F(peekJ) !== '\n' && F(peekJ) !== '\r') {
+          if (F(peekJ) === ':' && (F(peekJ + 1) === ' ' || F(peekJ + 1) === '\t' ||
+              F(peekJ + 1) === '\n' || F(peekJ + 1) === '\r' ||
+              F(peekJ + 1) === undefined)) {
+            isKV = true
+            break
+          }
+          if (F(peekJ) === '}' || F(peekJ) === ']' || F(peekJ) === ',') {
+            break
+          }
+          peekJ++
+        }
+        if (!isKV || inFlowCtx) {
+          let contLine = scanLine()
+          if (contLine.length > 0) {
+            // Blank lines → newlines; single newline → space (folding).
+            if (blankLines > 0) {
+              for (let b = 0; b < blankLines; b++) text += '\n'
+            } else {
+              text += ' '
+            }
+            text += contLine
+            totalConsumed = i
+            rows++
+            continue
+          }
+        }
+      }
+      // Not a continuation — revert to newline position.
+      i = nlPos
+      break
+    }
+
+    text = text.replace(/\s+$/, '')
+    return { text, consumed: totalConsumed, rows }
+  }
+
+
   tabnas.options({
     fixed: {
       token: {
@@ -1221,6 +1544,13 @@ name an anchor defined earlier.`,
         viewOf(lex)
         readOn = false
         let pnt = lex.pnt
+        // A token this check cut: the cursor past it is placed by its
+        // offset, since the engine may cut the next token itself (the
+        // source's end) without coming back through the matcher.
+        const cut = (tkn: Token) => {
+          place(lex)
+          return { done: true, token: tkn }
+        }
         // The text from the cursor on: F(i) is the character i past it,
         // read through the window, and FS(a, b) the text between.
         const fwdAt = pnt.sI
@@ -1395,7 +1725,7 @@ name an anchor defined earlier.`,
               pnt.sI += idx
               pnt.rI += 1
               pnt.cI = 0
-              return { done: true, token: tkn }
+              return cut(tkn)
             }
 
             // Collect indented lines.
@@ -1454,6 +1784,14 @@ name an anchor defined earlier.`,
               // Empty lines and "more indented" lines are preserved literally.
               let result = ''
               let prevWasNormal = false
+              // The last line written was more indented, and its line break
+              // is not written yet. It is a line break in the value, never
+              // folded, but it is written when the next line is, so that a
+              // more-indented line that ends the scalar leaves the value
+              // without one, as a normal line does: chomping then adds the
+              // one line break both end with. Written at once, `>+` kept
+              // two line breaks after such a line where the text has one.
+              let prevWasMore = false
               let pendingEmptyCount = 0
               for (let li = 0; li < lines.length; li++) {
                 let line = lines[li]
@@ -1462,7 +1800,13 @@ name an anchor defined earlier.`,
 
                 if (isEmpty) {
                   pendingEmptyCount++
-                } else if (isMore) {
+                  continue
+                }
+                if (prevWasMore) {
+                  result += '\n'
+                  prevWasMore = false
+                }
+                if (isMore) {
                   // Flush pending empty lines, with paragraph-close if needed.
                   if (prevWasNormal && result.length > 0) result += '\n'
                   for (let ei = 0; ei < pendingEmptyCount; ei++) result += '\n'
@@ -1471,8 +1815,9 @@ name an anchor defined earlier.`,
                   if (result.length > 0 && result[result.length - 1] !== '\n') {
                     result += '\n'
                   }
-                  result += line + '\n'
+                  result += line
                   prevWasNormal = false
+                  prevWasMore = true
                 } else {
                   // Normal line.
                   if (pendingEmptyCount > 0) {
@@ -1543,7 +1888,7 @@ name an anchor defined earlier.`,
             pnt.sI += endPos
             pnt.rI += endRows
             pnt.cI = 0
-            return { done: true, token: tkn }
+            return cut(tkn)
           }
         }
 
@@ -1602,7 +1947,7 @@ name an anchor defined earlier.`,
           let tkn = lex.token(tknTin, result, src, pnt)
           pnt.sI += valEnd
           pnt.cI += valEnd
-          return { done: true, token: tkn }
+          return cut(tkn)
         }
 
         // Don't apply text check for special chars or flow context.
@@ -1621,193 +1966,31 @@ name an anchor defined earlier.`,
           return null
         }
 
-        // Match text to end of line, stopping at `: `, `:\n`, ` #`, or newline.
-        // This handles YAML plain scalars with multiline continuation.
-        const here = viewBase + pnt.sI
-        updateFlowState(here)
-        let inFlowCtx = _flowDepth > 0
-        // Find key indent and determine context for multiline scalars.
-        let lineStart = lineStartOf(here)
-        if (0 === lineStart && 0xFEFF === absCode(0)) lineStart = 1
-
-        // Current line indent (indent of the line where text starts).
-        let currentLineIndent = 0
-        {
-          let ci = lineStart
-          while (ci < here && absAt(ci) === ' ') { currentLineIndent++; ci++ }
-        }
-
-        // Check if text is preceded by ": " on the same line (map value context).
-        let isMapValue = false
-        {
-          let ci = here - 1
-          // Skip whitespace before text
-          while (ci >= lineStart && (absAt(ci) === ' ' || absAt(ci) === '\t')) ci--
-          if (ci >= lineStart && absAt(ci) === ':') isMapValue = true
-        }
-
-        // The minimum indent for continuation lines.
-        // For map values: continuation requires indent > the colon's line
-        // indent; for standalone scalars, indent >= the current line's.
-        let minContinuationIndent = isMapValue ? currentLineIndent + 1 : currentLineIndent
-        let text = ''
-        let i = 0
-        let totalConsumed = 0
-        let rows = 0
-        let scanLine = () => {
-          let line = ''
-          while (F(i) !== undefined) {
-            let c = F(i)
-            if (c === '\n' || c === '\r') break
-            if (c === ':' && (F(i + 1) === ' ' || F(i + 1) === '\t' || F(i + 1) === '\n' ||
-                F(i + 1) === '\r' || F(i + 1) === undefined)) break
-            if ((c === ' ' || c === '\t') && F(i + 1) === '#') break
-            if (inFlowCtx && (c === ']' || c === '}')) break
-            if (c === ',' && inFlowCtx) break
-            line += c
-            i++
-          }
-          return line.replace(/\s+$/, '')
-        }
-
-        text = scanLine()
-        totalConsumed = i
-
-        // Check for continuation lines (multiline plain scalars).
-        // Blank lines (whitespace-only) within a scalar become newlines.
-        while (F(i) === '\n' || F(i) === '\r') {
-          let nlPos = i
-          // Count blank lines (lines with only whitespace).
-          let blankLines = 0
-          while (F(i) === '\n' || F(i) === '\r') {
-            if (F(i) === '\r') i++
-            if (F(i) === '\n') i++
-            // Count indent of next line.
-            let li = 0
-            while (F(i + li) === ' ' || F(i + li) === '\t') li++
-            if (F(i + li) === undefined || F(i + li) === '\n' || F(i + li) === '\r') {
-              // Blank line — count it and skip.
-              blankLines++
-              i += li
-              continue
-            }
-            break
-          }
-          // Count indent of the content line after blank lines.
-          let lineIndent = 0
-          while (F(i) === ' ' || F(i) === '\t') { lineIndent++; i++ }
-          // In flow context, continuation is allowed regardless of indent
-          // (as long as the next line doesn't start a flow indicator or comment).
-          // In block context, must be more indented than the key.
-          // Check for document markers (--- or ...) at column 0.
-          let isDocMarker = lineIndent === 0 &&
-            ((F(i) === '-' && F(i+1) === '-' && F(i+2) === '-' &&
-              (F(i+3) === ' ' || F(i+3) === '\t' || F(i+3) === '\n' ||
-               F(i+3) === '\r' || F(i+3) === undefined)) ||
-             (F(i) === '.' && F(i+1) === '.' && F(i+2) === '.' &&
-              (F(i+3) === ' ' || F(i+3) === '\t' || F(i+3) === '\n' ||
-               F(i+3) === '\r' || F(i+3) === undefined)))
-          // Check for sequence marker "- ". Only treat as a new sequence
-          // entry when the indent matches an enclosing sequence's level.
-          // Find the nearest "- " sequence marker preceding the text on
-          // the first line to determine the relevant sequence indent.
-          let isSeqMarker = false
-          if (F(i) === '-' &&
-              (F(i+1) === ' ' || F(i+1) === '\t' || F(i+1) === '\n' ||
-               F(i+1) === '\r' || F(i+1) === undefined)) {
-            // Determine the sequence indent from the first line's context.
-            // Look backward from the text's start to find "- " markers before it.
-            let seqIndent = -1
-            let si = here - 1
-            while (si >= lineStart) {
-              if (absAt(si) === '-' && (absAt(si+1) === ' ' || absAt(si+1) === '\t')) {
-                seqIndent = si - lineStart
-                break
-              }
-              si--
-            }
-            // isSeqMarker if the continuation "- " matches a known sequence
-            // indent, or if it's at the current line indent level.
-            isSeqMarker = (seqIndent >= 0 && lineIndent === seqIndent) ||
-                          (seqIndent < 0 && lineIndent <= currentLineIndent)
-          }
-          let canContinue = inFlowCtx
-            ? (F(i) !== undefined && F(i) !== '\n' && F(i) !== '\r' &&
-               F(i) !== '#' && F(i) !== '{' && F(i) !== '}' &&
-               F(i) !== '[' && F(i) !== ']')
-            : (lineIndent >= minContinuationIndent && F(i) !== undefined &&
-               F(i) !== '\n' && F(i) !== '\r' && F(i) !== '#' &&
-               !isDocMarker && !isSeqMarker)
-          if (canContinue) {
-            // Check if this line is a key-value pair (contains ": ").
-            let peekJ = i
-            let isKV = false
-            while (F(peekJ) !== undefined && F(peekJ) !== '\n' && F(peekJ) !== '\r') {
-              if (F(peekJ) === ':' && (F(peekJ + 1) === ' ' || F(peekJ + 1) === '\t' ||
-                  F(peekJ + 1) === '\n' || F(peekJ + 1) === '\r' ||
-                  F(peekJ + 1) === undefined)) {
-                isKV = true
-                break
-              }
-              if (F(peekJ) === '}' || F(peekJ) === ']' || F(peekJ) === ',') {
-                break
-              }
-              peekJ++
-            }
-            if (!isKV || inFlowCtx) {
-              let contLine = scanLine()
-              if (contLine.length > 0) {
-                // Blank lines → newlines; single newline → space (folding).
-                if (blankLines > 0) {
-                  for (let b = 0; b < blankLines; b++) text += '\n'
-                } else {
-                  text += ' '
-                }
-                text += contLine
-                totalConsumed = i
-                rows++
-                continue
-              }
-            }
-          }
-          // Not a continuation — revert to newline position.
-          i = nlPos
-          break
-        }
-
-        text = text.replace(/\s+$/, '')
+        // The plain scalar from here: to the end of its line, stopping at
+        // `: `, ` #` or a line break, and over the lines that continue it.
+        const plain = plainScalarAt(pnt.sI)
+        let text = plain.text
+        let totalConsumed = plain.consumed
+        let rows = plain.rows
 
         if (text.length === 0) return null
 
         // Check if this is a known YAML value.
-        let valMap: Record<string, any> = {
-          'true': true, 'True': true, 'TRUE': true,
-          'false': false, 'False': false, 'FALSE': false,
-          'null': null, 'Null': null, 'NULL': null,
-          '~': null,
-          'yes': true, 'Yes': true, 'YES': true,
-          'no': false, 'No': false, 'NO': false,
-          'on': true, 'On': true, 'ON': true,
-          'off': false, 'Off': false, 'OFF': false,
-          '.inf': Infinity, '.Inf': Infinity, '.INF': Infinity,
-          '+.inf': Infinity, '+.Inf': Infinity, '+.INF': Infinity,
-          '-.inf': -Infinity, '-.Inf': -Infinity, '-.INF': -Infinity,
-          '.nan': NaN, '.NaN': NaN, '.NAN': NaN,
-        }
-        if (text in valMap) {
-          let tkn = lex.token('#VL', valMap[text], text, pnt)
+        if (text in VALUE) {
+          let tkn = lex.token('#VL', VALUE[text], text, pnt)
           pnt.sI += text.length
           pnt.cI += text.length
-          return { done: true, token: tkn }
+          return cut(tkn)
         }
 
-        // Check if it's a number.
-        let num = +text
-        if (!isNaN(num) && text !== '') {
+        // Check if it's a number: under the core schema one of its number
+        // forms, and otherwise whatever JavaScript reads as a number.
+        let num = core ? coreNumber(text) : +text
+        if (undefined !== num && !isNaN(num) && text !== '') {
           let tkn = lex.token('#NR', num, text, pnt)
           pnt.sI += text.length
           pnt.cI += text.length
-          return { done: true, token: tkn }
+          return cut(tkn)
         }
 
         // Plain text — consume to end of meaningful content.
@@ -1816,7 +1999,7 @@ name an anchor defined earlier.`,
         pnt.sI += totalConsumed
         pnt.rI += rows
         pnt.cI += totalConsumed  // approximate
-        return { done: true, token: tkn }
+        return cut(tkn)
       },
     },
   })
@@ -1874,6 +2057,7 @@ name an anchor defined earlier.`,
                 anchors = Object.create(null)
                 pendingAnchors = []
                 declaredAnchors = new Set()
+                openAnchors = new Map()
                 pendingExplicitCL = false
                 skipNumberMatch = false
                 tagHandles = {}
@@ -1906,8 +2090,10 @@ name an anchor defined earlier.`,
               const tkn = yamlMatch(lex)
               // What this call stepped over without a token of its own (an
               // anchor, a tag) is the window's to drop at the next cut, so
-              // `hist` takes it now.
-              histSync(viewBase + lex.pnt.sI)
+              // `hist` takes it now; and the cursor past the token is
+              // placed by its offset, for a token the engine cuts next
+              // without coming back here (the source's end).
+              place(lex)
               return tkn
             }
           }
@@ -1939,6 +2125,10 @@ name an anchor defined earlier.`,
               // Loop to restart matching after consuming flow whitespace.
               yamlMatchLoop: while (true) {
 
+              // The cursor's row and column are its offset's, here where
+              // every token of this pass is cut.
+              place(lex)
+
               // Skip blank lines that contain only tabs (and maybe spaces).
               // YAML treats these as blank lines, but jsonic errors on bare tabs.
               // The line is what lies before the next line feed: blank when
@@ -1951,13 +2141,26 @@ name an anchor defined earlier.`,
                   if (F(k) === '\t') tab = true
                   k++
                 }
-                if (tab && (F(k) === '\n' || F(k) === undefined)) {
-                  let skip = F(k) === '\n' ? k + 1 : k
+                if (tab && (F(k) === '\n' || F(k) === '\r' || F(k) === undefined)) {
+                  // At a line's start the run is a blank line, and its line
+                  // break goes with it. After something on the line it is
+                  // trailing white space, and the line break stays for the
+                  // indent token: `seq:` then a tab, with its entries on
+                  // the next line, once lost the token, and the entries
+                  // were read as started on the key's line.
+                  let skip = !atLineStart(viewBase + pnt.sI) ? k
+                    : F(k) === '\r' && F(k + 1) === '\n' ? k + 2
+                    : (F(k) === '\n' || F(k) === '\r') ? k + 1 : k
                   pnt.sI += skip
-                  pnt.rI++
-                  pnt.cI = 0
                   fwdAt = pnt.sI
                   continue yamlMatchLoop
+                }
+                // A tab in the leading blanks of a document's first line,
+                // before block structure: the line break handler below
+                // refuses it on every later line.
+                if (tab && atLineStart(viewBase + pnt.sI) &&
+                    blockStartAt(viewBase + pnt.sI + k)) {
+                  return lex.bad('yaml_tab_indent', pnt.sI, pnt.sI + k)
                 }
               }
 
@@ -2125,6 +2328,7 @@ name an anchor defined earlier.`,
                 {
                   let ac = srcAt(pnt.sI)
                   if (ac === '[' || ac === '{') {
+                    place(lex)
                     let tkn = lex.token(ac === '[' ? '#OS' : '#OB', undefined, ac, pnt)
                     pnt.sI += 1
                     pnt.cI += 1
@@ -2163,9 +2367,9 @@ name an anchor defined earlier.`,
                 let pos = 0
                 while (F(pos) !== undefined && F(pos) !== '\n' && F(pos) !== '\r') pos++
                 let directiveSrc = FS(0, pos)
+                let tkn = lex.token('#DR', directiveSrc, directiveSrc, lex.pnt)
                 pnt.sI += pos
                 pnt.cI += pos
-                let tkn = lex.token('#DR', directiveSrc, directiveSrc, lex.pnt)
                 return tkn
               }
 
@@ -2229,7 +2433,7 @@ name an anchor defined earlier.`,
               // one that ends it, which is all it is tried on.
               if (F(0) === '!' && F(1) === '!' && STRUCT_TAG.test(FS(0, structTagReach(F)))) {
                 let skip = 2
-                while (F(skip) !== undefined && F(skip) !== ' ' && F(skip) !== '\n') skip++
+                while (F(skip) !== undefined && F(skip) !== ' ' && F(skip) !== '\n' && F(skip) !== '\r') skip++
                 while (F(skip) === ' ') skip++
                 // Check if tag is standalone on its own line.
                 let tagIndent = 0
@@ -2259,6 +2463,7 @@ name an anchor defined earlier.`,
                       pnt.rI++
                       if (srcAt(pnt.sI) === '[' || srcAt(pnt.sI) === '{') {
                         let oc = srcAt(pnt.sI)
+                        place(lex)
                         let tkn = lex.token(oc === '[' ? '#OS' : '#OB', undefined, oc, pnt)
                         pnt.sI += 1
                         pnt.cI += 1
@@ -2287,6 +2492,7 @@ name an anchor defined earlier.`,
                 // otherwise mis-lex it as #BD (see anchor handler above).
                 if (srcAt(pnt.sI) === '[' || srcAt(pnt.sI) === '{') {
                   let oc = srcAt(pnt.sI)
+                  place(lex)
                   let tkn = lex.token(oc === '[' ? '#OS' : '#OB', undefined, oc, pnt)
                   pnt.sI += 1
                   pnt.cI += 1
@@ -2322,6 +2528,73 @@ name an anchor defined earlier.`,
                   valStart = anchorEnd
                   valEnd = valStart
                 }
+                // A tag that ends its line. Its node is the next line's when
+                // that line is indented past this one, or, for a tag that
+                // stands first on its line, at least as far: the value
+                // below a key, a sequence entry's, a document's root.
+                // Otherwise the tagged node is empty, and the line break
+                // stays for the indent token: `a: !!str` then `b: 1` is two
+                // members, where the break was once skipped and `b` read as
+                // the value of `a`. The line break is one or two characters
+                // (`\r\n`), and a tag that ends the source has no next
+                // line: its node is empty too.
+                let nextPlain: { text: string, consumed: number, rows: number } | undefined
+                let tagNl = valStart
+                if (F(tagNl) === '\r') tagNl++
+                if (F(tagNl) === '\n') tagNl++
+                if (tagNl > valStart && F(tagNl) !== undefined) {
+                  let nextIn = 0
+                  while (F(tagNl + nextIn) === ' ') nextIn++
+                  let nc = F(tagNl + nextIn)
+                  let blankNext = nc === undefined || nc === '\n' || nc === '\r' ||
+                    nc === '#' || nc === '\t'
+                  const here = viewBase + pnt.sI
+                  let ls = lineStartOf(here)
+                  if (0 === ls && 0xFEFF === absCode(0)) ls = 1
+                  let lineIn = 0
+                  while (ls + lineIn < here && absAt(ls + lineIn) === ' ') lineIn++
+                  // The tag stands first on its line when only its line's
+                  // indentation, a document marker (`--- `) and its node's
+                  // other properties come before it.
+                  let lq = ls + lineIn
+                  if (0 === lineIn && absAt(lq) === '-' && absAt(lq + 1) === '-' &&
+                      absAt(lq + 2) === '-' && (absAt(lq + 3) === ' ' || absAt(lq + 3) === '\t')) {
+                    lq += 3
+                    while (lq < here && (absAt(lq) === ' ' || absAt(lq) === '\t')) lq++
+                  }
+                  while (lq < here && (absAt(lq) === '&' || absAt(lq) === '!')) {
+                    while (lq < here && absAt(lq) !== ' ' && absAt(lq) !== '\t') lq++
+                    while (lq < here && (absAt(lq) === ' ' || absAt(lq) === '\t')) lq++
+                  }
+                  let firstOnLine = lq === here
+                  if (blankNext || (firstOnLine ? nextIn >= lineIn : nextIn > lineIn)) {
+                    let scalarNext = !blankNext && !'[{&!*|>'.includes(nc) &&
+                      !blockStartAt(here + tagNl + nextIn)
+                    if (scalarNext) {
+                      // A scalar on the next line is the tag's value. Left
+                      // to the next lex cycle, the tag did not apply to it,
+                      // and a plain one kept its line's indentation. A
+                      // quoted one is read below as one on the tag's own
+                      // line is, and a plain one whole, with the lines that
+                      // continue it.
+                      valStart = tagNl + nextIn
+                      valEnd = valStart
+                      if (nc !== '"' && nc !== "'") {
+                        nextPlain = plainScalarAt(pnt.sI + valStart)
+                      }
+                    } else {
+                      // A collection, more properties, or nothing yet: skip
+                      // the tag alone, and let the next lex cycle read the
+                      // line break as the indent it is, and then the value
+                      // on the following line. With the line break skipped
+                      // as well, a mapping there lost its indent, and its
+                      // first key kept the line's leading spaces.
+                      pnt.sI += valStart
+                      fwdAt = pnt.sI
+                      continue yamlMatchLoop
+                    }
+                  }
+                }
                 // Check for quoted value.
                 if (F(valStart) === '"' || F(valStart) === "'") {
                   let q = F(valStart)
@@ -2347,27 +2620,11 @@ name an anchor defined earlier.`,
                   pnt.cI += valEnd
                   return tkn
                 }
-                // If value is on next line (tag followed by newline with
-                // indented content), skip the tag and let the next lex cycle
-                // handle the value. If end-of-source or next line is not
-                // indented content, fall through to produce default value.
-                if ((F(valStart) === '\n' || F(valStart) === '\r') &&
-                    F(valStart + 1) !== undefined) {
-                  // Tag followed by newline — skip the tag and let the
-                  // next lex cycle handle the value on the following line.
-                  let nl = valStart
-                  if (F(nl) === '\r') nl++
-                  if (F(nl) === '\n') nl++
-                  pnt.sI += nl
-                  pnt.cI = 0
-                  pnt.rI++
-                  fwdAt = pnt.sI
-                  continue yamlMatchLoop
-                }
                 // Unquoted: stop at `: `, ` #`, newline, flow indicators.
                 // A `#` straight after the tag's space starts a comment, so
                 // the value is empty (`!!str #c` is "").
-                while (F(valEnd) !== undefined && F(valEnd) !== '\n' && F(valEnd) !== '\r' &&
+                while (undefined === nextPlain &&
+                       F(valEnd) !== undefined && F(valEnd) !== '\n' && F(valEnd) !== '\r' &&
                        F(valEnd) !== ',' && F(valEnd) !== '}' && F(valEnd) !== ']') {
                   if (valEnd === valStart && valStart > tagEnd && F(valEnd) === '#') break
                   if (F(valEnd) === ':' && (F(valEnd+1) === ' ' || F(valEnd+1) === '\n' ||
@@ -2376,6 +2633,10 @@ name an anchor defined earlier.`,
                   valEnd++
                 }
                 let rawVal = FS(valStart, valEnd).replace(/\s+$/, '')
+                if (undefined !== nextPlain) {
+                  rawVal = nextPlain.text
+                  valEnd = valStart + nextPlain.consumed
+                }
                 let result: any = rawVal
                 // Only apply built-in type conversion when !! has not been
                 // redefined by a %TAG directive. Custom tag handles mean
@@ -2568,11 +2829,14 @@ name an anchor defined earlier.`,
                   }
                 }
                 let src = FS(0, hasValue ? consumed : keyEnd)
+                // The key's token is cut here, where its `?` stands, before
+                // the cursor moves on to its value: a token's place is
+                // where it starts.
+                let tkn = lex.token(quotedKey ? '#ST' : '#TX', key, src, lex.pnt)
                 if (hasValue) {
                   pnt.sI += valConsumed
-                  pnt.rI += 1 + extraRows
                   let indent = valConsumed - consumed
-                  pnt.cI = indent + 1
+                  place(lex)
                   // Check if there's inline content after `: ` on the same line
                   // that looks like a block mapping or sequence (needs #IN context).
                   let nextCh = F(valConsumed)
@@ -2596,9 +2860,13 @@ name an anchor defined earlier.`,
                           }
                         }
                       }
-                      // Also check for sequence indicator (`- `).
+                      // Also check for sequence indicator (`- `), which a
+                      // line break or the source's end follows too when its
+                      // entry is empty.
                       if (!needsIndent && nextCh === '-' &&
-                          (F(valConsumed + 1) === ' ' || F(valConsumed + 1) === '\t')) {
+                          (F(valConsumed + 1) === ' ' || F(valConsumed + 1) === '\t' ||
+                           F(valConsumed + 1) === '\n' || F(valConsumed + 1) === '\r' ||
+                           F(valConsumed + 1) === undefined)) {
                         needsIndent = true
                       }
                     }
@@ -2620,13 +2888,12 @@ name an anchor defined earlier.`,
                   // No `:` follows — don't consume past newline so the
                   // normal newline→#IN handler can emit indent for map continuation.
                   pnt.sI += beforeNewline
-                  pnt.cI += beforeNewline
+                  place(lex)
                   // Emit KEY, CL, null as queued tokens.
                   let clTkn = lex.token('#CL', 1, ': ', lex.pnt)
                   let vlTkn = lex.token('#VL', null, '', lex.pnt)
                   lex.pnt.token.push(clTkn, vlTkn)
                 }
-                let tkn = lex.token(quotedKey ? '#ST' : '#TX', key, src, lex.pnt)
                 return tkn
               }
 
@@ -2647,6 +2914,8 @@ name an anchor defined earlier.`,
                      F(3) === ' ' || F(3) === '\t' || F(3) === undefined))) &&
                   atLineStart(viewBase + pnt.sI)) {
                 let isEnd = F(0) === '.'
+                let tkn = lex.token(isEnd ? '#DE' : '#DS', undefined,
+                                    FS(0, 3), lex.pnt)
                 let pos = 3
                 while (F(pos) === ' ' || F(pos) === '\t') pos++
                 let hasInline = F(pos) !== undefined &&
@@ -2661,8 +2930,6 @@ name an anchor defined earlier.`,
                   pnt.cI += pos
                 }
                 pnt.sI += pos
-                let tkn = lex.token(isEnd ? '#DE' : '#DS', undefined,
-                                    FS(0, 3), lex.pnt)
                 return tkn
               }
 
@@ -2837,16 +3104,29 @@ name an anchor defined earlier.`,
               // (e.g. "64 characters, hexadecimal.") must be captured before
               // jsonic's number matcher grabs just the digits.
               // A sign before the digit counts too: `+190:20:30` is one plain
-              // scalar, where the number matcher would take `+190`.
-              if ((F(0) >= '0' && F(0) <= '9') ||
-                  ((F(0) === '+' || F(0) === '-') && F(1) >= '0' && F(1) <= '9')) {
+              // scalar, where the number matcher would take `+190`. So does
+              // a dot before it: `.5 x` is one plain scalar, where the
+              // number matcher took `.5` and the parse failed on the `x`.
+              let numLead = (F(0) === '+' || F(0) === '-') ? 1 : 0
+              if ((F(numLead) >= '0' && F(numLead) <= '9') ||
+                  (F(numLead) === '.' && F(numLead + 1) >= '0' && F(numLead + 1) <= '9')) {
                 updateFlowState(viewBase + pnt.sI)
                 let inFlow = _flowDepth > 0
                 let hasEmbeddedColon = false
                 let hasTrailingText = false
                 let hasBlockComma = false
+                // The `:` that ends a plain scalar: one before a blank, a
+                // line break or the end of the source.
+                const endsPlain = (i: number): boolean => F(i) === ':' &&
+                  (F(i + 1) === ' ' || F(i + 1) === '\t' || F(i + 1) === '\n' ||
+                   F(i + 1) === '\r' || F(i + 1) === undefined)
                 let pi = 1
                 while (F(pi) !== undefined && F(pi) !== '\n' && F(pi) !== '\r') {
+                  // The scalar is a key, and ends here: `12:30:` then a
+                  // block is the key 12:30, and the scan once went on over
+                  // its colon, which the token then took (`127.0.0.1:5000:`
+                  // as a key, in Docker's description).
+                  if (endsPlain(pi)) break
                   // An embedded colon (20:03:20) does not end the scan: the
                   // scalar can go on past a space ("09:00 AM"), and only the
                   // trailing-text branch below reads that as one scalar.
@@ -2931,7 +3211,7 @@ name an anchor defined earlier.`,
                 // bracket (tabnas/yaml#99).
                 let tokenEnd = 0
                 while (F(tokenEnd) !== undefined && F(tokenEnd) !== ' ' && F(tokenEnd) !== '\t' &&
-                       F(tokenEnd) !== '\n' && F(tokenEnd) !== '\r' &&
+                       F(tokenEnd) !== '\n' && F(tokenEnd) !== '\r' && !endsPlain(tokenEnd) &&
                        !(inFlow && (F(tokenEnd) === ',' || F(tokenEnd) === ']' ||
                          F(tokenEnd) === '}'))) tokenEnd++
                 const token = FS(0, tokenEnd)
@@ -2946,13 +3226,36 @@ name an anchor defined earlier.`,
                   // holds "12:30", not "12:30,").
                   let end = 0
                   while (F(end) !== undefined && F(end) !== ' ' && F(end) !== '\t' &&
-                         F(end) !== '\n' && F(end) !== '\r' &&
+                         F(end) !== '\n' && F(end) !== '\r' && !endsPlain(end) &&
                          !(inFlow && (F(end) === ',' || F(end) === ']' || F(end) === '}'))) end++
                   let text = FS(0, end)
                   let tkn = lex.token('#TX', text, text, lex.pnt)
                   pnt.sI += end
                   pnt.cI += end
                   return tkn
+                }
+
+                // Under the core schema a token that is not one of its
+                // number forms is a string (`0b11`, `1_000`, `-0x30`), so it
+                // goes to the text handler, and the number matcher, which
+                // reads jsonic's number syntax, never sees it.
+                if (core && undefined === coreNumber(token)) {
+                  skipNumberMatch = true
+                  return null as any
+                }
+
+                // A scalar that runs on to the next line is one plain
+                // scalar, and so a string: `a: 12` with `more` indented
+                // below it is "12 more". The number matcher took the 12,
+                // and the next line then failed the parse, or in a flow
+                // mapping was read as a second member. Only a number that
+                // ends its line can run on, so only then is the scalar
+                // scanned as the text handler scans it.
+                let rest = tokenEnd
+                while (F(rest) === ' ' || F(rest) === '\t') rest++
+                if ((F(rest) === '\n' || F(rest) === '\r') && plainScalarAt(pnt.sI).rows > 0) {
+                  skipNumberMatch = true
+                  return null as any
                 }
               }
 
@@ -3016,7 +3319,7 @@ name an anchor defined earlier.`,
                   let rows = 0
                   let lastNL = -1
                   while (F(pos) === '\n' || F(pos) === '\r' || F(pos) === ' ' || F(pos) === '\t') {
-                    if (F(pos) === '\n') { rows++; lastNL = pos }
+                    if (F(pos) === '\n' || (F(pos) === '\r' && F(pos + 1) !== '\n')) { rows++; lastNL = pos }
                     pos++
                   }
                   // Also skip comment lines inside flow collections.
@@ -3042,6 +3345,7 @@ name an anchor defined earlier.`,
                   // after a bare \r), advance the existing column instead.
                   pnt.cI = lastNL >= 0 ? pos - lastNL : pnt.cI + pos
                   if (punctTin) {
+                    place(lex)
                     let tkn = lex.token(punctTin, undefined, nextCh, pnt)
                     pnt.sI += 1
                     pnt.cI += 1
@@ -3060,11 +3364,12 @@ name an anchor defined earlier.`,
                 let spaces = 0
                 let rows = 0
                 while (F(pos) !== undefined) {
-                  // Match \r\n or \n
+                  // Match \r\n, \n, or \r by itself: each is one line
+                  // break (YAML 1.2.2, 5.4).
                   if (F(pos) === '\r' && F(pos + 1) === '\n') {
                     pos += 2
                     rows++
-                  } else if (F(pos) === '\n') {
+                  } else if (F(pos) === '\n' || F(pos) === '\r') {
                     pos += 1
                     rows++
                   } else {
@@ -3089,6 +3394,22 @@ name an anchor defined earlier.`,
                     if (F(tp) === undefined || F(tp) === '\n' || F(tp) === '\r') {
                       pos = tp
                       continue
+                    }
+                    // A comment after the tab is a comment-only line as
+                    // one after spaces is: white space before a comment is
+                    // tabs as well as spaces. It was once left for the next
+                    // matcher, and the parse failed on the tab.
+                    if (F(tp) === '#') {
+                      while (F(tp) !== undefined && F(tp) !== '\n' && F(tp) !== '\r') tp++
+                      pos = tp
+                      continue
+                    }
+                    // A tab in the line's indentation, before block
+                    // structure (`a:` then a tab and `b: 1`).
+                    if (blockStartAt(viewBase + fwdAt + tp)) {
+                      pnt.sI += pos
+                      place(lex)
+                      return lex.bad('yaml_tab_indent', pnt.sI, pnt.sI + (tp - pos))
                     }
                   }
                   // If the line is an anchor-only line (&name with nothing after),
@@ -3115,8 +3436,7 @@ name an anchor defined earlier.`,
                 // If we consumed everything (trailing newlines), advance and emit #ZZ.
                 if (F(pos) === undefined) {
                   pnt.sI += pos
-                  pnt.rI += rows
-                  pnt.cI = spaces + 1
+                  place(lex)
                   let tkn = lex.token('#ZZ', undefined, '', lex.pnt)
                   pnt.end = tkn
                   return tkn
@@ -3151,20 +3471,27 @@ name an anchor defined earlier.`,
                   continue yamlMatchLoop
                 }
 
-                // Skip #IN when the next content is a flow indicator or quoted
-                // string at column 0 — there's no block to indent into. Match
-                // the previous behavior of the inline `--- foo` handler.
+                // Skip #IN when the next content is a quoted string at column
+                // 0: there's no block to indent into. Match the previous
+                // behavior of the inline `--- foo` handler.
                 // A quoted KEY at column 0 is different: it continues (or
                 // closes back to) the root block mapping, so it needs its #IN
                 // like a plain key does. Without it a block sequence ending
                 // just before it swallowed the pair (tabnas/yaml#86).
+                // A flow collection at column 0 takes its #IN as well. At a
+                // document's root the grammar opens it below that indent, as
+                // it opens one on the line after its key. Elsewhere there
+                // is nothing it can be the value of, and the grammar refuses
+                // it. Skipped, the cursor moved past the line break and
+                // jsonic's fixed-token matcher, handed the bracket after
+                // that, read it as #BD: JSON text after a blank or a comment
+                // first line failed to parse.
                 if (spaces === 0 &&
-                    (F(pos) === '{' || F(pos) === '[' ||
-                     ((F(pos) === '"' || F(pos) === "'") &&
-                      !quotedKeyAt(viewBase + fwdAt + pos)))) {
+                    ((F(pos) === '"' || F(pos) === "'") &&
+                     !quotedKeyAt(viewBase + fwdAt + pos))) {
                   pnt.sI += pos
                   pnt.rI += rows
-                  pnt.cI = 0
+                  pnt.cI = 1
                   fwdAt = pnt.sI
                   continue yamlMatchLoop
                 }
@@ -3180,9 +3507,22 @@ name an anchor defined earlier.`,
 
               break // End of yamlMatchLoop
               } // end while(true) yamlMatchLoop
+              // The matchers after this one cut from the cursor as it is.
+              place(lex)
               return undefined
   }
 
+
+  // The token `tkn`, marked bad, when it is an alias to an anchor whose
+  // node is still open: an alias inside the node it names. A rule's action
+  // or handler that returns it fails the parse there, with the code.
+  function recursiveAlias(tkn: Token | undefined): Token | undefined {
+    if (null != tkn && VL === tkn.tin && tkn.val && 'object' === typeof tkn.val &&
+        tkn.val.__yamlAlias && 0 < (openAnchors.get(tkn.val.__yamlAlias) || 0)) {
+      return tkn.bad('yaml_recursive_alias')
+    }
+    return undefined
+  }
 
   // Extract a key value from a token, resolving aliases.
   function extractKey(rule: Rule, tkn: Token = rule.o0): any {
@@ -3218,6 +3558,30 @@ name an anchor defined earlier.`,
     return col
   }
 
+  // The column of the token a mapping opens on, when that token is a key
+  // and its node is the first thing on its line, and 0 otherwise: a flow
+  // mapping's brace, or a key that follows something on its line
+  // (`--- a: 1`), keeps the indent of 0 it always had. The key's node
+  // starts at its properties, so `  &x a: 1` stands at 2 as `  a: 1` does.
+  function firstKeyColumn(ctx: Context): number {
+    const tkn = ctx.t0
+    if (null == tkn || !(TX === tkn.tin || NR === tkn.tin || ST === tkn.tin || VL === tkn.tin)) {
+      return 0
+    }
+    viewOf(ctx.lex)
+    const at = tkn.sI
+    let li = lineStartOf(at)
+    if (0 === li && 0xFEFF === absCode(0)) li = 1
+    let i = li
+    while (i < at && ' ' === absAt(i)) i++
+    const col = i - li
+    while (i < at && ('&' === absAt(i) || '!' === absAt(i))) {
+      while (i < at && ' ' !== absAt(i) && '\t' !== absAt(i)) i++
+      while (i < at && (' ' === absAt(i) || '\t' === absAt(i))) i++
+    }
+    return i === at ? col : 0
+  }
+
   // The column of the sequence entry's mapping whose pair a value is, when
   // it is the value of one (`- a: ...`): the mapping's keys stand at that
   // column, so the value nests only below it, as a block mapping's value
@@ -3237,19 +3601,36 @@ name an anchor defined earlier.`,
       return parentIn == null || ctx.t0.val > parentIn
     },
     // A sequence at the indent of the key it is the value of, its mapping's
-    // or a sequence entry's: `a:\n- x` and `- a:\n  - x`.
+    // or a sequence entry's: `a:\n- x` and `- a:\n  - x`. The key's column
+    // is the one that counts. A sequence entry's key stands at its
+    // mapping's column, not at an enclosing mapping's, and a sequence
+    // entry's own value has no key: a `-` at an enclosing indent is that
+    // sequence's next entry (`a:\n- x\n-\n- y`, and `v:` with no value
+    // before the next `-`).
     '@val-indent-eq-parent': (rule: Rule, ctx: Context) => {
+      let parent = rule.parent?.name
+      if ('yamlElemPair' === parent) return ctx.t0.val === rule.k.yamlMapIn
+      if ('yamlBlockList' === parent || 'yamlBlockElem' === parent) return false
       let parentIn = rule.k.yamlIn
-      let mapIn = entryMapIn(rule)
-      return (parentIn != null && ctx.t0.val === parentIn) ||
-        (mapIn != null && ctx.t0.val === mapIn)
+      return parentIn != null && ctx.t0.val === parentIn
+    },
+    // Whether a value may open a block sequence on its own line: not when
+    // it is the value of a mapping's pair. YAML has no `key: - a`: a block
+    // sequence starts on the line after its key. Read as one, its entries'
+    // column was the dash's, so a second line under it joined in, and
+    // `key: - a` with `- b` at the key's column lost the second entry.
+    '@val-not-pair-value': (rule: Rule) => {
+      let parent = rule.parent?.name
+      return 'pair' !== parent && 'yamlElemPair' !== parent
     },
     '@val-set-in-from-o0': (rule: Rule) => { rule.n.in = rule.o0.val },
     '@val-set-null': (rule: Rule) => { rule.node = null },
     '@val-set-el-in': (rule: Rule) => { rule.n.in = rule.o0.cI - 1 },
+    // A scalar on the line after its key is the value its token read: a
+    // number, a boolean or null as well as a string (`a:\n  1` is 1). An
+    // alias's marker is resolved by the val that pushed this rule.
     '@indent-plain-value': (rule: Rule) => {
-      rule.node = ST === rule.o0.tin || TX === rule.o0.tin
-        ? rule.o0.val : rule.o0.src
+      rule.node = rule.o0.val
     },
     // A block sequence entry's mapping stands at the column its content
     // starts at; a flow sequence's pair (`[a: 1]`) keeps the list's indent
@@ -3264,15 +3645,27 @@ name an anchor defined earlier.`,
     '@t0-lt-in': (rule: Rule, ctx: Context) => ctx.t0.val < rule.n.in,
     '@o0-eq-in': (rule: Rule) => rule.o0.val === rule.n.in,
     '@t0-eq-map-in': (rule: Rule, ctx: Context) => ctx.t0.val === rule.k.yamlMapIn,
-    '@elem-key': (rule: Rule) => { rule.u.key = extractKey(rule) },
+    '@elem-key': (rule: Rule) => {
+      let bad = recursiveAlias(rule.o0)
+      if (bad) return bad
+      rule.u.key = extractKey(rule)
+    },
     '@implicit-null-pair': (rule: Rule, ctx: Context) => {
+      let bad = recursiveAlias(rule.o0)
+      if (bad) return bad
       let key = extractKey(rule)
       rule.u.key = key
       storeMember(rule, ctx, key, null)
     },
     // Same as @pairkey, but the KEY is at o1 (after the leading #QM).
-    '@qm-pairkey': (rule: Rule) => { rule.u.key = extractKey(rule, rule.o1) },
+    '@qm-pairkey': (rule: Rule) => {
+      let bad = recursiveAlias(rule.o1)
+      if (bad) return bad
+      rule.u.key = extractKey(rule, rule.o1)
+    },
     '@qm-implicit-null-pair': (rule: Rule, ctx: Context) => {
+      let bad = recursiveAlias(rule.o1)
+      if (bad) return bad
       let key = extractKey(rule, rule.o1)
       rule.u.key = key
       storeMember(rule, ctx, key, null)
@@ -3294,6 +3687,9 @@ name an anchor defined earlier.`,
         rule.u.yamlAnchors = [...pendingAnchors]
         rule.u.yamlAnchorOpenNode = rule.node
         pendingAnchors.length = 0
+        for (let anchor of rule.u.yamlAnchors) {
+          openAnchors.set(anchor.name, (openAnchors.get(anchor.name) || 0) + 1)
+        }
         // The arrays inside the anchored value are kept, behind a stream
         // that empties them, until the anchor is recorded at this val's
         // close (holdPruning).
@@ -3311,6 +3707,14 @@ name an anchor defined earlier.`,
       if (rule.node && typeof rule.node === 'object' &&
           rule.node.__yamlAlias) {
         let name = rule.node.__yamlAlias
+        if (0 < (openAnchors.get(name) || 0)) {
+          // The alias's own token: this val's, or its indent child's when
+          // the alias stands on the line after its key.
+          let tkn = rule.o0 && rule.o0.val === rule.node ? rule.o0
+            : rule.child && rule.child.o0 && rule.child.o0.val === rule.node
+              ? rule.child.o0 : rule.o0
+          return tkn.bad('yaml_recursive_alias')
+        }
         let val = anchors[name]
         if (typeof val === 'object' && val !== null) {
           rule.node = copyAnchored(val)
@@ -3333,6 +3737,12 @@ name an anchor defined earlier.`,
             val = copyAnchored(val)
           }
           anchors[anchor.name] = val
+        }
+        // The node has closed: an alias after it names a finished node.
+        for (let anchor of rule.u.yamlAnchors) {
+          let open = (openAnchors.get(anchor.name) || 0) - 1
+          if (0 < open) openAnchors.set(anchor.name, open)
+          else openAnchors.delete(anchor.name)
         }
         // Recorded: the hold this val raised at its open is released.
         holdPruning(ctx, -1)
@@ -3543,6 +3953,8 @@ name an anchor defined earlier.`,
   tabnas.rule('pair', (rulespec: RuleSpec) => {
     rulespec.ao((rule: Rule, ctx: Context) => {
       let keyToken = QM === rule.o0.tin ? rule.o1 : rule.o0
+      let bad = recursiveAlias(keyToken)
+      if (bad) return bad
       if ('<<' === rule.u.key && null != keyToken && ST !== keyToken.tin) {
         rule.u.yamlMergeHold = true
         holdPruning(ctx, 1)
@@ -3565,9 +3977,15 @@ name an anchor defined earlier.`,
 
   // map rule: default indent and merge-key handling.
   tabnas.rule('map', (rulespec: RuleSpec) => {
-    rulespec.bo((rule: Rule) => {
+    rulespec.bo((rule: Rule, ctx: Context) => {
       if (null == rule.n.in) {
-        rule.n.in = 0
+        // No indent token came before this mapping: it is a document's
+        // root, or a flow mapping. A root block mapping stands at the
+        // column of its first key, which need not be 0 (YAML 1.2.2, 9.1.1:
+        // a document's root node is indented by -1, so any column is
+        // deeper). Read as 0, the second pair of `  a: 1` then `  b: 2`
+        // was a deeper indent with nothing to open, and the parse failed.
+        rule.n.in = firstKeyColumn(ctx)
       }
       rule.k.yamlIn = rule.n.in
     })

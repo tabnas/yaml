@@ -743,16 +743,18 @@ c:
       assert.deepEqual(y(`a:\n  - 1\n  - 2\nb: 3`), { a: [1, 2], b: 3 })
     })
 
-    test('tab-indentation-not-rejected (KNOWN NON-CONFORMANCE)', () => {
-      // YAML forbids a tab as indentation, so this document should be
-      // REJECTED. It is not: the tab is swallowed and `b` lands at the top
-      // level. Pinned as observed so the gap is visible and any change shows
-      // up as a diff here; the conformance dial for it is the yaml-test-suite
-      // must-fail group (ts/test/yaml-test-suite.test.ts).
-      //
-      // The old test was named `tab-indentation-rejected` while asserting no
-      // rejection at all — its `assert.ok(result != null)` could not fail.
-      eq(y(`a:\n\tb: 1`), { a: null, b: 1 })
+    test('tab-indentation-rejected', () => {
+      // YAML forbids a tab as indentation, so a tab in a line's leading
+      // blanks before a mapping key or a sequence entry is refused, with a
+      // code of its own. It was once swallowed, and `b` landed at the top
+      // level. A tab before a scalar, a flow collection or a comment is
+      // white space, as YAML has it.
+      for (const src of ['a:\n\tb: 1', 'a:\n  b: 1\n  \tc: 2', 'a:\n\t- x', '\ta: 1', '---\n\ta: 1']) {
+        assert.throws(() => y(src), (err: any) => 'yaml_tab_indent' === err.code, JSON.stringify(src))
+      }
+      eq(y('a:\n \tb'), { a: 'b' })
+      eq(y('\t{a: 1}'), { a: 1 })
+      eq(y('a: 1\n\t# c\nb: 2'), { a: 1, b: 2 })
     })
 
     test('start-of-file-indent', () => {

@@ -17,6 +17,5 @@ input	expected	opts
 ? "\\U0001F600\\ud83d\\ude00"\n: 1	{"\ud83d\ude00\ud83d\ude00":1}	
 ? "\\ufffe\\uffff\\u0080\\u009f"\n: 1	{"\ufffe\uffff\u0080\u009f":1}	
 ? "k\\u0001"\n: 1\n"x": 2	{"k\u0001":1,"x":2}	
-? "\\ud83d"\n: 1	{"\"\\ud83d\"":1}	
 ? "\\x4"\n: 1	{"\"\\x4\"":1}	
 ? "\\q"\n: 1	{"\"\\q\"":1}	

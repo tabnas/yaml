@@ -16,13 +16,11 @@
 2G84/00	Literal modifers
 2G84/01	Literal modifers
 3HFZ	Invalid content after document end marker
-4EJS	Invalid tabs as indendation in a mapping
 4JVG	Scalar value with two anchors
 55WF	Invalid escape in double quoted string
 5LLU	Block scalar with wrong indented line after spaces only
 5TRB	Invalid document-start marker in doublequoted tring
 62EZ	Invalid block mapping key on same line as previous key
-6S55	Invalid scalar at the end of sequence
 7LBH	Multiline double quoted implicit keys
 9C9N	Wrong indented flow sequence
 9HCY	Need document footer before directives
@@ -39,7 +37,6 @@ CXX2	Mapping with anchor on document start line
 D49Q	Multiline single quoted implicit keys
 DK4H	Implicit key followed by newline
 DK95/01	Tabs that look like indentation
-DK95/06	Tabs that look like indentation
 EB22	Missing document-end marker before directive
 G5U8	Plain dashes in flow sequence
 G9HC	Invalid anchor in zero indented sequence
@@ -65,7 +62,6 @@ SU5Z	Comment without whitespace after doublequoted scalar
 SU74	Anchor and alias as mapping key
 SY6V	Anchor before sequence entry on same line
 T833	Flow mapping missing a separating comma
-TD5N	Invalid scalar after sequence
 U99R	Invalid comma in tag
 VJP3/00	Flow collections over many lines
 W9L4	Literal block scalar with more spaces in first line
