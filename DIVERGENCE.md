@@ -8,10 +8,8 @@ None of these can be written as a row of `test/spec/*.tsv`, which is why
 this repository still has no divergence register: one is invisible to the
 value those fixtures compare, two concern a diagnostic's position, which
 no fixture pins, one needs a nesting depth far past anything a fixture
-cell would hold, two need a lone UTF-16 surrogate in an expected
-cell, which a UTF-8 file cannot carry, and one is an input the runtimes
-disagree about accepting at all, where a row carries one expected answer
-for all three. A divergence a row could
+cell would hold, and two need a lone UTF-16 surrogate in an expected
+cell, which a UTF-8 file cannot carry. A divergence a row could
 express belongs in a register, with a `rust` column, per
 [`AGENTS.md`](AGENTS.md).
 
@@ -185,6 +183,8 @@ lone surrogate has no UTF-8 spelling and a byte-order mark is invisible.
 | `a: "\uD83D"` | a lone high surrogate | U+FFFD | U+FFFD |
 | `a: "\uDE00"` | a lone low surrogate | U+FFFD | U+FFFD |
 | `a: "\U0000D83D"` | a lone high surrogate | U+FFFD | U+FFFD |
+| `"\uD83D": 1`, the key | a lone high surrogate | U+FFFD | U+FFFD |
+| `? "\uD83D"` then `: 1`, the key | a lone high surrogate | U+FFFD | U+FFFD |
 
 The canonical handler builds the scalar with `String.fromCharCode` for
 `\x` and `\u`, and `String.fromCodePoint` for `\U`. Both take a UTF-16
@@ -204,12 +204,21 @@ records for its own quoted strings, under "Lone surrogates in quoted
 strings" in `parser/DIVERGENCE.md`, and the string model decides it
 rather than this plugin.
 
+A key is the same scalar, so it reads the same way, an implicit key
+and an explicit one (`? "..."`) alike. The explicit key was once the
+exception in every runtime: an escape that named half a pair left the
+key as its quoted text, quotes and all, so that the three could share a
+fixture row. It reads as the scalar now, and is recorded here with the
+rest.
+
 Provenance: the TypeScript column was produced by running
-`ts/src/yaml.ts` under Node 22; the Go column by `tabnasyaml.Parse` in
-`go/`; the Rust column by `tabnas_yaml::parse`. No row of
+`ts/src/yaml.ts` under Node 22, and for the two key rows under Node 24;
+the Go column by `tabnasyaml.Parse` in `go/`; the Rust column by
+`tabnas_yaml::parse`. No row of
 `test/spec/*.tsv` can carry the TypeScript answers for the unpaired
 rows, because an expected cell is UTF-8 text and a lone surrogate has
 no UTF-8 encoding. They are pinned by
+`ts/test/yaml.test.ts` (`an-unpaired-surrogate-escape-is-its-code-unit`),
 `rs/tests/js_semantics_test.rs::an_unpaired_surrogate_escape_folds` and,
 for the Go column,
 `go/divergence_test.go::TestAnUnpairedSurrogateEscapeFolds`.
@@ -301,61 +310,3 @@ whose control rows fail if the Basic Multilingual Plane cases drift and
 whose astral rows fail if the fold changes.
 
 Owner: the string model, as upstream, for both ports.
-
-## A tab-only tail at the end of the source (Go)
-
-| input | TypeScript | Go | Rust |
-|---|---|---|---|
-| `a: 1<TAB>` | `ERROR:unexpected` | `{"a":1}` | `ERROR:unexpected` |
-| `a: true<TAB>` | `ERROR:unexpected` | `{"a":true}` | `ERROR:unexpected` |
-| `a: null<TAB>` | `ERROR:unexpected` | `{"a":null}` | `ERROR:unexpected` |
-| `a: [1]<TAB>` | `ERROR:unexpected` | `{"a":[1]}` | `ERROR:unexpected` |
-| `- 1<TAB>` | `ERROR:unexpected` | `[1]` | `ERROR:unexpected` |
-| `a: 1<TAB>\nb: 2` | `{"a":1,"b":2}` | same | same |
-| `a: 1 ` | `{"a":1}` | same | same |
-| `a: x<TAB>` | `{"a":"x"}` | same | same |
-
-What is established: the canonical's keyword and number branches in
-the text check advance by the TRIMMED text, so a tab sitting after such
-a value stays in the source, where the plain-scalar branch would have
-advanced over the whole run it consumed. The matcher's next round
-reaches that tab through the branch that skips a blank line carrying
-one, and the branch does consume it, which instrumenting the branch
-shows. The document is refused anyway, at the end of the source.
-
-What was NOT isolated is the step that refuses it. The obvious
-candidate is that same branch charging a row and resetting the column
-although no newline followed (`skip` is `lineEnd + 1` when there is a
-newline and the line's own length when there is not, so the point
-moves to a line that does not exist), but holding the row and the
-column still over that branch leaves every row of the table where it
-is. The Rust port carries the canonical arithmetic and the canonical
-refusal. The Go matcher has no such branch, so a tail of blanks
-reaches jsonic's own lexer, which reads a tab as a space, and the
-document ends.
-
-The last three rows are the controls, and they say what the entry is
-NOT about: the same tab followed by a newline is a blank line in every
-runtime, a trailing SPACE never enters the branch, and a plain
-scalar's own handler has already consumed the tab before the branch is
-reached. Bare jsonic accepts `a: 1<TAB>` in both languages, so the
-refusal belongs to this plugin and not to the grammar underneath it.
-
-Provenance: the TypeScript column was produced by running
-`ts/src/yaml.ts` under Node 22; the Go column by `tabnasyaml.Parse` in
-`go/`; the Rust column by `tabnas_yaml::parse`. No row of
-`test/spec/*.tsv` can carry this, because a row's expected cell is one
-answer for all three runtimes and these two answers differ in kind.
-Pinned by
-`go/divergence_test.go::TestATabOnlyTailAtTheEndOfTheSourceIsAccepted`.
-
-Owner: the CANONICAL, and the Go column is the answer to keep. A
-document whose last character is a tab is valid YAML, and a refusal
-that depends on whether the value was a number, a keyword or a plain
-scalar is an artifact rather than a rule. The repair belongs in
-`ts/src/yaml.ts`, and then in `rs/src/lex.rs`, and it starts by
-finding the step named above; it may free cases in
-`test/yaml-test-suite-unparsed.tsv`, which is the direction that
-ledger moves in. Until it lands, Go is recorded as differing rather
-than made to copy the wart, because a port never takes on a canonical
-defect (ADR-13).

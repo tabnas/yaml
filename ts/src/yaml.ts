@@ -2115,6 +2115,9 @@ line's depth cannot be read. Indent the line with spaces.`,
               }
 
               let pnt = lex.pnt
+              // Where this pass began: a pass that moves the cursor to the
+              // source's end cuts the end token itself (below).
+              const beganAt = pnt.sI
               // The text from the cursor on: F(i) is the character i past
               // `fwdAt`, the cursor as it stood when last taken, read through
               // the window, and FS(a, b) the text between.
@@ -3509,6 +3512,23 @@ line's depth cannot be read. Indent the line with spaces.`,
               } // end while(true) yamlMatchLoop
               // The matchers after this one cut from the cursor as it is.
               place(lex)
+              // A pass that stepped over something with no token of its own
+              // (an anchor, a tag, blanks after a value) and reached the
+              // source's end cuts the end token here, as the line break
+              // handler does. Left to the engine's matchers, which cut from
+              // where the pass began, the end was read as a bad token: a
+              // document that ended in a tab, or in an anchor or a tag with
+              // no node after it, was refused. Inside a flow collection
+              // the end is left to them: a collection the source ends
+              // before closing stays refused.
+              if (pnt.sI !== beganAt && srcAt(pnt.sI) === undefined) {
+                updateFlowState(viewBase + pnt.sI)
+                if (0 === _flowDepth) {
+                  let tkn = lex.token('#ZZ', undefined, '', lex.pnt)
+                  pnt.end = tkn
+                  return tkn
+                }
+              }
               return undefined
   }
 

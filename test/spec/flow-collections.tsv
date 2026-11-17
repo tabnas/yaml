@@ -32,3 +32,5 @@ k:\n  [1, 2]\nj: 3	{"k":[1,2],"j":3}
 a:\n{"b":2}	ERROR	
 a: 1\n{"b":2}	ERROR	
 - x\n[1]	ERROR	
+---\n[ [ a, b, c ]\n	ERROR	
+{a: 1\t\n	ERROR	

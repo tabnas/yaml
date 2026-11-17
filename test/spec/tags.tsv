@@ -74,3 +74,4 @@ a: !!int\n  "12"	{"a":12}
 a: !!str\n  k: v	{"a":{"k":"v"}}	
 a: !!foo\n  k: v\n  m: n\nb: 1	{"a":{"k":"v","m":"n"},"b":1}	
 a: !!str\n\n  text	{"a":"text"}	
+!!str	""	
