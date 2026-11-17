@@ -263,14 +263,15 @@ them written up with a measured table in
   value with the call stack to display, convert or drop it, so an
   unbounded document ends the caller's process rather than returning an
   error. TypeScript and Go have no limit.
-- **A refusal after a carriage return by itself can report the engine's
-  row.** A token this plugin builds stands where its offset says. The
-  engine cuts a number after a quoted scalar or a closed flow collection
-  at its own cursor, which counts a row at `\n` alone. Where a
-  document's line breaks are `\r` by itself and that number is what the
-  parse refuses, the diagnostic has the code and the offset TypeScript
-  and Go give, and the engine's row and column. No document's **value**
-  differs for that reason. The register names the inputs.
+- **A refusal can report the engine's row and column.** A token this
+  plugin builds stands where its offset says. The engine cuts a number
+  after a quoted scalar or a closed flow collection at its own cursor,
+  which counts a row at `\n` alone and counts a byte order mark as a
+  column. Where that number is what the parse refuses, after a `\r` by
+  itself or on the first line after a byte order mark, the diagnostic has
+  the code and the offset TypeScript and Go give, and the engine's row
+  and column. No document's **value** differs for that reason. The
+  register names the inputs.
 - **A `\u` escape naming an unpaired UTF-16 surrogate becomes the
   replacement character.** A Rust string holds Unicode scalars and a lone
   surrogate is not one, where a TypeScript string is UTF-16 and keeps it.

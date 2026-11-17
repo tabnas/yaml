@@ -609,8 +609,9 @@ Keep the naming rule when you change the render.
   every error of every fixture row, suite case and schema input to its
   offset, `go/reading_test.go` and `rs/tests/reading_test.rs` hold every
   error, and `@val-set-el-in` reads a dash's column from its token. One
-  token cannot follow: a number the Rust engine cuts after a carriage
-  return by itself, which [`DIVERGENCE.md`](DIVERGENCE.md) records.
+  token cannot follow: a number the Rust engine cuts, after a carriage
+  return by itself or a byte order mark, which
+  [`DIVERGENCE.md`](DIVERGENCE.md) records.
 - **A line break is `\n`, `\r\n`, or `\r` by itself**, in every scan
   (YAML 1.2.2, 5.4). The `reading` tests read every fixture row, suite
   case and schema input with each kind, and hold the three to one

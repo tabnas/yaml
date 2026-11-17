@@ -154,43 +154,51 @@ fn shared_refusals_report_the_canonical_place() {
     }
 }
 
-/// **A row after a carriage return by itself, on a number the engine
-/// cuts.**
+/// **A number the engine cuts stands at the engine's cursor.**
 ///
 /// A token this plugin builds is placed by its offset. A number that
 /// follows a quoted scalar or a closed flow collection on its line is cut
-/// by the engine's own number matcher, at the engine's cursor, and that
-/// cursor counts a row at `\n` alone (`line.rowChars`), with no way for a
-/// matcher to place it. So where a document's line breaks are `\r` by
-/// itself and such a number is what the parse refuses, the diagnostic
-/// keeps the right offset and reports row 1, with the column counted from
-/// the source's start. TypeScript and Go assign the cursor's row and
-/// column from the offset, and report those.
+/// by the engine's own number matcher, at the engine's cursor, and a
+/// matcher has no way to place that cursor. It parts from the offset in
+/// two places. It counts a row at `\n` alone (`line.rowChars`), so after
+/// a carriage return by itself it is still on row 1, with the column
+/// counted from the source's start. And it counts a byte order mark as a
+/// column, where the mark takes none. So where such a number is what the
+/// parse refuses, the diagnostic keeps the right offset and reports the
+/// engine's row and column. TypeScript and Go assign the cursor's row
+/// and column from the offset, and report those.
 ///
 /// Measured, each refused as `unexpected` at the same offset:
 ///
-///  input                  TypeScript and Go   Rust
-///  `a: 1\rb: "x" 3`       2:8                 1:13
-///  `a: 1\rb: [1] 3`       2:8                 1:13
-///  `a: 1\r\rb: 'x' 3`     3:8                 1:14
-///  `a: 1\nb: "x" 3`       2:8                 2:8
-///  `a: 1\r\nb: "x" 3`     2:8                 2:8
-///  `a: 1\rb: "x" y`       2:8                 2:8
-///  `a: 1\rb: [1, }`       2:8                 2:8
+///  input                     TypeScript and Go   Rust
+///  `a: 1\rb: "x" 3`          2:8                 1:13
+///  `a: 1\rb: [1] 3`          2:8                 1:13
+///  `a: 1\r\rb: 'x' 3`        3:8                 1:14
+///  `<BOM>b: "x" 3`           1:8                 1:9
+///  `a: 1\nb: "x" 3`          2:8                 2:8
+///  `a: 1\r\nb: "x" 3`        2:8                 2:8
+///  `a: 1\rb: "x" y`          2:8                 2:8
+///  `a: 1\rb: [1, }`          2:8                 2:8
+///  `<BOM>b: [1, }`           1:8                 1:8
+///  `<BOM>a: 1\nb: "x" 3`     2:8                 2:8
 ///
-/// The last four are the controls: the other two line breaks, and tokens
-/// this plugin cuts itself after the same carriage return.
+/// The last six are the controls: the other two line breaks, tokens this
+/// plugin cuts itself after the same carriage return or mark, and the
+/// second line of a text the mark opens.
 #[test]
-fn a_number_the_engine_cuts_after_a_lone_carriage_return_keeps_the_engines_row() {
+fn a_number_the_engine_cuts_stands_at_the_engines_cursor() {
     let parser = tabnas_yaml::make();
     for (src, pos, canonical, here) in [
         ("a: 1\rb: \"x\" 3", 12, (2, 8), (1, 13)),
         ("a: 1\rb: [1] 3", 12, (2, 8), (1, 13)),
         ("a: 1\r\rb: 'x' 3", 13, (3, 8), (1, 14)),
+        ("\u{feff}b: \"x\" 3", 8, (1, 8), (1, 9)),
         ("a: 1\nb: \"x\" 3", 12, (2, 8), (2, 8)),
         ("a: 1\r\nb: \"x\" 3", 13, (2, 8), (2, 8)),
         ("a: 1\rb: \"x\" y", 12, (2, 8), (2, 8)),
         ("a: 1\rb: [1, }", 12, (2, 8), (2, 8)),
+        ("\u{feff}b: [1, }", 8, (1, 8), (1, 8)),
+        ("\u{feff}a: 1\nb: \"x\" 3", 13, (2, 8), (2, 8)),
     ] {
         let error = parser.parse(src).expect_err("every runtime refuses this");
         assert_eq!(error.code, "unexpected", "{src:?}");
@@ -200,7 +208,7 @@ fn a_number_the_engine_cuts_after_a_lone_carriage_return_keeps_the_engines_row()
             here,
             "{src:?}: TypeScript and Go report {canonical:?}; if this now \
              does too, delete the entry from ../../DIVERGENCE.md and the \
-             first three rows' Rust column here"
+             Rust column of the first four rows here"
         );
     }
 }

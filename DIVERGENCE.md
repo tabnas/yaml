@@ -102,45 +102,57 @@ pin both sides of the boundary.
 Owner: this plugin, for the count; `tabnas-jsonic`, for the number. Read
 jsonic's register for the measurements.
 
-## A row after a carriage return by itself, on a number the engine cuts (Rust)
+## A number the engine cuts stands at the engine's cursor (Rust)
 
 | input | TypeScript | Go | Rust |
 |---|---|---|---|
 | `a: 1\rb: "x" 3` | `unexpected` at 2:8 | the same | at 1:13 |
 | `a: 1\rb: [1] 3` | `unexpected` at 2:8 | the same | at 1:13 |
 | `a: 1\r\rb: 'x' 3` | `unexpected` at 3:8 | the same | at 1:14 |
+| `<BOM>b: "x" 3` | `unexpected` at 1:8 | the same | at 1:9 |
 | `a: 1\nb: "x" 3` | `unexpected` at 2:8 | the same | the same |
 | `a: 1\r\nb: "x" 3` | `unexpected` at 2:8 | the same | the same |
 | `a: 1\rb: "x" y` | `unexpected` at 2:8 | the same | the same |
 | `a: 1\rb: [1, }` | `unexpected` at 2:8 | the same | the same |
+| `<BOM>b: [1, }` | `unexpected` at 1:8 | the same | the same |
+| `<BOM>a: 1\nb: "x" 3` | `unexpected` at 2:8 | the same | the same |
 
 A token's row and column are the ones its offset gives, in every runtime,
 for every token the plugin builds. A number that follows a quoted scalar
 or a closed flow collection on its line is cut by the engine's own number
 matcher, at the engine's cursor. TypeScript and Go set that cursor's row
 and column from the offset before the engine's matchers run. The Rust
-engine's lexer gives a matcher advancement and no assignment, and it
-counts a row at each character of its `line.rowChars`, which is `\n`, so
-after a carriage return by itself its cursor is still on row 1, with the
-column counted from the source's start. Where such a number is what a
-parse refuses, the diagnostic names the right code and the right offset,
-and the engine's row and column.
+engine's lexer gives a matcher advancement and no assignment, and its
+cursor parts from the offset in two places:
 
-The last four rows are the controls: the other two line breaks, where the
-cursor counts the row, and tokens the plugin cuts itself after the same
-carriage return. The value a document reads as is not affected, and a
-document with any other line break is not affected at all.
+- It counts a row at each character of its `line.rowChars`, which is
+  `\n`. After a carriage return by itself it is still on row 1, with the
+  column counted from the source's start.
+- It counts a byte order mark that opens the text as a column, where the
+  mark takes none. On that text's first line its column is one more.
+
+Where such a number is what a parse refuses, the diagnostic names the
+right code and the right offset, and the engine's row and column.
+
+The last six rows are the controls: the other two line breaks, where the
+cursor counts the row, tokens the plugin cuts itself after the same
+carriage return or mark, and the second line of a text the mark opens.
+The value a document reads as is not affected. A document with neither a
+carriage return by itself nor a byte order mark is not affected at all.
 
 Measured over 1,872 texts generated for the purpose, 12 openings each
 followed by one of 52 last lines under each of the three line breaks, of
 which the canonical implementation refuses 951: Go reports the canonical
 place for all 951, and Rust for all but 122, every one of them a number
-the engine cuts after a carriage return by itself. Over the texts this
-repository holds, the fixture rows, the YAML Test Suite cases and the
-schema inputs, as written and with their line breaks made `\r\n` and
+the engine cuts after a carriage return by itself. Over 192 refusals
+generated far along a line, after non-ASCII text and a byte order mark,
+Go reports the canonical place for all, and Rust for all but 4, each a
+number the engine cuts on the first line after the mark. Over the texts
+this repository holds, the fixture rows, the YAML Test Suite cases and
+the schema inputs, as written and with their line breaks made `\r\n` and
 `\r`, the 254 refusals stand at the canonical place in both.
 
-`rs/tests/divergence_test.rs` pins all seven tabled rows.
+`rs/tests/divergence_test.rs` pins all ten tabled rows.
 
 Owner: the engine. The repair is a way for a matcher to place the Rust
 lexer's cursor, as the other two engines allow. Standing in for the

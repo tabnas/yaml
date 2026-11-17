@@ -112,15 +112,23 @@ builds. The decisions in `src/lex.rs` and `src/text.rs` still move a
 
 Tokens the engine's own matchers cut (a number, the end of the source)
 are at the engine's cursor, which advances naturally and agrees with the
-offset except after a `\r` by itself, which it does not count as a row.
-`tests/reading_test.rs` holds every refusal of every fixture row, suite
-case and schema input to the place its offset gives. The one place the
-two part is recorded: a number after a quoted scalar or a closed flow
-collection, refused in a document whose line breaks are `\r` by itself,
-reports the engine's row and column (`../DIVERGENCE.md`, "A row after a
-carriage return by itself, on a number the engine cuts", pinned in
-`tests/divergence_test.rs`). The engine's lexer gives a matcher no way to
-place its cursor, so the repair is the engine's.
+offset in all but two places: it does not count a `\r` by itself as a
+row, and it counts a byte order mark as a column. `tests/reading_test.rs`
+holds every refusal of every fixture row, suite case and schema input to
+the place its offset gives. Where the two part is recorded: a number
+after a quoted scalar or a closed flow collection, refused after a `\r`
+by itself or on the first line after a byte order mark, reports the
+engine's row and column (`../DIVERGENCE.md`, "A number the engine cuts
+stands at the engine's cursor", pinned in `tests/divergence_test.rs`).
+The engine's lexer gives a matcher no way to place its cursor, so the
+repair is the engine's.
+
+`Src::row_col` reads no more than the span between the position the
+lines are noted up to and the position asked for: `Lines` counts the
+line breaks passed (`rows`, `cr`) and the characters of the line it is
+on (`line_chars`). Counted from the line's start for every token, one
+long line took the square of its length, which
+`one_long_line_parses_in_linear_time` in `tests/perf_test.rs` holds.
 
 ## The matcher chain after a cursor move
 

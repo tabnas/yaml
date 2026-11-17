@@ -74,6 +74,11 @@ pub(crate) struct Lines {
     /// row is one more than the breaks before it.
     pub(crate) rows: usize,
     pub(crate) cr: bool,
+    /// How many characters the line `end` is on holds before `end`. A
+    /// position's column is counted from here and not from its line's
+    /// start: counted from the start for every token, one long line, as
+    /// minified JSON is, took the square of its length.
+    pub(crate) line_chars: usize,
 }
 
 impl Lines {
@@ -106,9 +111,14 @@ impl Lines {
             self.skip = false;
             self.comment = false;
             self.prev = -1;
+            self.line_chars = 0;
             return;
         }
         self.cr = false;
+        // Every byte of UTF-8 but a continuation byte begins a character.
+        if c >= 0 && (c & 0xC0) != 0x80 {
+            self.line_chars += 1;
+        }
         if self.comment {
             return;
         }
@@ -345,8 +355,9 @@ impl<'a> Src<'a> {
     /// them: one more than the line breaks before it (a `\r\n` is one), and
     /// how many characters it stands past its line's start, from 1. A byte
     /// order mark that opens the stream takes no column. The breaks before
-    /// the position noted up to are counted; those between it and `pos`
-    /// are read.
+    /// the position noted up to are counted, and so are the characters of
+    /// its line; those between it and `pos` are read. So a lookup reads
+    /// the span between the two and no more, however long the line is.
     pub(crate) fn row_col(self, pos: usize) -> (usize, usize) {
         let end = self.lines.end;
         let mut rows = self.lines.rows;
@@ -376,16 +387,30 @@ impl<'a> Src<'a> {
                 }
             }
         }
-        let mut line = self.line_start(pos);
-        if line == 0 && self.starts_with_abs(0, crate::lex::BOM_TEXT) {
-            line = crate::lex::BOM_TEXT.len();
-        }
-        let column = if pos < line {
+        let start = self.line_start(pos);
+        let bom = start == 0 && self.starts_with_abs(0, crate::lex::BOM_TEXT);
+        let column = if bom && pos < crate::lex::BOM_TEXT.len() {
             1
         } else {
-            let from = self.behind(line).min(self.text.len());
-            let to = self.behind(pos).min(self.text.len());
-            self.text[from..to].chars().count() + 1
+            let span = |from: usize, to: usize| {
+                let from = self.behind(from).min(self.text.len());
+                let to = self.behind(to).min(self.text.len());
+                self.text[from..to].chars().count()
+            };
+            // The characters of the line before `pos`. Where that line is
+            // the one noted up to, its count is kept, and only the span
+            // between the two positions is read.
+            let chars = if start == self.line_start(end) {
+                if pos >= end {
+                    self.lines.line_chars + span(end, pos)
+                } else {
+                    self.lines.line_chars - span(pos, end)
+                }
+            } else {
+                span(start, pos)
+            };
+            // The mark is a character of its line, and takes no column.
+            chars - usize::from(bom) + 1
         };
         (rows + 1, column)
     }
@@ -447,8 +472,9 @@ const CUT_POS: usize = 9;
 const CUT_TAKEN: usize = 10;
 const ROWS: usize = 11;
 const CR: usize = 12;
-const SNAP: usize = 13;
-const BREAKS: usize = 14;
+const LINE_CHARS: usize = 13;
+const SNAP: usize = 14;
+const BREAKS: usize = 15;
 
 /// What the plugin keeps of the source from one call to the next, in the
 /// context's bag: the lines noted, and from a reader its copy of the
@@ -518,6 +544,7 @@ impl Kept {
                 prev: signed(&fields[PREV]),
                 rows: number(&fields[ROWS]),
                 cr: flag(&fields[CR]),
+                line_chars: number(&fields[LINE_CHARS]),
             },
             buf,
             low: number(&fields[LOW]),
@@ -544,6 +571,7 @@ impl Kept {
         fields[CUT_TAKEN] = n(self.cut_taken);
         fields[ROWS] = n(self.lines.rows);
         fields[CR] = Value::Bool(self.lines.cr);
+        fields[LINE_CHARS] = n(self.lines.line_chars);
         fields.truncate(BREAKS);
         fields.extend(self.lines.breaks.iter().map(|&b| n(b)));
         let value = Value::Array(self.items);
