@@ -632,6 +632,7 @@ func Parse(src string) (any, error) {
 
 // MakeJsonic creates a jsonic instance configured for YAML parsing.
 // If a YamlOptions is passed, its fields are propagated to the plugin.
+// It panics on a Schema the plugin does not know.
 func MakeJsonic(opts ...YamlOptions) *tabnas.Tabnas {
 	yo := YamlOptions{}
 	if len(opts) > 0 {
@@ -650,7 +651,15 @@ func MakeJsonic(opts ...YamlOptions) *tabnas.Tabnas {
 	if yo.Schema != "" {
 		pluginOpts["schema"] = yo.Schema
 	}
-	j.Use(Yaml, pluginOpts)
+	// The plugin refuses a schema it does not know, and this function has
+	// no error to return that in. A parser made without the plugin would
+	// read YAML as relaxed JSON and say nothing, so a misspelt name
+	// panics here, as a grammar that fails to install does. A host that
+	// takes the name from outside installs the plugin itself, where Use
+	// returns the error.
+	if err := j.Use(Yaml, pluginOpts); err != nil {
+		panic(err)
+	}
 	// Read a reader a window at a time (admin ADR-30): the plugin's matcher
 	// and text check read the source through the window, reading on where
 	// a scan reaches its end, and keep the lines before the cursor that

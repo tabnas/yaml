@@ -187,4 +187,31 @@ func TestAnUnknownSchemaIsRefused(t *testing.T) {
 			t.Errorf("schema %#v: Use gave %v", schema, err)
 		}
 	}
+
+	// MakeJsonic has no error to return, and a parser it made without the
+	// plugin would read YAML as relaxed JSON: it panics with the plugin's
+	// error.
+	for _, schema := range []string{"Core", "json"} {
+		func() {
+			defer func() {
+				r := recover()
+				err, ok := r.(error)
+				if !ok || !strings.Contains(err.Error(), "unknown schema") {
+					t.Errorf("schema %q: MakeJsonic gave %v, want a panic with the unknown schema error", schema, r)
+				}
+			}()
+			MakeJsonic(YamlOptions{Schema: schema})
+		}()
+	}
+	for _, schema := range []string{"core", ""} {
+		got, err := MakeJsonic(YamlOptions{Schema: schema}).Parse("a: yes")
+		if err != nil {
+			t.Fatalf("schema %q: %v", schema, err)
+		}
+		want := map[string]any{"a": true}
+		if schema == "core" {
+			want = map[string]any{"a": "yes"}
+		}
+		expectEqual(t, got, want)
+	}
 }
