@@ -145,6 +145,10 @@ fn an_unpaired_surrogate_escape_folds() {
     expect(r#"a: "\uD83D😀""#, j!({"a": "\u{fffd}\u{1f600}"}));
     // A high at the very end of the scalar is flushed when it closes.
     expect(r#"a: "x\uD83D""#, j!({"a": "x\u{fffd}"}));
+    // A key folds the same way, an implicit one and an explicit one
+    // (`? "..."`) alike: the explicit key was once left with its quotes.
+    expect(r#""\uD83D": 1"#, j!({"\u{fffd}": 1}));
+    expect("? \"\\uD83D\"\n: 1", j!({"\u{fffd}": 1}));
 }
 
 // ===== WHOLE SOURCE =====

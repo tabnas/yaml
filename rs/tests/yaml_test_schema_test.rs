@@ -127,3 +127,51 @@ fn every_case_reads_as_the_core_schema_or_is_listed() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// Under `schema: core` the ledger does not apply: EVERY input reads as the
+/// core schema says, the listed deviations included. That is what the
+/// option is for.
+#[test]
+fn every_case_reads_as_the_core_schema_under_the_option() {
+    let parser = tabnas_yaml::make_with(tabnas_yaml::YamlOptions {
+        schema: Some(tabnas_yaml::Schema::Core),
+        ..Default::default()
+    });
+    let corpus = corpus();
+    let mut failures = Vec::new();
+    for (input, case) in &corpus {
+        let result = parser.parse(input);
+        if !matches!(&result, Ok(value) if reads_as_core(value, case)) {
+            failures.push(format!(
+                "{input:?}: want {} {:?}, got {result:?}",
+                case[0], case[1]
+            ));
+        }
+    }
+    assert_eq!(corpus.len(), 245);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A schema this plugin does not know is refused when the plugin is
+/// installed, so that a misspelling cannot leave the default on.
+#[test]
+fn an_unknown_schema_is_refused() {
+    let mut parser = tabnas_jsonic::make();
+    let mut options = indexmap::IndexMap::new();
+    options.insert("schema".to_string(), Value::String("json".to_string()));
+    let Err(error) = parser.use_plugin(tabnas_yaml::plugin(), Some(Value::object(options))) else {
+        panic!("an unknown schema is refused");
+    };
+    assert!(error.to_string().contains("unknown schema"), "{error}");
+
+    let mut parser = tabnas_jsonic::make();
+    let mut options = indexmap::IndexMap::new();
+    options.insert("schema".to_string(), Value::String("core".to_string()));
+    if let Err(error) = parser.use_plugin(tabnas_yaml::plugin(), Some(Value::object(options))) {
+        panic!("core is known: {error}");
+    }
+    assert_eq!(
+        parser.parse("a: yes").expect("parses").to_string(),
+        r#"{"a":"yes"}"#
+    );
+}

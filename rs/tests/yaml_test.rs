@@ -328,14 +328,27 @@ fn indentation() {
     expect("- a\n\n- b", j!(["a", "b"]));
 }
 
-/// YAML forbids a tab as indentation, so this document should be
-/// REJECTED. It is not: the tab is swallowed and `b` lands at the top
-/// level. Pinned as observed, in both other runtimes too, so the gap is
-/// visible; the conformance dial for it is the test suite's must-fail
-/// group in `yaml_test_suite_test.rs`.
+/// YAML forbids a tab as indentation (YAML 1.2.2, 6.1), so a tab in a
+/// line's leading blanks before block structure is refused, with the code
+/// `yaml_tab_indent`, where the line's blanks that hold it start. It was
+/// once swallowed, and `b` landed at the top level. A tab before a
+/// comment, and a line of blanks alone, are no indentation and still
+/// read.
 #[test]
-fn tab_indentation_is_not_rejected() {
-    expect("a:\n\tb: 1", j!({"a": null, "b": 1}));
+fn tab_indentation_is_rejected() {
+    for (src, place) in [
+        ("a:\n\tb: 1", (2, 1)),
+        ("a:\n  \t- x", (2, 3)),
+        ("\ta: 1", (1, 1)),
+    ] {
+        let error = tabnas_yaml::make()
+            .parse(src)
+            .expect_err("a tab in indentation is refused");
+        assert_eq!(error.code, "yaml_tab_indent", "{src:?}");
+        assert_eq!((error.row, error.col), place, "{src:?}");
+    }
+    expect("a: 1\n\t# c\nb: 2", j!({"a": 1, "b": 2}));
+    expect("a: 1\n\t\nb: 2", j!({"a": 1, "b": 2}));
 }
 
 // ===== MULTILINE PLAIN SCALARS =====
@@ -461,7 +474,10 @@ fn mapping_keys_keep_source_order() {
 
 #[test]
 fn meta_returns_per_document_metadata() {
-    let parser = make_with(YamlOptions { meta: true });
+    let parser = make_with(YamlOptions {
+        meta: true,
+        ..Default::default()
+    });
 
     let single = parser.parse("a: 1").expect("a: 1 parses");
     assert_eq!(
@@ -539,7 +555,13 @@ fn meta_returns_per_document_metadata() {
 
 #[test]
 fn meta_off_returns_bare_content() {
-    for parser in [make(), make_with(YamlOptions { meta: false })] {
+    for parser in [
+        make(),
+        make_with(YamlOptions {
+            meta: false,
+            ..Default::default()
+        }),
+    ] {
         assert_eq!(
             common::plain(&parser.parse("a: 1").expect("parses")),
             j!({"a": 1})

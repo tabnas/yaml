@@ -19,7 +19,8 @@ and this file only covers what is specific to this crate.
 | `tests/yaml_test.rs` | in-language behaviour, mirroring `ts/test/yaml.test.ts` and the two Go unit files |
 | `tests/key_before_value_test.rs` | what a consumer following the rule events is told: each mapping member's key, on the open mapping, before its value's rule opens; mirrors `ts/test/key-before-value.test.ts` and `go/key_before_value_test.go` |
 | `tests/parity_regression_test.rs` | the TypeScript/Go parity regressions captured from real OpenAPI and Swagger files |
-| `tests/column_units_test.rs` | the sixteen error-column cases the other two runtimes assert |
+| `tests/column_units_test.rs` | the fifteen error-column cases the other two runtimes assert |
+| `tests/reading_test.rs` | over every fixture row, suite case and schema input: a text reads the same with its line breaks made `\r\n` or `\r`, every refusal stands where its offset says, and `schema: core` changes plain scalars alone; twin of `ts/test/reading.test.ts` |
 | `tests/untrusted_test.rs` | deep nesting, long input, unterminated constructs, control characters, odd Unicode |
 | `tests/js_semantics_test.rs` | where JavaScript's whitespace, word characters and UTF-16 code units decide a parse; most rows are shared fixtures too, and the file records which canonical expression each answer comes from |
 | `tests/divergence_test.rs` | every entry in `../DIVERGENCE.md` with a Rust column that a fixture cannot express, bar the pins in `tests/js_semantics_test.rs` and `tests/escape_window_test.rs` |
@@ -92,30 +93,34 @@ line starts, and the flow colon's question (`source::Lines`) is answered
 from the source as it went by, so no scan reads back further than the
 lines kept.
 
-## The virtual cursor is load-bearing
+## Rows and columns come from the offset
 
-The canonical matcher mutates the lexer's own `Point`, and not always to
-the position natural advancement would give. After a standalone anchor or
-tag line it assigns `pnt.cI = spaces` rather than `spaces + 1`; before a
-document marker it assigns `0`; and the key-separator branch charges two
-columns while advancing one character, so from a `: ` onwards the
-canonical column runs one ahead of the true one.
+A token's row and column are the ones its offset gives: one more than the
+line breaks before it (`\n`, `\r\n`, or `\r` by itself), and how many
+characters it stands past its line's start, from 1. The canonical matcher
+sets them from the offset wherever it cuts a token (`place` in
+`ts/src/yaml.ts`); it once kept them up token by token, and they drifted
+(a column too far after every `: `), and this port carried a virtual
+cursor in the context bag to reproduce that drift, because
+`@val-set-el-in` reads a block sequence's indent from `#EL`'s column.
+With the columns exact the virtual cursor is gone. `Src::row_col` in
+`src/source.rs` places a position, counting the line breaks `Lines` has
+noted (`rows`, `cr`) and reading those between there and the position,
+and `lex::ready` places every token, and every refusal, the plugin
+builds. The decisions in `src/lex.rs` and `src/text.rs` still move a
+`(position, row, column)` triple, of which only the position counts.
 
-Those are quirks, but they decide parses. `@val-set-el-in` computes a
-block sequence's indent as `#EL`'s column minus one, so a port that
-advanced naturally would accept `&a\n- 1\n- 2`, which the canonical
-parser rejects. This engine's `Lexer` exposes advancement, not
-assignment, so `src/lex.rs` carries a VIRTUAL cursor beside the real one,
-in the context bag. Every token this plugin emits is built at the virtual
-point; the real cursor moves by the same number of characters, so the
-byte offsets never part; and when another matcher has consumed a token in
-between, the virtual point is carried over that span the way the engine
-carries its own.
-
-That is also why this plugin emits the five flow punctuation tokens
-itself rather than leaving them to the fixed-token matcher: a token built
-at the engine's cursor would report a column one to the left of the
-canonical one, which `tests/column_units_test.rs` measures.
+Tokens the engine's own matchers cut (a number, the end of the source)
+are at the engine's cursor, which advances naturally and agrees with the
+offset except after a `\r` by itself, which it does not count as a row.
+`tests/reading_test.rs` holds every refusal of every fixture row, suite
+case and schema input to the place its offset gives. The one place the
+two part is recorded: a number after a quoted scalar or a closed flow
+collection, refused in a document whose line breaks are `\r` by itself,
+reports the engine's row and column (`../DIVERGENCE.md`, "A row after a
+carriage return by itself, on a number the engine cuts", pinned in
+`tests/divergence_test.rs`). The engine's lexer gives a matcher no way to
+place its cursor, so the repair is the engine's.
 
 ## The matcher chain after a cursor move
 
@@ -130,8 +135,7 @@ The two chains are not built the same way, so two compensations are
 needed here, and both are deliberate:
 
 - `lex::claimable_after_move` refuses a character the canonical chain
-  would have left unclaimed. Without it this port accepts `# c\n{a: 1}`,
-  which the canonical parser rejects.
+  would have left unclaimed.
 - `text::number_run` stands in for the number matcher, which the
   canonical chain still reaches after a move and this one does not (the
   engine gates that matcher on a character captured before the custom
@@ -142,8 +146,10 @@ The original 4,348-case adversarial comparison found one value difference
 and thirteen places where all runtimes refused at different positions.
 Parser 0.12.9 closed the recorded position class; its two representatives
 now report the canonical 5:1 and remain parity assertions. The one value
-difference is recorded in `../DIVERGENCE.md` and pinned in
-`tests/divergence_test.rs`.
+difference was a one-character predicate in the typed tag's value scan,
+since repaired: the input is a row of `../test/spec/directives.tsv`, and
+`a_tag_before_a_directive_line_resolves_the_canonical_way` in
+`tests/divergence_test.rs` keeps the reason beside it.
 
 ## Scanning is by byte, columns count characters
 
@@ -253,7 +259,7 @@ and diffing.
 Of the fourteen originally measured, one is a value and thirteen were the
 place a refusal all three runtimes make was reported. Parser 0.12.9 closed
 the recorded position class; both representatives now agree at 5:1. The
-value difference and the repair are in `../DIVERGENCE.md`, pinned by
-`tests/divergence_test.rs`. A change to the lexer or the grammar deserves
+value difference is repaired too, and `tests/divergence_test.rs` keeps
+both as parity assertions. A change to the lexer or the grammar deserves
 the same treatment before it is called done: build the canonical TypeScript
 beside a copy of this crate, run both over a generated corpus, and diff.

@@ -32,7 +32,8 @@ use std::sync::{Arc, OnceLock};
 use indexmap::IndexMap;
 use serde_json::json;
 use tabnas::{
-    Context, GrammarSpec, Plugin, PluginError, Rule, Tabnas, Token, Value, TIN_ST, TIN_TX, TIN_VL,
+    Context, GrammarSpec, Plugin, PluginError, Rule, Tabnas, Token, Value, TIN_NR, TIN_ST, TIN_TX,
+    TIN_VL,
 };
 
 mod lex;
@@ -57,6 +58,9 @@ const PLUGIN_NAME: &str = "yaml";
 /// The error code for an alias whose anchor does not occur before it.
 /// Its template and hint are in [`options_document`].
 pub(crate) const UNDEFINED_ALIAS: &str = "yaml_undefined_alias";
+
+/// The error code for an alias inside the node its anchor names.
+pub(crate) const RECURSIVE_ALIAS: &str = "yaml_recursive_alias";
 
 /// Set on the instance once the plugin has installed. The install guard
 /// reads it together with the instance's rules ([`grammar_installed`]):
@@ -293,6 +297,28 @@ pub struct YamlOptions {
     /// content. `meta` is a per-document `{directives, explicit, ended}`
     /// object for a single document, or an array of them for a stream.
     pub meta: bool,
+    /// The schema a plain scalar resolves by. `None`, the default, also
+    /// reads the YAML 1.1 booleans (`yes`, `no`, `on`, `off`) and jsonic's
+    /// number syntax (`1_000`, `0b11`).
+    pub schema: Option<Schema>,
+}
+
+/// A schema a plain scalar may be resolved by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Schema {
+    /// The YAML 1.2 core schema (YAML 1.2.2, 10.3.2) and no other reading:
+    /// the YAML 1.1 booleans are strings, and a number is only a decimal
+    /// integer or float, a `0o` octal or a `0x` hexadecimal integer.
+    Core,
+}
+
+impl Schema {
+    /// The schema's name in the option bag.
+    fn name(self) -> &'static str {
+        match self {
+            Schema::Core => "core",
+        }
+    }
 }
 
 impl YamlOptions {
@@ -300,8 +326,40 @@ impl YamlOptions {
     fn to_value(self) -> Value {
         let mut map = IndexMap::new();
         map.insert("meta".to_string(), Value::Bool(self.meta));
+        if let Some(schema) = self.schema {
+            map.insert(
+                "schema".to_string(),
+                Value::String(schema.name().to_string()),
+            );
+        }
         Value::object(map)
     }
+}
+
+/// The schema an option bag names: `None` when it names none, and an
+/// error for a name this plugin does not know, so that a misspelling
+/// cannot leave the default on.
+fn schema_option(options: &Value) -> Result<Option<Schema>, PluginError> {
+    let named = match options {
+        Value::Object(map) => map.get("schema").cloned(),
+        _ => None,
+    };
+    match named {
+        None | Some(Value::Null | Value::Undefined) => Ok(None),
+        Some(Value::String(name)) if name == "core" => Ok(Some(Schema::Core)),
+        Some(other) => Err(PluginError(format!(
+            "yaml: unknown schema {}, expected 'core'",
+            other.to_json()
+        ))),
+    }
+}
+
+/// Whether this parse resolves plain scalars by the core schema alone.
+pub(crate) fn core_schema(context: &Context) -> bool {
+    matches!(
+        context.options.plugin.get(PLUGIN_NAME),
+        Some(Value::Object(map)) if matches!(map.get("schema"), Some(Value::String(name)) if name == "core")
+    )
 }
 
 // ---------------------------------------------------------------------
@@ -585,6 +643,64 @@ fn is_decimal_literal(body: &str) -> bool {
     index == bytes.len()
 }
 
+/// The number the core schema reads `text` as, or `None` when it reads a
+/// string: a decimal integer or float
+/// (`[-+]?(\.[0-9]+|[0-9]+(\.[0-9]*)?)([eE][-+]?[0-9]+)?`), an octal one
+/// (`0o[0-7]+`) or a hexadecimal one (`0x[0-9a-fA-F]+`). `0b11`, `1_000`,
+/// `0X1F`, `-0x30` and `Infinity` are strings under it. Mirrors the
+/// canonical `coreNumber`.
+pub(crate) fn core_number(text: &str) -> Option<f64> {
+    if let Some(digits) = text.strip_prefix("0o") {
+        if !digits.is_empty() && digits.bytes().all(|b| (b'0'..=b'7').contains(&b)) {
+            return Some(text::radix_to_f64(digits, 8));
+        }
+        return None;
+    }
+    if let Some(digits) = text.strip_prefix("0x") {
+        if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Some(text::radix_to_f64(digits, 16));
+        }
+        return None;
+    }
+    let body = text.strip_prefix(['-', '+']).unwrap_or(text);
+    let bytes = body.as_bytes();
+    let mut index = 0;
+    let digits = |index: &mut usize| {
+        let from = *index;
+        while *index < bytes.len() && bytes[*index].is_ascii_digit() {
+            *index += 1;
+        }
+        *index - from
+    };
+    if bytes.first() == Some(&b'.') {
+        index = 1;
+        if digits(&mut index) == 0 {
+            return None;
+        }
+    } else {
+        if digits(&mut index) == 0 {
+            return None;
+        }
+        if bytes.get(index) == Some(&b'.') {
+            index += 1;
+            digits(&mut index);
+        }
+    }
+    if matches!(bytes.get(index), Some(b'e' | b'E')) {
+        index += 1;
+        if matches!(bytes.get(index), Some(b'-' | b'+')) {
+            index += 1;
+        }
+        if digits(&mut index) == 0 {
+            return None;
+        }
+    }
+    if index != bytes.len() {
+        return None;
+    }
+    js_to_number(text)
+}
+
 /// `parseInt(text, 10)`. The leading run it skips is JavaScript's
 /// whitespace, which is not Rust's: `trim_start` would leave a
 /// byte-order mark in place and strip a next-line character.
@@ -719,14 +835,15 @@ pub(crate) fn from_code_point(number: f64) -> Option<u32> {
     Some(number as u32)
 }
 
-/// The YAML value keywords, and the three non-finite numbers that have
-/// no JSON spelling.
-pub(crate) fn yaml_keyword(text: &str) -> Option<Value> {
+/// The plain scalars that are a value and not a string: the YAML 1.2 core
+/// schema's (YAML 1.2.2, 10.3.2), and unless `core` is set the YAML 1.1
+/// booleans too. Mirrors the canonical `VALUES` and `VALUES_CORE`.
+pub(crate) fn yaml_keyword(text: &str, core: bool) -> Option<Value> {
     Some(match text {
-        "true" | "True" | "TRUE" | "yes" | "Yes" | "YES" | "on" | "On" | "ON" => Value::Bool(true),
-        "false" | "False" | "FALSE" | "no" | "No" | "NO" | "off" | "Off" | "OFF" => {
-            Value::Bool(false)
-        }
+        "true" | "True" | "TRUE" => Value::Bool(true),
+        "false" | "False" | "FALSE" => Value::Bool(false),
+        "yes" | "Yes" | "YES" | "on" | "On" | "ON" if !core => Value::Bool(true),
+        "no" | "No" | "NO" | "off" | "Off" | "OFF" if !core => Value::Bool(false),
         "null" | "Null" | "NULL" | "~" => Value::Null,
         ".inf" | ".Inf" | ".INF" | "+.inf" | "+.Inf" | "+.INF" => Value::Number(f64::INFINITY),
         "-.inf" | "-.Inf" | "-.INF" => Value::Number(f64::NEG_INFINITY),
@@ -818,6 +935,85 @@ fn entry_map_in(rule: &Rule) -> Option<f64> {
     }
 }
 
+/// The name of the rule that pushed this one.
+fn parent_name(rule: &Rule) -> Option<&str> {
+    rule.parent_rule.as_ref().map(|parent| parent.name.as_str())
+}
+
+/// The name of the anchor an alias marker names: the value of an alias
+/// whose anchor was not recorded when it was read.
+fn alias_name(value: &Value) -> Option<&str> {
+    match value {
+        Value::Object(map) => match map.get("__yamlAlias") {
+            Some(Value::String(name)) => Some(name.as_str()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The token `token`, marked bad, when it is an alias to an anchor whose
+/// node is still open: an alias inside the node it names, which would hold
+/// itself. A rule's action or handler that returns it fails the parse
+/// there, with the code. Mirrors the canonical `recursiveAlias`.
+fn recursive_alias(token: Option<&Token>, context: &Context) -> Option<Token> {
+    let token = token?;
+    if token.tin != TIN_VL {
+        return None;
+    }
+    let name = alias_name(&token.val)?;
+    if !state::anchor_open(context, name) {
+        return None;
+    }
+    let mut bad = token.clone();
+    bad.bad(RECURSIVE_ALIAS);
+    Some(bad)
+}
+
+/// The column of the token a mapping opens on, when that token is a key
+/// and its node is the first thing on its line, and 0 otherwise: a flow
+/// mapping's brace, or a key that follows something on its line
+/// (`--- a: 1`), keeps the indent of 0. The key's node starts at its
+/// properties, so `  &x a: 1` stands at 2 as `  a: 1` does. Mirrors the
+/// canonical `firstKeyColumn`.
+fn first_key_column(context: &mut Context) -> i32 {
+    let Some(token) = context.t0() else {
+        return 0;
+    };
+    if !matches!(token.tin, TIN_TX | TIN_NR | TIN_ST | TIN_VL) {
+        return 0;
+    }
+    let at = token.site.si;
+    let windowed = context.source.is_empty();
+    let kept = source::Kept::load(context, windowed);
+    let touched = std::cell::Cell::new(false);
+    let column = {
+        let src = kept.src(&context.source, &touched);
+        let at = src.clamp(at);
+        let line = lex::line_start_of(src, at);
+        let mut index = line;
+        while index < at && src.is(index, b' ') {
+            index += 1;
+        }
+        let column = src.slice(line, index).len();
+        while index < at && (src.is(index, b'&') || src.is(index, b'!')) {
+            while index < at && !lex::blank(src.at(index)) {
+                index += 1;
+            }
+            while index < at && lex::blank(src.at(index)) {
+                index += 1;
+            }
+        }
+        if index == at {
+            i32::try_from(column).unwrap_or(0)
+        } else {
+            0
+        }
+    };
+    kept.store(context);
+    column
+}
+
 fn t0_number(context: &Context) -> Option<f64> {
     context.t0().and_then(|token| token_number(&token.val))
 }
@@ -846,13 +1042,28 @@ fn register_refs(parser: &mut Tabnas) {
         }
     });
     // A sequence at the indent of the key it is the value of, its
-    // mapping's or a sequence entry's: `a:\n- x` and `- a:\n  - x`.
+    // mapping's or a sequence entry's: `a:\n- x` and `- a:\n  - x`. The
+    // key's column is the one that counts. A sequence entry's key stands at
+    // its mapping's column, not at an enclosing mapping's, and a sequence
+    // entry's own value has no key: a `-` at an enclosing indent is that
+    // sequence's next entry.
     parser.alt_condition("@val-indent-eq-parent", |rule, context| {
         let Some(t0) = t0_number(context) else {
             return false;
         };
-        entry_map_in(rule) == Some(t0)
-            || matches!(rule.k.get("yamlIn"), Some(Value::Number(parent)) if t0 == *parent)
+        match parent_name(rule) {
+            Some("yamlElemPair") => {
+                matches!(rule.k.get("yamlMapIn"), Some(Value::Number(map_in)) if t0 == *map_in)
+            }
+            Some("yamlBlockList" | "yamlBlockElem") => false,
+            _ => matches!(rule.k.get("yamlIn"), Some(Value::Number(parent)) if t0 == *parent),
+        }
+    });
+    // Whether a value may open a block sequence on its own line: not when
+    // it is the value of a mapping's pair. YAML has no `key: - a`: a block
+    // sequence starts on the line after its key.
+    parser.alt_condition("@val-not-pair-value", |rule, _context| {
+        !matches!(parent_name(rule), Some("pair" | "yamlElemPair"))
     });
     parser.alt_condition("@t0-eq-in", |rule, context| {
         matches!((t0_number(context), counter(rule, "in")),
@@ -892,14 +1103,13 @@ fn register_refs(parser: &mut Tabnas) {
         rule.n_mut().insert("in".to_string(), column as i32 - 1);
         Ok(())
     });
+    // A scalar on the line after its key is the value its token read: a
+    // number, a boolean or null as well as a string (`a:\n  1` is 1). An
+    // alias's marker is resolved by the val that pushed this rule.
     parser.action_with_context("@indent-plain-value", |rule, _context| {
-        let node = rule.o0().map_or(Value::Undefined, |token| {
-            if token.tin == TIN_ST || token.tin == TIN_TX {
-                token.val.clone()
-            } else {
-                Value::String(token.src.as_str().to_string())
-            }
-        });
+        let node = rule
+            .o0()
+            .map_or(Value::Undefined, |token| token.val.clone());
         set_node(rule, node);
         Ok(())
     });
@@ -928,27 +1138,41 @@ fn register_refs(parser: &mut Tabnas) {
             .insert("yamlMapIn".to_string(), Value::Number(indent));
         Ok(())
     });
-    parser.action_with_context("@elem-key", |rule, context| {
+    // A key that is an alias to an anchor whose node is still open is
+    // refused there (`recursive_alias`).
+    parser.action_with_match_ref("@elem-key", |rule, context, _alt| {
+        if let Some(bad) = recursive_alias(rule.o0(), context) {
+            return Ok(Some(bad));
+        }
         let key = token_key(rule, 0, context);
         rule.u_mut().insert("key".to_string(), key);
-        Ok(())
+        Ok(None)
     });
-    parser.action_with_context("@implicit-null-pair", |rule, context| {
+    parser.action_with_match_ref("@implicit-null-pair", |rule, context, _alt| {
+        if let Some(bad) = recursive_alias(rule.o0(), context) {
+            return Ok(Some(bad));
+        }
         let key = token_key(rule, 0, context);
         rule.u_mut().insert("key".to_string(), key.clone());
         store_member(rule, context, string_of(&key), Value::Null);
-        Ok(())
+        Ok(None)
     });
-    parser.action_with_context("@qm-pairkey", |rule, context| {
+    parser.action_with_match_ref("@qm-pairkey", |rule, context, _alt| {
+        if let Some(bad) = recursive_alias(rule.o1(), context) {
+            return Ok(Some(bad));
+        }
         let key = token_key(rule, 1, context);
         rule.u_mut().insert("key".to_string(), key);
-        Ok(())
+        Ok(None)
     });
-    parser.action_with_context("@qm-implicit-null-pair", |rule, context| {
+    parser.action_with_match_ref("@qm-implicit-null-pair", |rule, context, _alt| {
+        if let Some(bad) = recursive_alias(rule.o1(), context) {
+            return Ok(Some(bad));
+        }
         let key = token_key(rule, 1, context);
         rule.u_mut().insert("key".to_string(), key.clone());
         store_member(rule, context, string_of(&key), Value::Null);
-        Ok(())
+        Ok(None)
     });
 
     // The stream rule's actions.
@@ -1142,6 +1366,13 @@ fn wire_rules(parser: &mut Tabnas) {
                     node => node.clone(),
                 };
                 name_anchors(rule, &pending, &open_node);
+                for anchor in &pending {
+                    if let Value::Object(entry) = anchor {
+                        if let Some(Value::String(name)) = entry.get("n") {
+                            state::hold_anchor(context, name, 1.0);
+                        }
+                    }
+                }
                 rule.u_mut()
                     .insert("yamlAnchors".to_string(), Value::array(pending));
                 rule.u_mut()
@@ -1176,66 +1407,9 @@ fn wire_rules(parser: &mut Tabnas) {
                 set_node(rule, Value::Undefined);
             }
         });
-        spec.add_ac(|rule, context| {
-            // An alias whose anchor was not yet recorded when it lexed.
-            let alias = match &*rule.node.borrow() {
-                Value::Object(map) => match map.get("__yamlAlias") {
-                    Some(Value::String(name)) => Some(name.clone()),
-                    _ => None,
-                },
-                _ => None,
-            };
-            if let Some(name) = alias {
-                let resolved = state::map_get(context, state::ANCHORS, &name).map_or(
-                    Value::Undefined,
-                    |value| {
-                        if is_container(&value) {
-                            deep_copy(&value)
-                        } else {
-                            value
-                        }
-                    },
-                );
-                set_node(rule, resolved);
-            }
-
-            let Some(Value::Array(anchors)) = rule.u.get("yamlAnchors").cloned() else {
-                return;
-            };
-            let open_node = rule
-                .u
-                .get("yamlAnchorOpenNode")
-                .cloned()
-                .unwrap_or(Value::Undefined);
-            let node = rule.node.borrow().clone();
-            for anchor in anchors.iter() {
-                let Value::Object(entry) = anchor else {
-                    continue;
-                };
-                let inline = matches!(entry.get("i"), Some(Value::Bool(true)));
-                let Some(Value::String(name)) = entry.get("n") else {
-                    continue;
-                };
-                // An inline anchor that named a scalar keeps that scalar:
-                // the container this val ended up holding belongs to a
-                // later, deeper value.
-                if inline
-                    && !matches!(open_node, Value::Undefined | Value::Null)
-                    && !is_container(&open_node)
-                    && is_container(&node)
-                {
-                    continue;
-                }
-                let value = if is_container(&node) {
-                    deep_copy(&node)
-                } else {
-                    node.clone()
-                };
-                state::map_set(context, state::ANCHORS, name.clone(), value);
-            }
-            // Recorded: the hold this val raised at its open is released.
-            state::hold_pruning(context, -1.0);
-        });
+        spec.add_ac_with_state(Arc::new(|rule, context, _next, _out| {
+            Ok(close_val(rule, context))
+        }));
     });
 
     parser.define_rule("indent", |spec| {
@@ -1301,9 +1475,17 @@ fn wire_rules(parser: &mut Tabnas) {
     // mapping's node cell, which every pair of a mapping shares, and the
     // map leaves that mapping unmerged, as the canonical port does.
     parser.define_rule("pair", |spec| {
-        spec.add_ao(|rule, context| {
+        spec.add_ao_with_state(Arc::new(|rule, context, _next, _out| {
+            let key = match rule.o0() {
+                Some(token) if token.name.as_ref() == "#QM" => rule.o1(),
+                other => other,
+            };
+            if let Some(bad) = recursive_alias(key, context) {
+                return Ok(Some(bad));
+            }
             hold_merge(rule, context);
-        });
+            Ok(None)
+        }));
         spec.add_bc(|rule, context| {
             note_literal_merge_key(rule, context);
         });
@@ -1313,9 +1495,15 @@ fn wire_rules(parser: &mut Tabnas) {
     });
 
     parser.define_rule("map", |spec| {
-        spec.add_bo(|rule, _context| {
+        spec.add_bo(|rule, context| {
             if counter(rule, "in").is_none() {
-                rule.n_mut().insert("in".to_string(), 0);
+                // No indent token came before this mapping: it is a
+                // document's root, or a flow mapping. A root block mapping
+                // stands at the column of its first key, which need not be
+                // 0 (YAML 1.2.2, 9.1.1: a document's root node is indented
+                // by -1, so any column is deeper).
+                let column = first_key_column(context);
+                rule.n_mut().insert("in".to_string(), column);
             }
             set_indent_key(rule, "yamlIn");
         });
@@ -1349,6 +1537,84 @@ fn wire_rules(parser: &mut Tabnas) {
             store_elem_pair(rule, context);
         });
     });
+}
+
+/// The val rule's after-close: an alias whose anchor was not yet recorded
+/// when it was read is resolved, or refused when its anchor's node is
+/// still open; and the anchors this val claimed are recorded, their nodes
+/// now closed. A token returned is a refusal.
+fn close_val(rule: &mut Rule, context: &mut Context) -> Option<Token> {
+    let alias = alias_name(&rule.node.borrow()).map(str::to_string);
+    if let Some(name) = alias {
+        if state::anchor_open(context, &name) {
+            // The alias's own token: this val's, or its indent child's when
+            // the alias stands on the line after its key.
+            let node = rule.node.borrow().clone();
+            let own = rule.o0().filter(|token| token.val == node).cloned();
+            let child = rule
+                .child_rule
+                .as_ref()
+                .and_then(|child| child.o.first().filter(|token| token.val == node).cloned());
+            let mut token = own.or(child).or_else(|| rule.o0().cloned())?;
+            token.bad(RECURSIVE_ALIAS);
+            return Some(token);
+        }
+        let resolved =
+            state::map_get(context, state::ANCHORS, &name).map_or(Value::Undefined, |value| {
+                if is_container(&value) {
+                    deep_copy(&value)
+                } else {
+                    value
+                }
+            });
+        set_node(rule, resolved);
+    }
+
+    let Some(Value::Array(anchors)) = rule.u.get("yamlAnchors").cloned() else {
+        return None;
+    };
+    let open_node = rule
+        .u
+        .get("yamlAnchorOpenNode")
+        .cloned()
+        .unwrap_or(Value::Undefined);
+    let node = rule.node.borrow().clone();
+    for anchor in anchors.iter() {
+        let Value::Object(entry) = anchor else {
+            continue;
+        };
+        let inline = matches!(entry.get("i"), Some(Value::Bool(true)));
+        let Some(Value::String(name)) = entry.get("n") else {
+            continue;
+        };
+        // An inline anchor that named a scalar keeps that scalar: the
+        // container this val ended up holding belongs to a later, deeper
+        // value.
+        if inline
+            && !matches!(open_node, Value::Undefined | Value::Null)
+            && !is_container(&open_node)
+            && is_container(&node)
+        {
+            continue;
+        }
+        let value = if is_container(&node) {
+            deep_copy(&node)
+        } else {
+            node.clone()
+        };
+        state::map_set(context, state::ANCHORS, name.clone(), value);
+    }
+    // The node has closed: an alias after it names a finished node.
+    for anchor in anchors.iter() {
+        if let Value::Object(entry) = anchor {
+            if let Some(Value::String(name)) = entry.get("n") {
+                state::hold_anchor(context, name, -1.0);
+            }
+        }
+    }
+    // Recorded: the hold this val raised at its open is released.
+    state::hold_pruning(context, -1.0);
+    None
 }
 
 /// `r.k.<name> = r.n.in`, including when there is no `in` counter: the
@@ -1571,9 +1837,15 @@ fn options_document() -> serde_json::Value {
             // This plugin's own error codes, with the templates and hints
             // the engine fills from the bad token. Each is declared in every
             // runtime and listed in tabnas.plugin.json.
-            "error": { "yaml_undefined_alias": "undefined alias: {src}" },
+            "error": {
+                "yaml_undefined_alias": "undefined alias: {src}",
+                "yaml_recursive_alias": "recursive alias: {src}",
+                "yaml_tab_indent": "tab in indentation"
+            },
             "hint": {
-                "yaml_undefined_alias": "\nThe alias {src} names no anchor that occurs before it in the document.\nAn anchor is written &name on the node it names, and an alias can only\nname an anchor defined earlier."
+                "yaml_undefined_alias": "\nThe alias {src} names no anchor that occurs before it in the document.\nAn anchor is written &name on the node it names, and an alias can only\nname an anchor defined earlier.",
+                "yaml_recursive_alias": "\nThe alias {src} names the anchor of a node it is inside, so the node\nwould hold itself. This parser gives a tree, which cannot. Anchor the\npart that repeats, and name that from outside it.",
+                "yaml_tab_indent": "\nA tab stands in this line's indentation, before a mapping key or a\nsequence entry. YAML indents block structure with spaces alone, so the\nline's depth cannot be read. Indent the line with spaces."
             }
         }
     })
@@ -1781,7 +2053,8 @@ pub fn plugin() -> Plugin {
             },
             Some(Value::Bool(true))
         );
-        yaml(parser, &YamlOptions { meta })
+        let schema = schema_option(options)?;
+        yaml(parser, &YamlOptions { meta, schema })
     })
     .with_defaults(YamlOptions::default().to_value())
 }
@@ -1790,7 +2063,7 @@ pub fn plugin() -> Plugin {
 ///
 /// ```
 /// fn main() -> Result<(), Box<dyn std::error::Error>> {
-///     let parser = tabnas_yaml::make_with(tabnas_yaml::YamlOptions { meta: true });
+///     let parser = tabnas_yaml::make_with(tabnas_yaml::YamlOptions { meta: true, ..Default::default() });
 ///     let value = parser.parse("---\na: 1\n...")?;
 ///     assert_eq!(
 ///         value.to_string(),

@@ -52,12 +52,12 @@ pub(crate) fn yaml_text(
     let touched = Cell::new(false);
     let ready = {
         let src = kept.src(lexer.source(), &touched);
-        let (row, column) = crate::lex::virtual_point_for(src, &point, context);
+        let (row, column) = src.row_col(start);
         check(src, (start, row, column), context).map(|act| ready(src, &point, act))
     };
     let windowed = kept.windowed();
     kept.store(context);
-    let token = ready.and_then(|ready| apply(lexer, context, ready));
+    let token = ready.and_then(|ready| apply(lexer, ready));
     if windowed && touched.get() {
         // Past the window's end, as the engine's own matchers ask.
         lexer.advance_chars(usize::MAX);
@@ -107,7 +107,7 @@ fn check(src: Src<'_>, cursor: (usize, usize, usize), context: &mut Context) -> 
     // the number. Stand in for it here, in the position it would have
     // run.
     if state::flag(context, state::MOVED) {
-        if let Some(act) = number_run(src, fwd, cursor) {
+        if let Some(act) = number_run(src, fwd, cursor, crate::core_schema(context)) {
             return Some(act);
         }
     }
@@ -145,7 +145,12 @@ fn engine_number() -> &'static Regex {
 /// separators and applies the unary plus, and where that is `NaN` on a
 /// signed base-prefixed form, which `Number` does not accept, it
 /// converts the unsigned rest and applies the sign itself.
-fn number_run(src: Src<'_>, fwd: Src<'_>, cursor: (usize, usize, usize)) -> Option<Act> {
+fn number_run(
+    src: Src<'_>,
+    fwd: Src<'_>,
+    cursor: (usize, usize, usize),
+    core: bool,
+) -> Option<Act> {
     let head = at(fwd, 0);
     let numeric = head == i32::from(b'-')
         || head == i32::from(b'+')
@@ -172,6 +177,11 @@ fn number_run(src: Src<'_>, fwd: Src<'_>, cursor: (usize, usize, usize)) -> Opti
     }
     let run = fwd.slice(0, end);
     if !engine_number().is_match(run) {
+        return None;
+    }
+    // Under the core schema the matcher sends every other run to the
+    // plain-scalar handler, which reads it as a string.
+    if core && crate::core_number(run).is_none() {
         return None;
     }
     let stripped: String = run.chars().filter(|character| *character != '_').collect();
@@ -393,6 +403,13 @@ fn block_scalar(src: Src<'_>, fwd: Src<'_>, cursor: (usize, usize, usize)) -> Op
             line_indent += 1;
         }
         let after = pos + line_indent;
+        // Indentation the source ends in is not a line: no line break ends
+        // it, so it is nothing a keep indicator keeps. Indentation longer
+        // than the block's is a line of the spaces past it.
+        if !fwd.has(after) && line_indent <= block_indent {
+            pos = after;
+            break;
+        }
         if !fwd.has(after) || line_end(at(fwd, after)) {
             // A blank line keeps whatever sits past the block indent.
             if line_indent > block_indent {
@@ -495,12 +512,24 @@ fn block_scalar(src: Src<'_>, fwd: Src<'_>, cursor: (usize, usize, usize)) -> Op
 fn fold_lines(lines: &[String]) -> String {
     let mut result = String::new();
     let mut previous_normal = false;
+    // The last line written was more indented, and its line break is not
+    // written yet. It is a line break in the value, never folded, but it
+    // is written when the next line is, so that a more-indented line that
+    // ends the scalar leaves the value without one, as a normal line does:
+    // chomping then adds the one line break both end with.
+    let mut previous_more = false;
     let mut pending_empty = 0usize;
     for line in lines {
         let more_indented = line.starts_with(' ') || line.starts_with('\t');
         if line.is_empty() {
             pending_empty += 1;
-        } else if more_indented {
+            continue;
+        }
+        if previous_more {
+            result.push('\n');
+            previous_more = false;
+        }
+        if more_indented {
             if previous_normal && !result.is_empty() {
                 result.push('\n');
             }
@@ -512,8 +541,8 @@ fn fold_lines(lines: &[String]) -> String {
                 result.push('\n');
             }
             result.push_str(line);
-            result.push('\n');
             previous_normal = false;
+            previous_more = true;
         } else {
             if pending_empty > 0 {
                 if previous_normal && !result.is_empty() {
@@ -545,15 +574,24 @@ fn fold_lines(lines: &[String]) -> String {
 // Plain scalars
 // ---------------------------------------------------------------------
 
-/// A YAML plain scalar, to the end of the line, with the continuation
-/// lines a multi-line plain scalar folds in.
+/// The plain scalar that starts at source position `at`: its text, with
+/// its lines folded as YAML folds a plain scalar's, how many bytes it
+/// takes, and how many line breaks are among them. It ends at a `: `, at a
+/// ` #`, in a flow collection at `,` `]` `}`, or before a line that does
+/// not continue it. Mirrors the canonical `plainScalarAt`: the text check
+/// reads every plain scalar through it, and the number-led branch of the
+/// matcher asks it whether a scalar that starts as a number runs on to the
+/// next line.
+pub(crate) struct Plain {
+    pub(crate) text: String,
+    pub(crate) consumed: usize,
+    pub(crate) rows: usize,
+}
+
 #[allow(clippy::too_many_lines)]
-pub(crate) fn plain_scalar(
-    src: Src<'_>,
-    fwd: Src<'_>,
-    cursor: (usize, usize, usize),
-    context: &mut Context,
-) -> Act {
+pub(crate) fn plain_scalar_at(src: Src<'_>, at_pos: usize, context: &mut Context) -> Plain {
+    let fwd = src.from(src.clamp(at_pos));
+    let cursor = (at_pos, 0, 0);
     let in_flow = state::flow_depth_at(context, src, cursor.0) > 0;
 
     let line_start = crate::lex::line_start_of(src, cursor.0);
@@ -579,8 +617,32 @@ pub(crate) fn plain_scalar(
         }
     }
 
+    // A sequence entry's scalar (`- text`): the column of the `-` it
+    // follows, the nearest when several lead the line (`- - text`).
+    let mut entry_in: Option<usize> = None;
+    {
+        let mut index = cursor.0 as isize - 1;
+        while index >= line_start as isize && blank(at(src, index as usize)) {
+            index -= 1;
+        }
+        if index >= line_start as isize
+            && index < cursor.0 as isize - 1
+            && is(src, index as usize, b'-')
+            && (index == line_start as isize || blank(at(src, index as usize - 1)))
+        {
+            entry_in = Some(src.slice(line_start, index as usize).chars().count());
+        }
+    }
+
+    // The minimum indent for continuation lines. For a mapping's value,
+    // past the colon's line's indent. For a sequence entry's scalar, past
+    // its `-`, so that a line at the sequence's own indent, or an
+    // enclosing one's, is the next entry and never more of this scalar
+    // (`- - x` then `- - y`). For a scalar by itself, the current line's.
     let minimum_indent = if is_map_value {
         current_line_indent + 1
+    } else if let Some(entry) = entry_in {
+        entry + 1
     } else {
         current_line_indent
     };
@@ -716,17 +778,45 @@ pub(crate) fn plain_scalar(
         break;
     }
 
-    let text = trim_end(&text).to_string();
+    Plain {
+        text: trim_end(&text).to_string(),
+        consumed: total_consumed,
+        rows,
+    }
+}
+
+/// A YAML plain scalar, to the end of the line, with the continuation
+/// lines a multi-line plain scalar folds in, as its token: a value of the
+/// schema, a number, or text.
+pub(crate) fn plain_scalar(
+    src: Src<'_>,
+    fwd: Src<'_>,
+    cursor: (usize, usize, usize),
+    context: &mut Context,
+) -> Act {
+    let Plain {
+        text,
+        consumed: total_consumed,
+        rows,
+    } = plain_scalar_at(src, cursor.0, context);
     if text.is_empty() {
         return Act::still(cursor);
     }
+    let core = crate::core_schema(context);
 
-    if let Some(value) = crate::yaml_keyword(&text) {
+    if let Some(value) = crate::yaml_keyword(&text, core) {
         let next = advance_cols(src, cursor, text.len());
         return Act::moved(next, Some(Tok::new("#VL", value, text, cursor)));
     }
 
-    if let Some(number) = crate::js_to_number(&text) {
+    // A number: under the core schema one of its number forms, and
+    // otherwise whatever JavaScript reads as one.
+    let number = if core {
+        crate::core_number(&text)
+    } else {
+        crate::js_to_number(&text)
+    };
+    if let Some(number) = number {
         if !number.is_nan() {
             let next = advance_cols(src, cursor, text.len());
             return Act::moved(
@@ -814,6 +904,87 @@ pub(crate) fn type_tag(
         None | Some(Value::Undefined)
     );
 
+    // A tag that ends its line. Its node is the next line's when that line
+    // is indented past this one, or, for a tag that stands first on its
+    // line, at least as far: the value below a key, a sequence entry's, a
+    // document's root. Otherwise the tagged node is empty, and the line
+    // break stays for the indent token: `a: !!str` then `b: 1` is two
+    // members. The line break is one or two characters (`\r\n`), and a tag
+    // that ends the source has no next line: its node is empty too.
+    let mut next_plain: Option<Plain> = None;
+    let mut tag_newline = value_start;
+    if is(fwd, tag_newline, b'\r') {
+        tag_newline += 1;
+    }
+    if is(fwd, tag_newline, b'\n') {
+        tag_newline += 1;
+    }
+    if tag_newline > value_start && fwd.has(tag_newline) {
+        let mut next_in = 0;
+        while is(fwd, tag_newline + next_in, b' ') {
+            next_in += 1;
+        }
+        let next_char = at(fwd, tag_newline + next_in);
+        let blank_next = next_char < 0
+            || line_end(next_char)
+            || next_char == i32::from(b'#')
+            || next_char == i32::from(b'\t');
+        let here = cursor.0;
+        let line_start = crate::lex::line_start_of(src, here);
+        let mut line_in = 0;
+        while line_start + line_in < here && is(src, line_start + line_in, b' ') {
+            line_in += 1;
+        }
+        // The tag stands first on its line when only its line's
+        // indentation, a document marker (`--- `) and its node's other
+        // properties come before it.
+        let mut q = line_start + line_in;
+        if line_in == 0
+            && is(src, q, b'-')
+            && is(src, q + 1, b'-')
+            && is(src, q + 2, b'-')
+            && blank(at(src, q + 3))
+        {
+            q += 3;
+            while q < here && blank(at(src, q)) {
+                q += 1;
+            }
+        }
+        while q < here && (is(src, q, b'&') || is(src, q, b'!')) {
+            while q < here && !blank(at(src, q)) {
+                q += 1;
+            }
+            while q < here && blank(at(src, q)) {
+                q += 1;
+            }
+        }
+        let first_on_line = q == here;
+        let deep_enough = if first_on_line {
+            next_in >= line_in
+        } else {
+            next_in > line_in
+        };
+        if blank_next || deep_enough {
+            let scalar_next = !blank_next
+                && !b"[{&!*|>".iter().any(|&c| next_char == i32::from(c))
+                && !crate::lex::block_start_at(src, here + tag_newline + next_in);
+            if !scalar_next {
+                // A collection, more properties, or nothing yet: skip the
+                // tag alone, and let the next pass read the line break as
+                // the indent it is, and then the value below it.
+                return Ok((cursor.0 + value_start, cursor.1, cursor.2));
+            }
+            // A scalar on the next line is the tag's value: a quoted one is
+            // read below as one on the tag's own line is, and a plain one
+            // whole, with the lines that continue it.
+            value_start = tag_newline + next_in;
+            value_end = value_start;
+            if next_char != i32::from(b'"') && next_char != i32::from(b'\'') {
+                next_plain = Some(plain_scalar_at(src, cursor.0 + value_start, context));
+            }
+        }
+    }
+
     // A quoted value.
     if is(fwd, value_start, b'"') || is(fwd, value_start, b'\'') {
         let quote = at(fwd, value_start);
@@ -847,22 +1018,10 @@ pub(crate) fn type_tag(
         )));
     }
 
-    // The value is on the next line: consume the tag and look again.
-    if line_end(at(fwd, value_start)) && fwd.has(value_start + 1) {
-        let mut newline = value_start;
-        if is(fwd, newline, b'\r') {
-            newline += 1;
-        }
-        if is(fwd, newline, b'\n') {
-            newline += 1;
-        }
-        return Ok((cursor.0 + newline, cursor.1 + 1, 0));
-    }
-
     // An unquoted value, to `: `, ` #`, the line end or a flow indicator.
     // A `#` straight after the tag's space starts a comment, so the value
     // is empty (`!!str #c` is "").
-    while fwd.has(value_end) {
+    while next_plain.is_none() && fwd.has(value_end) {
         let byte = at(fwd, value_end);
         if value_end == value_start
             && byte == i32::from(b'#')
@@ -893,7 +1052,11 @@ pub(crate) fn type_tag(
         }
         value_end += 1;
     }
-    let raw = trim_end(fwd.slice(value_start, value_end)).to_string();
+    let mut raw = trim_end(fwd.slice(value_start, value_end)).to_string();
+    if let Some(plain) = next_plain {
+        raw = plain.text;
+        value_end = value_start + plain.consumed;
+    }
     let value = convert_tag(&tag, &raw, redefined, false);
     if !anchor_name.is_empty() {
         state::map_set_in_cut(context, state::ANCHORS, anchor_name, value.clone());
@@ -950,7 +1113,7 @@ fn tag_int(raw: &str) -> f64 {
 /// Hex or octal digits as the nearest `f64`, ties to even, as
 /// JavaScript's `parseInt` reads them: exact however many digits there
 /// are, and infinite past the largest finite value.
-fn radix_to_f64(digits: &str, radix: u32) -> f64 {
+pub(crate) fn radix_to_f64(digits: &str, radix: u32) -> f64 {
     let width = if radix == 16 { 4 } else { 3 };
     // The value's bits, most significant first, without leading zeros.
     let mut bits = Vec::with_capacity(digits.len() * width);

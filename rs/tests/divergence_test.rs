@@ -12,10 +12,6 @@
 // and that entry's second table, the window cut through an astral
 // character, in `escape_window_test.rs`.
 //
-// One entry has no Rust column to pin. "A tab-only tail at the end of
-// the source" is a GO divergence: this port gives the canonical answer,
-// the refusal included, so the row that can fail lives in
-// `go/divergence_test.go`.
 
 mod common;
 
@@ -89,24 +85,25 @@ fn nesting_past_the_depth_limit_is_refused() {
 /// character is one column here and in Go, and two in TypeScript.
 ///
 /// Inherited from the engine: see parser/DIVERGENCE.md, "Column
-/// positions for astral characters". Measured:
+/// positions for astral characters". Measured, with every column the one
+/// the token's offset gives:
 ///
 ///  input            TypeScript   Go   Rust
-///  `{a: <emoji>, ]`    10         9     9
+///  `{a: <emoji>, ]`     9         8     8
 #[test]
 fn an_astral_character_is_one_column() {
     let error = tabnas_yaml::make()
         .parse("{a: \u{1F600}, ]")
         .expect_err("the bracket does not close the brace");
     assert_eq!(
-        error.col, 9,
-        "TypeScript reports 10 because it counts UTF-16 code units"
+        error.col, 8,
+        "TypeScript reports 9 because it counts UTF-16 code units"
     );
     // The control: the same document with an ASCII value agrees exactly.
     let ascii = tabnas_yaml::make()
         .parse("{a: x, ]")
         .expect_err("the bracket does not close the brace");
-    assert_eq!(ascii.col, 9);
+    assert_eq!(ascii.col, 8);
 }
 
 /// **A tag whose value is a `%TAG` directive line: REPAIRED, kept as a
@@ -157,85 +154,119 @@ fn shared_refusals_report_the_canonical_place() {
     }
 }
 
-/// **A blank line of tabs at the end of the source can cost a token.**
+/// **A row after a carriage return by itself, on a number the engine
+/// cuts.**
 ///
-/// The same end-of-source guard, reached a different way. A line holding
-/// nothing but blanks, one of them a TAB, is skipped by both matchers:
-/// YAML counts it blank and the engine refuses a bare tab. The canonical
-/// then moves its point and returns no token, and the engine's own
-/// matchers take over at the end of the source. This port returns
-/// `Act::refuse`, and the explicit key never gets the null it owes.
+/// A token this plugin builds is placed by its offset. A number that
+/// follows a quoted scalar or a closed flow collection on its line is cut
+/// by the engine's own number matcher, at the engine's cursor, and that
+/// cursor counts a row at `\n` alone (`line.rowChars`), with no way for a
+/// matcher to place it. So where a document's line breaks are `\r` by
+/// itself and such a number is what the parse refuses, the diagnostic
+/// keeps the right offset and reports row 1, with the column counted from
+/// the source's start. TypeScript and Go assign the cursor's row and
+/// column from the offset, and report those.
 ///
-/// Making the guard refuse only when nothing was consumed was measured
-/// and is NOT the repair: it lets `a: !é` reach the engine with an
-/// `internal` error, which `untrusted_test.rs` catches.
+/// Measured, each refused as `unexpected` at the same offset:
 ///
-/// Measured 2026-09-21:
+///  input                  TypeScript and Go   Rust
+///  `a: 1\rb: "x" 3`       2:8                 1:13
+///  `a: 1\rb: [1] 3`       2:8                 1:13
+///  `a: 1\r\rb: 'x' 3`     3:8                 1:14
+///  `a: 1\nb: "x" 3`       2:8                 2:8
+///  `a: 1\r\nb: "x" 3`     2:8                 2:8
+///  `a: 1\rb: "x" y`       2:8                 2:8
+///  `a: 1\rb: [1, }`       2:8                 2:8
 ///
-///  input               TypeScript     Go             Rust
-///  `? k\n: <TAB>\n`    `{"k":null}`   `{"k":null}`   `ERROR:unexpected`
-///  `? k\n: <TAB>`      `{"k":null}`   `{"k":null}`   `ERROR:unexpected`
-///  `? k\n:   <TAB>\n`  `{"k":null}`   `{"k":null}`   `ERROR:unexpected`
-///  `? k\n:  \n`        `{"k":null}`   `{"k":null}`   `{"k":null}`
-///  `? k\n: <TAB>v\n`   `{"k":"v"}`    `{"k":"v"}`    `{"k":"v"}`
+/// The last four are the controls: the other two line breaks, and tokens
+/// this plugin cuts itself after the same carriage return.
 #[test]
-fn a_trailing_blank_line_of_tabs_costs_an_explicit_keys_value() {
+fn a_number_the_engine_cuts_after_a_lone_carriage_return_keeps_the_engines_row() {
     let parser = tabnas_yaml::make();
-    for src in ["? k\n: \t\n", "? k\n: \t", "? k\n:   \t\n"] {
-        let error = parser
-            .parse(src)
-            .expect_err("TypeScript and Go both accept this one");
+    for (src, pos, canonical, here) in [
+        ("a: 1\rb: \"x\" 3", 12, (2, 8), (1, 13)),
+        ("a: 1\rb: [1] 3", 12, (2, 8), (1, 13)),
+        ("a: 1\r\rb: 'x' 3", 13, (3, 8), (1, 14)),
+        ("a: 1\nb: \"x\" 3", 12, (2, 8), (2, 8)),
+        ("a: 1\r\nb: \"x\" 3", 13, (2, 8), (2, 8)),
+        ("a: 1\rb: \"x\" y", 12, (2, 8), (2, 8)),
+        ("a: 1\rb: [1, }", 12, (2, 8), (2, 8)),
+    ] {
+        let error = parser.parse(src).expect_err("every runtime refuses this");
         assert_eq!(error.code, "unexpected", "{src:?}");
+        assert_eq!(error.pos, pos, "{src:?}: the offset is the canonical one");
+        assert_eq!(
+            (error.row, error.col),
+            here,
+            "{src:?}: TypeScript and Go report {canonical:?}; if this now \
+             does too, delete the entry from ../../DIVERGENCE.md and the \
+             first three rows' Rust column here"
+        );
     }
+}
 
-    // The controls: the same shapes without the tab, and the same tab
-    // with a value after it, agree in all three runtimes. Without them
-    // the rows above would also pass on a port that refused every
-    // explicit key.
-    assert_eq!(
-        plain(&parser.parse("? k\n:  \n").expect("parses")),
-        j!({"k": null})
-    );
+/// **A blank line of tabs at the end of the source: REPAIRED, kept as a
+/// parity assertion.**
+///
+/// A line holding nothing but blanks, one of them a TAB, is skipped by
+/// both matchers. This port once refused at the end of the source after
+/// such a skip, and the explicit key never got the null it owes. A pass
+/// that steps over something with no token of its own and reaches the
+/// source's end now cuts the end token itself, in every runtime, so the
+/// rows agree. Measured, all three runtimes:
+///
+///  input               every runtime
+///  `? k\n: <TAB>\n`    `{"k":null}`
+///  `? k\n: <TAB>`       `{"k":null}`
+///  `? k\n:   <TAB>\n`  `{"k":null}`
+///  `? k\n:  \n`        `{"k":null}`
+///  `? k\n: <TAB>v\n`   `{"k":"v"}`
+#[test]
+fn a_trailing_blank_line_of_tabs_keeps_an_explicit_keys_value() {
+    let parser = tabnas_yaml::make();
+    for src in ["? k\n: \t\n", "? k\n: \t", "? k\n:   \t\n", "? k\n:  \n"] {
+        assert_eq!(
+            plain(&parser.parse(src).expect("parses")),
+            j!({"k": null}),
+            "{src:?}"
+        );
+    }
     assert_eq!(
         plain(&parser.parse("? k\n: \tv\n").expect("parses")),
         j!({"k": "v"})
     );
     assert_eq!(
         plain(&parser.parse("? k\n: \t\nz: 1\n").expect("parses")),
-        j!({"k": {"z": 1}})
+        j!({"k": null, "z": 1})
     );
 }
 
-/// **A flow collection or a quoted scalar at column 0 after a line
-/// break is refused**, in every runtime.
+/// **A flow collection at column 0 after a line break parses**, in every
+/// runtime.
 ///
-/// Not a divergence: a shape that looks like one, kept here because it
-/// is surprising and because a port that "fixed" it would diverge. The
-/// canonical matcher skips the indent token before such a character, and
-/// the engine's remaining matchers were chosen for the line break, so the
-/// bracket is unclaimed. A quoted scalar is fine, because this plugin's
-/// own matcher lexes it.
+/// It was refused once: the canonical matcher skipped the indent token
+/// before such a character, and the engine's remaining matchers, chosen
+/// for the line break, left the bracket unclaimed. The line break handler
+/// now gives it its indent token, as it gives a key's, and JSON text after
+/// a blank or a comment first line is read. A quoted scalar that is not a
+/// key still has its indent skipped, and its own matcher lexes it.
 #[test]
-fn a_flow_collection_at_column_zero_after_a_line_break_is_refused() {
+fn a_flow_collection_at_column_zero_after_a_line_break_parses() {
     let parser = tabnas_yaml::make();
-    for src in ["# c\n{a: 1}", "   \n[1, 2]", "\n{a: 1}"] {
-        let error = parser.parse(src).expect_err("every runtime refuses this");
-        assert_eq!(error.code, "unexpected", "{src:?}");
+    for (src, want) in [
+        ("# c\n{a: 1}", j!({"a": 1})),
+        ("   \n[1, 2]", j!([1, 2])),
+        ("\n{a: 1}", j!({"a": 1})),
+        ("   \n\"x\"", j!("x")),
+        ("{a: 1}", j!({"a": 1})),
+    ] {
+        assert_eq!(plain(&parser.parse(src).expect("parses")), want, "{src:?}");
     }
-    // The quoted forms do parse, which is what makes the above a
-    // property of the matcher chain rather than of column 0.
-    assert_eq!(plain(&parser.parse("   \n\"x\"").expect("parses")), j!("x"));
-    // A flow collection on the FIRST line is fine, so the refusal is
-    // about what the lexer call dispatched on and not about brackets.
-    assert_eq!(
-        plain(&parser.parse("{a: 1}").expect("parses")),
-        j!({"a": 1})
-    );
-    // The position is the canonical one too, quirk included: the
-    // canonical matcher sets the column to zero before the marker it
-    // skipped, and this port carries that through.
-    let error = parser.parse("# c\n{a: 1}").expect_err("refused");
-    assert_eq!((error.row, error.col), (2, 0));
+    // Where there is nothing it can be the value of, it is refused, at the
+    // place its offset gives.
+    let error = parser.parse("a: 1\n{b: 2}").expect_err("refused");
+    assert_eq!(error.code, "unexpected");
+    assert_eq!((error.row, error.col), (2, 1));
 }
 
 /// **An unterminated typed tag folds a split astral character** to the

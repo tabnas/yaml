@@ -26,7 +26,10 @@ fn a_derived_instance_keeps_the_grammar() {
 
 #[test]
 fn a_derived_instance_keeps_the_plugin_options() {
-    let parent = tabnas_yaml::make_with(YamlOptions { meta: true });
+    let parent = tabnas_yaml::make_with(YamlOptions {
+        meta: true,
+        ..Default::default()
+    });
     let child = parent.derive(|_| {}).unwrap();
     assert_eq!(
         child.parse("---\na: 1\n...").unwrap().to_string(),

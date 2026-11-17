@@ -69,12 +69,6 @@ pub(crate) const FLOW_UPTO: &str = "yamlFlowUpTo";
 pub(crate) const FLOW_SQ: &str = "yamlFlowSingle";
 pub(crate) const FLOW_DQ: &str = "yamlFlowDouble";
 
-/// The virtual cursor: the row, the column, and the byte offset they
-/// were computed for. See [`crate::lex`] for why this port keeps its own.
-pub(crate) const V_ROW: &str = "yamlVirtualRow";
-pub(crate) const V_COL: &str = "yamlVirtualCol";
-pub(crate) const V_POS: &str = "yamlVirtualPos";
-
 /// Set when the YAML matcher moved the cursor in this lexer call and
 /// produced no token. See [`crate::text::check`].
 pub(crate) const MOVED: &str = "yamlMoved";
@@ -224,6 +218,32 @@ pub(crate) fn undo(context: &mut Context) {
     }
 }
 
+/// `openAnchors`: the anchors whose node is open, claimed by a val that
+/// has not closed yet, each with how many such vals hold it. An alias to
+/// one of them is inside the node it names (`&a [*a]`), a node that would
+/// hold itself. [`ANCHORS`] records a node only when it closes, so the
+/// alias once read as nothing.
+pub(crate) const OPEN_ANCHORS: &str = "yamlOpenAnchors";
+
+/// Whether the node of the anchor `name` is open.
+pub(crate) fn anchor_open(context: &Context, name: &str) -> bool {
+    matches!(map_get(context, OPEN_ANCHORS, name), Some(Value::Number(n)) if n > 0.0)
+}
+
+/// One more val holds the anchor `name` open (`by` 1), or one fewer (-1).
+pub(crate) fn hold_anchor(context: &mut Context, name: &str, by: f64) {
+    let now = match map_get(context, OPEN_ANCHORS, name) {
+        Some(Value::Number(n)) => n,
+        _ => 0.0,
+    };
+    let next = now + by;
+    if next > 0.0 {
+        map_set(context, OPEN_ANCHORS, name.to_string(), Value::Number(next));
+    } else {
+        map_take(context, OPEN_ANCHORS, name);
+    }
+}
+
 /// Has an anchor named `name` occurred before this point of the parse?
 pub(crate) fn anchor_declared(context: &Context, name: &str) -> bool {
     matches!(context.u.get(DECLARED_ANCHORS), Some(Value::Object(map)) if map.contains_key(name))
@@ -306,6 +326,7 @@ pub(crate) fn initialise(context: &mut Context) {
     set_flag(context, INIT, true);
     map_put(context, ANCHORS, IndexMap::new());
     map_put(context, DECLARED_ANCHORS, IndexMap::new());
+    map_put(context, OPEN_ANCHORS, IndexMap::new());
     map_put(context, TAG_HANDLES, IndexMap::new());
     context
         .u
@@ -518,7 +539,7 @@ fn starts_node(src: Src<'_>, index: usize) -> bool {
 /// From `index` inside a block-context plain scalar, the offset where it
 /// can end: the next line break, a `:` followed by whitespace or the end,
 /// or a `#` after whitespace. Mirrors the canonical `plainScalarRest`.
-fn plain_scalar_rest(src: Src<'_>, index: usize) -> usize {
+pub(crate) fn plain_scalar_rest(src: Src<'_>, index: usize) -> usize {
     let mut j = index + 1;
     while src.has(j) {
         match src.at(j) as u8 {

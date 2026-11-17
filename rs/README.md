@@ -71,7 +71,7 @@ started explicitly with `---`, and whether it ended explicitly with
 use tabnas_yaml::{make_with, YamlOptions};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let parser = make_with(YamlOptions { meta: true });
+    let parser = make_with(YamlOptions { meta: true, ..Default::default() });
     let value = parser.parse("%YAML 1.2\n---\na: 1\n...")?;
     assert_eq!(
         value.to_string(),
@@ -145,8 +145,8 @@ runtimes:
 | Suite bucket | Cases | Result |
 |---|---|---|
 | Valid parse (the case has `in.json`) | 279 | 279 pass, compared strictly across every document in the stream |
-| Expected error (the case has `error`) | 94 | 24 rejected; the other 70 are accepted and listed |
-| No expected output | 29 | 8 parse; the other 21 are rejected and listed |
+| Expected error (the case has `error`) | 94 | 28 rejected; the other 66 are accepted and listed |
+| No expected output | 29 | 9 parse; the other 20 are rejected and listed |
 | **Total** | **402** | |
 
 All 402 are asserted, with no skip list. The accepted-but-invalid cases
@@ -210,8 +210,9 @@ them written up with a measured table in
 [`../DIVERGENCE.md`](../DIVERGENCE.md):
 
 - **Configuration is a typed struct, not a plugin option bag.**
-  `YamlOptions { meta }` is the whole surface, and `make_with` takes it
-  by value. The callable facade TypeScript exposes has no Rust
+  `YamlOptions { meta, schema }` is the whole surface, with
+  `Some(Schema::Core)` for the core schema, and `make_with` takes it by
+  value. The callable facade TypeScript exposes has no Rust
   counterpart.
 - **The translation parts are this port's alone for now.**
   `render_text()` and `manifest_text()` have no TypeScript or Go
@@ -230,11 +231,14 @@ them written up with a measured table in
   value with the call stack to display, convert or drop it, so an
   unbounded document ends the caller's process rather than returning an
   error. TypeScript and Go have no limit.
-- **Two pathological documents are refused in a different place**, with
-  the same code as TypeScript and Go give them. It comes from the order
-  the engine's lexer offers a moved cursor to its remaining matchers. No
-  document's **value** differs for that reason any more. The register
-  names the inputs.
+- **A refusal after a carriage return by itself can report the engine's
+  row.** A token this plugin builds stands where its offset says. A
+  number after a quoted scalar or a closed flow collection is cut by the
+  engine at its own cursor, which counts a row at `\n` alone. Where a
+  document's line breaks are `\r` by itself and that number is what the
+  parse refuses, the diagnostic has the code and the offset TypeScript
+  and Go give, and the engine's row and column. No document's **value**
+  differs for that reason. The register names the inputs.
 - **A `\u` escape naming an unpaired UTF-16 surrogate becomes the
   replacement character.** A Rust string holds Unicode scalars and a lone
   surrogate is not one, where a TypeScript string is UTF-16 and keeps it.
