@@ -27,3 +27,12 @@ a: 1\n---\tb: 2\n	[{"a":1},{"b":2}]
 - |\n  x\n...z\n	[["x\n","...z"]]
 |\n x\n... z\n	["x\n","z"]
 |\n x\n...\n	"x\n"
+a: >+\n  x\n   \nb: 1	{"a":"x\n \n","b":1}	
+a: >+\n  x\n   y\n	{"a":"x\n y\n"}	
+a: >+\n  x\n   y\n\n	{"a":"x\n y\n\n"}	
+a: >\n  x\n   y\n	{"a":"x\n y\n"}	
+a: >-\n  x\n   y\n	{"a":"x\n y"}	
+a: >+\n   x\n   y\n	{"a":"x y\n"}	
+a: >+\n  x\n   y\n  z\n	{"a":"x\n y\nz\n"}	
+a: >+\n  x\n   y\n\n   z\n\n	{"a":"x\n y\n\n z\n\n"}	
+a: >+\n   y\n	{"a":"y\n"}	

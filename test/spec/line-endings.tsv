@@ -19,3 +19,18 @@ a:\r\n  []	{"a":[]}
 ﻿|\n  x\n	"x\n"
 ﻿a: 1\n---\nb: 2	[{"a":1},{"b":2}]
 ﻿	null
+a: 1\rb: 2\r	{"a":1,"b":2}	
+a:\r  b: 1\r  c: 2	{"a":{"b":1,"c":2}}	
+a:\r  - x\r  - y\rb: 1	{"a":["x","y"],"b":1}	
+- a\r- b\r	["a","b"]	
+a: |\r  x\r  y\rb: 1	{"a":"x\ny\n","b":1}	
+a: >\r  x\r  y\r\r  z\r	{"a":"x y\nz\n"}	
+# c\ra: 1\r# d\rb: 2	{"a":1,"b":2}	
+a: "x\r  y"\rb: 'p\r\r  q'	{"a":"x y","b":"p\nq"}	
+a: x\r  y\rb: 1	{"a":"x y","b":1}	
+[1,\r 2]\r	[1,2]	
+---\ra: 1\r...\r---\rb: 2\r	[{"a":1},{"b":2}]	
+!!map\ra: 1\r	{"a":1}	
+a: 1\r\rb: 2\r\n\rc: 3	{"a":1,"b":2,"c":3}	
+- !!str\r\n	[""]	
+- !!str "a"\r\n- !!str\r\n	["a",""]	

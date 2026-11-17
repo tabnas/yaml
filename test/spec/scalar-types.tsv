@@ -24,3 +24,7 @@ a: off	{"a":false}
 a: 2024-01-15	{"a":"2024-01-15"}
 a: 2024-01-15T10:30:00Z	{"a":"2024-01-15T10:30:00Z"}
 a: +.inf\nb: [+.Inf, +.INF]	{"a":"@@Infinity","b":["@@Infinity","@@Infinity"]}	
+a: toString\nb: constructor\nc: hasOwnProperty\nd: valueOf\ne: __proto__	{"a":"toString","b":"constructor","c":"hasOwnProperty","d":"valueOf","e":"__proto__"}	
+- toString\n- constructor\n- __proto__	["toString","constructor","__proto__"]	
+[toString, constructor, valueOf]	["toString","constructor","valueOf"]	
+toString: 1\nconstructor: 2	{"toString":1,"constructor":2}	

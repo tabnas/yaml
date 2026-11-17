@@ -743,6 +743,21 @@ c:
       assert.deepEqual(y(`a:\n  - 1\n  - 2\nb: 3`), { a: [1, 2], b: 3 })
     })
 
+    test('an-unpaired-surrogate-escape-is-its-code-unit', () => {
+      // Half of a surrogate pair by itself, in a double quoted scalar: a
+      // JavaScript string holds the code unit, so that is what it reads
+      // as, as a value and as a key, implicit or explicit. No row of
+      // test/spec can say so, since the other runtimes' strings cannot
+      // hold one and read U+FFFD (DIVERGENCE.md, "UTF-16 escapes in a
+      // double quoted scalar"). The explicit key once kept its quotes.
+      const half = String.fromCharCode(0xd83d)
+      eq(y('a: "\\uD83D"'), { a: half })
+      assert.deepEqual(Object.keys(y('"\\uD83D": 1')), [half])
+      assert.deepEqual(Object.keys(y('? "\\uD83D"\n: 1')), [half])
+      assert.deepEqual(Object.keys(y('? "a\\uDC00b"\n: 1')), ['a' + String.fromCharCode(0xdc00) + 'b'])
+      assert.deepEqual(Object.keys(y('{? "\\uD83D" : 1}')), [half])
+    })
+
     test('tab-indentation-rejected', () => {
       // YAML forbids a tab as indentation, so a tab in a line's leading
       // blanks before a mapping key or a sequence entry is refused, with a

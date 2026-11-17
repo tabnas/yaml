@@ -58,3 +58,13 @@ a: &x [1]\nb: *x\nc: &x {p: 2}\nd: *x	{"a":[1],"b":[1],"c":{"p":2},"d":{"p":2}}
 a: &x {p: 1}\nb: &y *x\nc: [*y, *x]	{"a":{"p":1},"b":{"p":1},"c":[{"p":1},{"p":1}]}
 a: &x [{p: &y {q: [1]}}]\nb: *x\nc: {d: *y}	{"a":[{"p":{"q":[1]}}],"b":[{"p":{"q":[1]}}],"c":{"d":{"q":[1]}}}
 a: &m {__proto__: 1}\nb: *m	{"a":{"__proto__":1},"b":{"__proto__":1}}
+&a [*a]	ERROR:yaml_recursive_alias	
+a: &x {b: *x}	ERROR:yaml_recursive_alias	
+a: &x\n  - *x	ERROR:yaml_recursive_alias	
+&x\n  a: 1\n  b:\n    *x	ERROR:yaml_recursive_alias	
+&x {*x : 1}	ERROR:yaml_recursive_alias	
+&x\n*x : 1	ERROR:yaml_recursive_alias	
+- &x\n- *x	[null,null]	
+a: &x\nb: *x	{"a":null,"b":null}	
+a: &x {b: &y 1, c: *y}\nd: *x	{"a":{"b":1,"c":1},"d":{"b":1,"c":1}}	
+- &a\n  - &b 1\n  - *b\n- *a	[[1,1],[1,1]]	

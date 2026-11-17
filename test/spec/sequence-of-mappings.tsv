@@ -24,3 +24,8 @@ x:\n  -   a: 1\n      b: 2	{"x":[{"a":1,"b":2}]}
 # Text ahead of an entry that is not ASCII: each runtime counts the
 # entry's column from its own string offsets.
 k: é😀\nl:\n  - a:\n    b: 2	{"k":"é😀","l":[{"a":null,"b":2}]}
+a:\n- b: 1\n  v:\n- c: 2	{"a":[{"b":1,"v":null},{"c":2}]}	
+a:\n- v:\n- c: 2	{"a":[{"v":null},{"c":2}]}	
+a:\n- b:\n  - x\n- c: 2	{"a":[{"b":["x"]},{"c":2}]}	
+a:\n  - b: 1\n    v:\n  - c: 2\nd: 3	{"a":[{"b":1,"v":null},{"c":2}],"d":3}	
+- b: 1\n  v:\n- c: 2	[{"b":1,"v":null},{"c":2}]	

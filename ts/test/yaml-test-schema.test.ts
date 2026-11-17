@@ -79,9 +79,13 @@ function same(got: any, want: any): boolean {
 
 const yaml = new Tabnas().use(jsonic).use(Yaml)
 
-function read(src: string): { ok: boolean, got?: any, err?: string } {
+// The same parser under `schema: 'core'`, which reads a plain scalar as
+// the core schema says and no other way.
+const yamlCore = new Tabnas().use(jsonic).use(Yaml, { schema: 'core' })
+
+function read(src: string, tn: Tabnas = yaml): { ok: boolean, got?: any, err?: string } {
   try {
-    return { ok: true, got: yaml.parse(src) }
+    return { ok: true, got: tn.parse(src) }
   } catch (e: any) {
     return { ok: false, err: String(e?.code || e?.message || e) }
   }
@@ -120,4 +124,26 @@ describe('yaml-test-schema (core)', () => {
       }
     })
   }
+})
+
+
+// Under `schema: 'core'` the ledger does not apply: EVERY input reads as
+// the core schema says, the listed deviations included. That is what the
+// option means, so the corpus is its definition.
+describe('yaml-test-schema (core), under schema: core', () => {
+  for (const input of Object.keys(corpus)) {
+    const want = expected(corpus[input])
+    test(JSON.stringify(input), () => {
+      const r = read(input, yamlCore)
+      assert.ok(r.ok && same(r.got, want), JSON.stringify(input) + ': want ' +
+        String(want) + ' (' + typeof want + '), got ' +
+        (r.ok ? String(r.got) + ' (' + typeof r.got + ')' : 'error ' + r.err))
+    })
+  }
+
+  test('an unknown schema is refused', () => {
+    assert.throws(
+      () => new Tabnas().use(jsonic).use(Yaml, { schema: 'Core' as any }),
+      /unknown schema/)
+  })
 })
