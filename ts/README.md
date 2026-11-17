@@ -41,7 +41,8 @@ structure:
 
 - [Tutorial](doc/tutorial.md). Parse your first document, step by step.
 - [How-to guide](doc/guide.md). Focused task recipes (flow collections,
-  block scalars, anchors, multi-document streams, the `meta` option).
+  block scalars, anchors, multi-document streams, the `meta` option, the
+  core schema).
 - [Reference](doc/reference.md). The public API, every option, and the
   full list of accepted syntax.
 - [Concepts](doc/concepts.md). How the plugin extends the engine, and
