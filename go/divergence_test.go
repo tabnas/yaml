@@ -13,8 +13,7 @@ package tabnasyaml
 //
 // None of these rows can be a shared test/spec/*.tsv fixture. An
 // expected cell is UTF-8 text and the TypeScript answers here are lone
-// UTF-16 surrogates, which have no UTF-8 spelling; the last test is a
-// case the canonical REFUSES and this port accepts, and a fixture row
+// UTF-16 surrogates, which have no UTF-8 spelling, and a fixture row
 // carries one answer for all three runtimes.
 //
 // Measured on 2026-09-22: the TypeScript column by running
@@ -66,6 +65,11 @@ func TestAnUnpairedSurrogateEscapeFolds(t *testing.T) {
 		{`a: "\uD83D"`, "{\"a\":\"\ufffd\"}", "a lone high surrogate"},
 		{`a: "\uDE00"`, "{\"a\":\"\ufffd\"}", "a lone low surrogate"},
 		{`a: "\U0000D83D"`, "{\"a\":\"\ufffd\"}", "a lone high surrogate"},
+
+		// As a key, implicit or explicit: the explicit key once kept its
+		// quotes, where it now reads as the implicit one does.
+		{`"\uD83D": 1`, "{\"\ufffd\":1}", "the key U+D83D"},
+		{"? \"\\uD83D\"\n: 1", "{\"\ufffd\":1}", "the key U+D83D"},
 
 		// The controls: a pair is one astral character in both ports.
 		{`a: "\uD83D\uDE00"`, "{\"a\":\"\U0001F600\"}", "U+1F600"},
@@ -148,54 +152,5 @@ func TestAnUnterminatedTypedTagFoldsASplitAstralCharacter(t *testing.T) {
 			t.Errorf("%q = %s, want %s (TypeScript gives %s)",
 				row.src, got, row.want, row.ts)
 		}
-	}
-}
-
-// TestATabOnlyTailAtTheEndOfTheSourceIsAccepted pins "A tab-only tail at
-// the end of the source".
-//
-// The canonical's keyword and number branches advance by the TRIMMED
-// text, so a tab after such a value stays in the source; the matcher's
-// blank-line skip then consumes it, and the document is refused anyway,
-// at the end of the source. Which step refuses it is not isolated:
-// holding the row and the column still over that skip changes no row of
-// the table. This port has no such branch, the tail reaches jsonic's own
-// lexer, which reads a tab as a space, and the document ends.
-//
-// The controls are the rows both runtimes accept: the same tab with a
-// newline after it, which is a blank line everywhere, a trailing SPACE,
-// which enters no such branch, and a plain scalar, whose own handler has
-// consumed the tab before the branch is reached.
-func TestATabOnlyTailAtTheEndOfTheSourceIsAccepted(t *testing.T) {
-	for _, row := range []struct {
-		src  string
-		want string
-	}{
-		{"a: 1\t", `{"a":1}`},
-		{"a: true\t", `{"a":true}`},
-		{"a: null\t", `{"a":null}`},
-		{"a: [1]\t", `{"a":[1]}`},
-		{"- 1\t", `[1]`},
-		{"a: 1 \t", `{"a":1}`},
-
-		// The controls, which the canonical accepts too.
-		{"a: 1\t\nb: 2", `{"a":1,"b":2}`},
-		{"a: 1 ", `{"a":1}`},
-		{"a: x\t", `{"a":"x"}`},
-	} {
-		if got := parseJSON(t, row.src); got != row.want {
-			t.Errorf("%q = %s, want %s", row.src, got, row.want)
-		}
-	}
-
-	// The divergence itself: the canonical REFUSES the six rows above,
-	// and this port must keep answering them until the canonical is
-	// repaired. A control row failing is a plain regression; a first-group
-	// row failing means this port now refuses them too, and the entry in
-	// ../DIVERGENCE.md is the thing to delete.
-	if _, err := Parse("a: 1\t"); err != nil {
-		t.Fatalf("`a: 1<TAB>` is refused here now (%v), which is the "+
-			"canonical answer: delete \"A tab-only tail at the end of the "+
-			"source\" from ../DIVERGENCE.md and this test with it", err)
 	}
 }

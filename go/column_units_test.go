@@ -24,6 +24,12 @@ package tabnasyaml
 // Found by the fleet parity probe; the same defect was repaired in
 // tabnas/toml#51 and tabnas/xml#44.
 //
+// Columns are now set from a token's offset (yamlSource.place): how many
+// characters it stands past its line's start, from 1. Kept up token by
+// token, they drifted: every `: ` on a line put the columns after it one
+// too far, so each column below is one less than it was before that
+// repair, and each is checked against the diagnostic's own offset too.
+//
 // ts/test/column-units.test.ts asserts the same sixteen cases. Fifteen
 // of them agree exactly; the astral row is the recorded engine
 // divergence — TypeScript counts UTF-16 units (an astral character is
@@ -33,7 +39,9 @@ package tabnasyaml
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	jsonic "github.com/tabnas/jsonic/go"
 )
@@ -49,27 +57,27 @@ func TestErrorColumnsCountCharactersNotBytes(t *testing.T) {
 		// Controls: ASCII only, where bytes and characters coincide.
 		// Without them, "columns count characters" is also satisfied by
 		// never counting.
-		{"inline-ascii", "{a: xx, ]", 10, 10, 10},
+		{"inline-ascii", "{a: xx, ]", 9, 9, 10},
 		{"block-key-ascii", "a: 1\n]", 1, 1, 1},
 
 		// The plain-scalar path — where the bug actually lived, traced by
 		// instrumenting every CI site rather than guessed.
-		{"inline-latin1", "{a: é, ]", 9, 9, 10},
-		{"inline-bmp", "{a: €, ]", 9, 9, 11},
+		{"inline-latin1", "{a: é, ]", 8, 8, 10},
+		{"inline-bmp", "{a: €, ]", 8, 8, 11},
 
 		// A non-ASCII KEY, which reaches a different site again.
-		{"key-latin1", "{é: 1, ]", 9, 9, 10},
-		{"key-bmp", "{€€: 1, ]", 10, 10, 14},
+		{"key-latin1", "{é: 1, ]", 8, 8, 10},
+		{"key-bmp", "{€€: 1, ]", 9, 9, 14},
 
 		// Quoted scalars: their own two handlers, each with its own
 		// column arithmetic.
-		{"dq-latin1", `{a: "é", ]`, 11, 11, 12},
-		{"dq-bmp", `{a: "€€", ]`, 12, 12, 16},
-		{"sq-latin1", "{a: 'é', ]", 11, 11, 12},
+		{"dq-latin1", `{a: "é", ]`, 10, 10, 12},
+		{"dq-bmp", `{a: "€€", ]`, 11, 11, 16},
+		{"sq-latin1", "{a: 'é', ]", 10, 10, 12},
 
 		// Anchors and tags: two more handlers.
-		{"anchor-latin1", "{a: &x é, ]", 12, 12, 13},
-		{"tag-latin1", "{a: !!str é, ]", 15, 15, 16},
+		{"anchor-latin1", "{a: &x é, ]", 11, 11, 13},
+		{"tag-latin1", "{a: !!str é, ]", 14, 14, 16},
 
 		// The flow-collection newline skip. Not a unit error but a
 		// CONSTANT: this port set the column to 0 — not a valid 1-based
@@ -85,7 +93,7 @@ func TestErrorColumnsCountCharactersNotBytes(t *testing.T) {
 		// still differ. Before the repair it was off by three, so the
 		// real defect was hidden inside a difference the register
 		// already excused.
-		{"inline-astral", "{a: \U0001F600, ]", 9, 10, 12},
+		{"inline-astral", "{a: \U0001F600, ]", 8, 9, 12},
 	} {
 		j := jsonic.Make(jsonic.Options{})
 		if err := j.Use(Yaml, map[string]any{}); err != nil {
@@ -102,6 +110,7 @@ func TestErrorColumnsCountCharactersNotBytes(t *testing.T) {
 		}
 		var o struct {
 			Col int `json:"col"`
+			Pos int `json:"pos"`
 		}
 		if uErr := json.Unmarshal(b, &o); uErr != nil {
 			t.Fatalf("%s: unmarshal: %v", c.label, uErr)
@@ -112,6 +121,14 @@ func TestErrorColumnsCountCharactersNotBytes(t *testing.T) {
 				"want by the character's extra BYTES means a CI site is "+
 				"counting bytes again.",
 				c.label, c.src, o.Col, c.col, c.ts, c.before)
+		}
+		// And the column is the one the diagnostic's own offset gives, in
+		// characters (the diagnostic's pos counts characters too): so a row
+		// above cannot pin a drift.
+		chars := []rune(c.src)
+		line := strings.LastIndex(string(chars[:o.Pos]), "\n") + 1
+		if want := o.Pos - utf8.RuneCountInString(string(chars[:o.Pos])[:line]) + 1; o.Col != want {
+			t.Errorf("%s: %q col = %d, but its offset %d gives %d", c.label, c.src, o.Col, o.Pos, want)
 		}
 	}
 }

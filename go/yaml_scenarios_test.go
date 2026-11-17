@@ -182,14 +182,21 @@ func TestMultilineKey(t *testing.T) {
 
 // ===== INDENTATION EDGE CASES =====
 
-// TS: tab-indentation-not-rejected (KNOWN NON-CONFORMANCE) — YAML forbids a
-// tab as indentation, so this document should be REJECTED. It is not: the tab
-// is swallowed and `b` lands at the top level. Pinned as observed so the gap
-// is visible; the conformance dial for it is the yaml-test-suite must-fail
-// group (yaml_test_suite_test.go).
+// TS: tab-indentation-rejected — YAML forbids a tab as indentation, so a tab
+// in a line's leading blanks before a mapping key or a sequence entry is
+// refused, with a code of its own. It was once swallowed, and `b` landed at
+// the top level. A tab before a scalar, a flow collection or a comment is
+// white space, as YAML has it.
 func TestTabIndentationRejected(t *testing.T) {
-	expectEqual(t, y(t, "a:\n\tb: 1"),
-		map[string]any{"a": nil, "b": float64(1)})
+	for _, src := range []string{"a:\n\tb: 1", "a:\n  b: 1\n  \tc: 2", "a:\n\t- x", "\ta: 1", "---\n\ta: 1"} {
+		_, err := Parse(src)
+		if code := errCode(err); code != "yaml_tab_indent" {
+			t.Errorf("%q: refused with %q (%v), not yaml_tab_indent", src, code, err)
+		}
+	}
+	expectEqual(t, y(t, "a:\n \tb"), map[string]any{"a": "b"})
+	expectEqual(t, y(t, "\t{a: 1}"), map[string]any{"a": float64(1)})
+	expectEqual(t, y(t, "a: 1\n\t# c\nb: 2"), map[string]any{"a": float64(1), "b": float64(2)})
 }
 
 // TS: blank-lines-between-pairs

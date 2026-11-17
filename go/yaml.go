@@ -2,6 +2,7 @@ package tabnasyaml
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"math"
 	"math/big"
@@ -21,11 +22,16 @@ import (
 const VERSION = "0.5.32"
 
 // YamlOptions configures the YAML parser plugin.
-// Currently empty — reserved for future extension.
 type YamlOptions struct {
 	// When true, Parse returns a struct {Meta, Content} instead of bare
 	// content. Mirrors the TypeScript `meta` option.
 	Meta bool
+	// "core": a plain scalar resolves as the YAML 1.2 core schema says
+	// (YAML 1.2.2, 10.3.2) and no other way. Without it the plugin also
+	// reads the YAML 1.1 booleans (yes, no, on, off) and jsonic's number
+	// syntax (1_000, 0b11), as test/yaml-test-schema-deviations.tsv lists.
+	// Mirrors the TypeScript `schema` option.
+	Schema string
 }
 
 // DocMeta holds per-document metadata captured by the stream rule.
@@ -302,6 +308,40 @@ func plainScalarRest(y *yamlSource, i int) int {
 	return j
 }
 
+// blockStartAt reports whether block structure starts at source position
+// i, the first character after a line's leading blanks: a sequence entry
+// (`- `), an explicit key (`? `), or an implicit key, quoted or plain,
+// which is a scalar its line follows with `: `. A tab among those blanks
+// is then a tab in indentation, which YAML forbids (YAML 1.2.2, 6.1): the
+// line's depth cannot be read, and the key was once read as its parent's
+// sibling. A plain or quoted scalar, a flow collection and a comment may
+// follow a tab. Mirrors blockStartAt in src/yaml.ts.
+func blockStartAt(y *yamlSource, i int) bool {
+	if !y.has(i) {
+		return false
+	}
+	c := y.b(i)
+	if c == '\n' || c == '\r' || c == '#' {
+		return false
+	}
+	if c == '-' || c == '?' {
+		if !y.has(i+1) || isYamlSpaceByte(y.b(i+1)) {
+			return true
+		}
+	}
+	if c == '"' || c == '\'' {
+		return quotedKeyAt(y.fwdAt(i), 0)
+	}
+	switch c {
+	case '{', '}', '[', ']', ',':
+		return false
+	}
+	if c == ':' && (!y.has(i+1) || isYamlSpaceByte(y.b(i+1))) {
+		return true
+	}
+	return y.b(plainScalarRest(y, i)) == ':'
+}
+
 // blockScalarEnd returns, for a block scalar indicator (| or >, optional
 // chomping/indentation indicators, then only a comment) at source position
 // i, the position just past its content lines, or i when it is not one.
@@ -524,9 +564,13 @@ func unquoteWholeScalar(text string) string {
 					j += 6
 				}
 			}
-			if (cp >= 0xd800 && cp <= 0xdfff) || cp > 0x10ffff {
+			if cp > 0x10ffff {
 				return text
 			}
+			// Half of a surrogate pair by itself is what this runtime's
+			// double quoted scalar makes of it anywhere else (`"\ud800"`):
+			// U+FFFD, which WriteRune writes for a surrogate. It was once
+			// refused here, and the key was then read with its quotes.
 			b.WriteRune(rune(cp))
 		default:
 			b.WriteByte(c)
@@ -603,6 +647,9 @@ func MakeJsonic(opts ...YamlOptions) *tabnas.Tabnas {
 	})
 
 	pluginOpts := map[string]any{"meta": yo.Meta}
+	if yo.Schema != "" {
+		pluginOpts["schema"] = yo.Schema
+	}
 	j.Use(Yaml, pluginOpts)
 	// Read a reader a window at a time (admin ADR-30): the plugin's matcher
 	// and text check read the source through the window, reading on where
@@ -616,26 +663,81 @@ func MakeJsonic(opts ...YamlOptions) *tabnas.Tabnas {
 	return j
 }
 
-// yamlValueMap maps YAML value keywords to their Go values.
-var yamlValueMap = map[string]any{
+// yamlValueMapCore holds the plain scalars that are a value and not a
+// string under the YAML 1.2 core schema (YAML 1.2.2, 10.3.2).
+var yamlValueMapCore = map[string]any{
 	"true": true, "True": true, "TRUE": true,
 	"false": false, "False": false, "FALSE": false,
 	"null": nil, "Null": nil, "NULL": nil,
-	"~":   nil,
-	"yes": true, "Yes": true, "YES": true,
-	"no": false, "No": false, "NO": false,
-	"on": true, "On": true, "ON": true,
-	"off": false, "Off": false, "OFF": false,
+	"~":    nil,
 	".inf": math.Inf(1), ".Inf": math.Inf(1), ".INF": math.Inf(1),
 	"+.inf": math.Inf(1), "+.Inf": math.Inf(1), "+.INF": math.Inf(1),
 	"-.inf": math.Inf(-1), "-.Inf": math.Inf(-1), "-.INF": math.Inf(-1),
 	".nan": math.NaN(), ".NaN": math.NaN(), ".NAN": math.NaN(),
 }
 
-// isYamlValue checks if text is a YAML value keyword and returns the value.
-func isYamlValue(text string) (any, bool) {
+// yamlValueMap is the core schema's table and then the YAML 1.1 booleans,
+// which the plugin reads too unless the schema option is "core".
+var yamlValueMap = func() map[string]any {
+	m := make(map[string]any, len(yamlValueMapCore)+12)
+	for k, v := range yamlValueMapCore {
+		m[k] = v
+	}
+	for _, k := range []string{"yes", "Yes", "YES", "on", "On", "ON"} {
+		m[k] = true
+	}
+	for _, k := range []string{"no", "No", "NO", "off", "Off", "OFF"} {
+		m[k] = false
+	}
+	return m
+}()
+
+// isYamlValue checks if text is a YAML value keyword and returns the value:
+// under the core schema its keywords alone, and otherwise the YAML 1.1
+// booleans as well.
+func isYamlValue(text string, core bool) (any, bool) {
+	if core {
+		val, ok := yamlValueMapCore[text]
+		return val, ok
+	}
 	val, ok := yamlValueMap[text]
 	return val, ok
+}
+
+// The plain scalars the core schema reads as a number: a decimal integer,
+// an octal one (0o17), a hexadecimal one (0x1f), and a decimal float.
+// Every other text is a string under it, `0b11`, `1_000`, `0X1F`, `-0x30`
+// and `Infinity` among them. Mirrors CORE_DECIMAL, CORE_OCTAL and
+// CORE_HEX in src/yaml.ts.
+var (
+	coreDecimalRe = regexp.MustCompile(`^[-+]?(\.[0-9]+|[0-9]+(\.[0-9]*)?)([eE][-+]?[0-9]+)?$`)
+	coreOctalRe   = regexp.MustCompile(`^0o[0-7]+$`)
+	coreHexRe     = regexp.MustCompile(`^0x[0-9a-fA-F]+$`)
+)
+
+// coreNumber is the number the core schema reads text as, and false when
+// it reads a string. A decimal is `Number(text)`, which past the double's
+// range is an infinity; an octal or hexadecimal one is exact, then rounded
+// to the nearest double, as `parseInt` gives it.
+func coreNumber(text string) (float64, bool) {
+	if coreDecimalRe.MatchString(text) {
+		n, err := strconv.ParseFloat(text, 64)
+		if err != nil && !strings.Contains(err.Error(), "range") {
+			return 0, false
+		}
+		return n, true
+	}
+	base := 0
+	if coreOctalRe.MatchString(text) {
+		base = 8
+	} else if coreHexRe.MatchString(text) {
+		base = 16
+	} else {
+		return 0, false
+	}
+	n, _ := new(big.Int).SetString(text[2:], base)
+	v, _ := new(big.Float).SetInt(n).Float64()
+	return v, true
 }
 
 // parseYamlNumber is the canonical `+text`, which is `Number(text)`: the
@@ -1525,6 +1627,20 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 	if j.Decoration("yaml-installed") == true {
 		return nil
 	}
+
+	// The schema a plain scalar resolves by. A name this plugin does not
+	// know is refused, so that a misspelling cannot leave the default on.
+	core := false
+	if opts != nil {
+		if v, ok := opts["schema"]; ok && v != nil {
+			name, isStr := v.(string)
+			if !isStr || (name != "" && name != "core") {
+				return fmt.Errorf("yaml: unknown schema %s, expected \"core\"", jsonText(v))
+			}
+			core = name == "core"
+		}
+	}
+
 	j.Decorate("yaml-installed", true)
 
 	wantMeta := false
@@ -1566,6 +1682,12 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 	// cannot answer that: a value is recorded only when its node closes, so
 	// `&a [*a]` names an anchor that occurs before it but is not recorded yet.
 	declaredAnchors := make(map[string]bool)
+	// The anchors whose node is open: claimed by a val that has not closed
+	// yet, each with how many such vals hold it. An alias to one of them is
+	// inside the node it names (`&a [*a]`), and names a node that would
+	// hold itself. The anchors map records a node only when it closes, so
+	// the alias once read as nothing, a null where the document has a value.
+	openAnchors := make(map[string]int)
 	pendingExplicitCL := false
 	var pendingTokens []*tabnas.Token
 	tagHandles := make(map[string]string)
@@ -1610,7 +1732,19 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 	// ===== TextCheck: handles block scalars, !!tags, and plain scalars =====
 	// It runs in a cut the matcher began, so the source is read as the
 	// matcher set it up to be.
+	//
+	// A token this check cut: the cursor past it is placed by its offset,
+	// since the engine may cut the next token itself (the source's end)
+	// without coming back through the matcher.
+	var textCheckCut func(lex *tabnas.Lex) *tabnas.LexCheckResult
 	textCheck := func(lex *tabnas.Lex) *tabnas.LexCheckResult {
+		r := textCheckCut(lex)
+		if r != nil && r.Token != nil {
+			ys.place(lex.Cursor())
+		}
+		return r
+	}
+	textCheckCut = func(lex *tabnas.Lex) *tabnas.LexCheckResult {
 		pnt := lex.Cursor()
 		fwd := ys.fwd()
 		if !fwd.has(0) {
@@ -1629,7 +1763,7 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 			// falls through to plain-scalar handling, yielding {"a":"> x"}.
 			// Go must fall through too, or it rejects what TS accepts
 			// (yaml-test-suite S4GJ).
-			return handlePlainScalar(lex, pnt, ys, fwd, flowState)
+			return handlePlainScalar(lex, pnt, ys, fwd, flowState, core)
 		}
 
 		// !!type tags in text check context
@@ -1650,7 +1784,7 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 		}
 
 		// Plain scalar — scan to end of line, handling multiline continuation.
-		return handlePlainScalar(lex, pnt, ys, fwd, flowState)
+		return handlePlainScalar(lex, pnt, ys, fwd, flowState, core)
 	}
 
 	// ===== Custom YAML matcher (priority 500000 — before fixed tokens) =====
@@ -1675,6 +1809,9 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 			pendingAnchors = pendingAnchors[:0]
 			for k := range declaredAnchors {
 				delete(declaredAnchors, k)
+			}
+			for k := range openAnchors {
+				delete(openAnchors, k)
 			}
 			pendingExplicitCL = false
 			skipNumberMatch = false
@@ -1725,13 +1862,17 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 			// window then holds what each matcher of the cut reads.
 			pnt := lex.Cursor()
 			si, ri, ci := pnt.SI, pnt.RI, pnt.CI
+			ys.dry = true
 			textCheck(lex)
+			ys.dry = false
 			pnt.SI, pnt.RI, pnt.CI = si, ri, ci
 		}
 		// What this call stepped over without a token of its own (an
 		// anchor, a tag) is the window's to drop at the next cut, so hist
-		// takes it now.
-		ys.sync(ys.pos())
+		// takes it now; and the cursor past the token is placed by its
+		// offset, for a token the engine cuts next without coming back
+		// here (the source's end).
+		ys.place(lex.Cursor())
 		return tkn
 	}
 
@@ -1745,6 +1886,29 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 		// wider window among them.
 		if ys.pos() == 0 && ys.bomAtStart() {
 			pnt.SI += len(bomText)
+		}
+
+		// Where this pass began: a pass that moves the cursor to the
+		// source's end cuts the end token itself (passEnd).
+		beganAt := pnt.SI
+
+		// The matchers after this one cut from the cursor as it is. A pass
+		// that stepped over something with no token of its own (an anchor,
+		// a tag, blanks after a value) and reached the source's end cuts
+		// the end token here, as the line break handler does. Left to the
+		// engine's matchers, the end was read as a bad token: a document
+		// that ended in an anchor or a tag with no node after it was
+		// refused. Inside a flow collection the end is left to them: a
+		// collection the source ends before closing stays refused.
+		passEnd := func() *tabnas.Token {
+			ys.place(pnt)
+			if pnt.SI != beganAt && !ys.has(ys.pos()) {
+				flowState.advance(ys, ys.pos())
+				if flowState.depth == 0 {
+					return lex.Token("#ZZ", ZZ, tabnas.Undefined, "")
+				}
+			}
+			return nil
 		}
 
 		if !ys.has(ys.pos()) {
@@ -1762,13 +1926,6 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 			return &tkn
 		}
 
-		// Emit pending explicit CL token.
-		if pendingExplicitCL {
-			pendingExplicitCL = false
-			tkn := lex.Token("#CL", CL, 1, ": ")
-			return tkn
-		}
-
 		fwd := ys.fwd()
 		if !fwd.has(0) {
 			return nil
@@ -1777,11 +1934,64 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 		// Process YAML features in a loop to handle chaining.
 		for {
 			if !ys.has(ys.pos()) {
-				return nil
+				return passEnd()
 			}
 			fwd = ys.fwd()
 			if !fwd.has(0) {
-				return nil
+				return passEnd()
+			}
+
+			// The cursor's row and column are its offset's, here where
+			// every token of this pass is cut.
+			ys.place(pnt)
+
+			// Skip blank lines that contain only tabs (and maybe spaces).
+			// YAML treats these as blank lines, but jsonic errors on bare
+			// tabs. The line is what lies before the next line break: blank
+			// when the run of tabs and spaces at the cursor, a tab among
+			// them, reaches it or the source's end.
+			if fwd.b(0) == '\t' || fwd.b(0) == ' ' {
+				k := 0
+				tab := false
+				for fwd.has(k) && (fwd.b(k) == ' ' || fwd.b(k) == '\t') {
+					if fwd.b(k) == '\t' {
+						tab = true
+					}
+					k++
+				}
+				if tab && (!fwd.has(k) || fwd.b(k) == '\n' || fwd.b(k) == '\r') {
+					// At a line's start the run is a blank line, and its
+					// line break goes with it. After something on the line
+					// it is trailing white space, and the line break stays
+					// for the indent token: `seq:` then a tab, with its
+					// entries on the next line, once lost the token.
+					skip := k
+					if atLineStart(ys, ys.pos()) {
+						if fwd.b(k) == '\r' && fwd.b(k+1) == '\n' {
+							skip = k + 2
+						} else if fwd.has(k) {
+							skip = k + 1
+						}
+					}
+					pnt.SI += skip
+					continue
+				}
+				// A tab in the leading blanks of a document's first line,
+				// before block structure: the line break handler below
+				// refuses it on every later line.
+				if tab && atLineStart(ys, ys.pos()) && blockStartAt(ys, ys.pos()+k) {
+					tkn := lex.Bad("yaml_tab_indent")
+					tkn.Src = fwd.sub(0, k)
+					return tkn
+				}
+			}
+
+			// Emit pending explicit CL token, before the !!type handlers so
+			// the CL token appears before the value token.
+			if pendingExplicitCL {
+				pendingExplicitCL = false
+				tkn := lex.Token("#CL", CL, 1, ": ")
+				return tkn
 			}
 
 			// Alias: *name
@@ -2061,7 +2271,7 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 			if fwd.b(0) == '!' && fwd.has(1) && fwd.b(1) == '!' &&
 				structTagPrefixRe.MatchString(fwd.sub(0, structTagReach(fwd))) {
 				skip := 2
-				for fwd.has(skip) && fwd.b(skip) != ' ' && fwd.b(skip) != '\n' {
+				for fwd.has(skip) && fwd.b(skip) != ' ' && fwd.b(skip) != '\n' && fwd.b(skip) != '\r' {
 					skip++
 				}
 				for fwd.has(skip) && fwd.b(skip) == ' ' {
@@ -2106,7 +2316,7 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 			// !!type tags (!!str, !!int, !!float, !!bool, !!null).
 			if fwd.b(0) == '!' && fwd.has(1) && fwd.b(1) == '!' {
 				preSI := pnt.SI
-				if tkn := handleTypeTag(lex, pnt, ys, fwd, tagHandles, &pendingAnchors, declaredAnchors, anchors, TX, NR, VL, ST); tkn != nil {
+				if tkn := handleTypeTag(lex, pnt, ys, fwd, tagHandles, &pendingAnchors, declaredAnchors, anchors, flowState, TX, NR, VL, ST); tkn != nil {
 					return tkn
 				}
 				// Tag followed by a newline was consumed with no token —
@@ -2114,7 +2324,7 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 				// or another tag) is handled in this same match call
 				// (mirrors TS `continue yamlMatchLoop`, src/yaml.ts:1381-1392).
 				if pnt.SI == preSI {
-					return nil // safety: no progress, avoid infinite loop
+					return passEnd() // safety: no progress, avoid infinite loop
 				}
 				continue
 			}
@@ -2152,8 +2362,9 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 					pos++
 				}
 				directiveSrc := fwd.sub(0, pos)
+				tkn := lex.Token("#DR", DR, directiveSrc, directiveSrc)
 				advanceCol(pnt, fwd, pos)
-				return lex.Token("#DR", DR, directiveSrc, directiveSrc)
+				return tkn
 			}
 
 			// Non-specific tag after ---.
@@ -2187,10 +2398,19 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 			// Plain scalars starting with digits that contain colons (e.g. 20:03:20).
 			// A sign before the digit counts too: `+190:20:30` is one plain
 			// scalar (mirrors src/yaml.ts).
-			if (fwd.b(0) >= '0' && fwd.b(0) <= '9') ||
-				((fwd.b(0) == '+' || fwd.b(0) == '-') && fwd.has(1) && fwd.b(1) >= '0' && fwd.b(1) <= '9') {
-				if tkn := handleNumericColon(lex, pnt, ys, fwd, TX, &skipNumberMatch, flowState); tkn != nil {
+			// So does a dot before it: `.5 x` is one plain scalar, where the
+			// number matcher took `.5` and the parse failed on the `x`.
+			numLead := 0
+			if fwd.b(0) == '+' || fwd.b(0) == '-' {
+				numLead = 1
+			}
+			if (fwd.b(numLead) >= '0' && fwd.b(numLead) <= '9') ||
+				(fwd.b(numLead) == '.' && fwd.b(numLead+1) >= '0' && fwd.b(numLead+1) <= '9') {
+				if tkn := handleNumericColon(lex, pnt, ys, fwd, TX, &skipNumberMatch, flowState, core); tkn != nil {
 					return tkn
+				}
+				if skipNumberMatch {
+					return passEnd()
 				}
 			}
 
@@ -2298,10 +2518,12 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 				spaces := 0
 				rows := 0
 				for fwd.has(pos) {
+					// `\r\n`, `\n`, or `\r` by itself: each is one line break
+					// (YAML 1.2.2, 5.4).
 					if fwd.b(pos) == '\r' && fwd.has(pos+1) && fwd.b(pos+1) == '\n' {
 						pos += 2
 						rows++
-					} else if fwd.b(pos) == '\n' {
+					} else if fwd.b(pos) == '\n' || fwd.b(pos) == '\r' {
 						pos++
 						rows++
 					} else {
@@ -2328,6 +2550,27 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 						if !fwd.has(tp) || fwd.b(tp) == '\n' || fwd.b(tp) == '\r' {
 							pos = tp
 							continue
+						}
+						// A comment after the tab is a comment-only line as
+						// one after spaces is: white space before a comment
+						// is tabs as well as spaces. It was once left for the
+						// next matcher, and the parse failed on the tab.
+						if fwd.b(tp) == '#' {
+							for fwd.has(tp) && fwd.b(tp) != '\n' && fwd.b(tp) != '\r' {
+								tp++
+							}
+							pos = tp
+							continue
+						}
+						// A tab in the line's indentation, before block
+						// structure (`a:` then a tab and `b: 1`).
+						if blockStartAt(ys, ys.pos()+tp) {
+							tsrc := fwd.sub(pos, tp)
+							pnt.SI += pos
+							ys.place(pnt)
+							tkn := lex.Bad("yaml_tab_indent")
+							tkn.Src = tsrc
+							return tkn
 						}
 					}
 					// Anchor-only line.
@@ -2357,8 +2600,7 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 				// Consumed everything — emit ZZ.
 				if !fwd.has(pos) {
 					pnt.SI += pos
-					pnt.RI += rows
-					pnt.CI = spaces + 1
+					ys.place(pnt)
 					tkn := lex.Token("#ZZ", ZZ, tabnas.Undefined, "")
 					return tkn
 				}
@@ -2372,14 +2614,16 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 					continue
 				}
 
-				// Skip #IN when next content is a flow indicator or quoted
-				// string at column 0 — there's no block to indent into. A
-				// quoted KEY is different: it continues (or closes back to)
-				// the root block mapping, so it needs its #IN like a plain key
-				// does (tabnas/yaml#86).
+				// Skip #IN when next content is a quoted string at column 0 —
+				// there's no block to indent into. A quoted KEY is different:
+				// it continues (or closes back to) the root block mapping, so
+				// it needs its #IN like a plain key does (tabnas/yaml#86). A
+				// flow collection at column 0 takes its #IN as well. At a
+				// document's root the grammar opens it below that indent, as
+				// it opens one on the line after its key. Elsewhere there is
+				// nothing it can be the value of, and the grammar refuses it.
 				if spaces == 0 &&
-					(fwd.b(pos) == '{' || fwd.b(pos) == '[' ||
-						((fwd.b(pos) == '"' || fwd.b(pos) == '\'') && !quotedKeyAt(fwd, pos))) {
+					(fwd.b(pos) == '"' || fwd.b(pos) == '\'') && !quotedKeyAt(fwd, pos) {
 					pnt.SI += pos
 					pnt.RI += rows
 					pnt.CI = 1
@@ -2397,7 +2641,7 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 			break // End of yamlMatchLoop
 		}
 
-		return nil
+		return passEnd()
 	}
 
 	// Skip number matching when the yamlMatcher detected trailing text
@@ -2442,11 +2686,19 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 		// and listed in tabnas.plugin.json.
 		Error: map[string]string{
 			"yaml_undefined_alias": "undefined alias: {src}",
+			"yaml_recursive_alias": "recursive alias: {src}",
+			"yaml_tab_indent":      "tab in indentation",
 		},
 		Hint: map[string]string{
 			"yaml_undefined_alias": "\nThe alias {src} names no anchor that occurs before it in the document.\n" +
 				"An anchor is written &name on the node it names, and an alias can only\n" +
 				"name an anchor defined earlier.",
+			"yaml_recursive_alias": "\nThe alias {src} names the anchor of a node it is inside, so the node\n" +
+				"would hold itself. This parser gives a tree, which cannot. Anchor the\n" +
+				"part that repeats, and name that from outside it.",
+			"yaml_tab_indent": "\nA tab stands in this line's indentation, before a mapping key or a\n" +
+				"sequence entry. YAML indents block structure with spaces alone, so the\n" +
+				"line's depth cannot be read. Indent the line with spaces.",
 		},
 	})
 
@@ -2457,7 +2709,7 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 
 	// ===== Grammar rules =====
 	configureGrammarRules(j, IN, EL, KEY, CL, ZZ, CA, CS, CB, TX, ST, VL, NR, QM,
-		anchors, &pendingAnchors, literalMergeKey, ys)
+		anchors, &pendingAnchors, literalMergeKey, ys, &openAnchors)
 
 	// ===== Stream rule: top-level YAML document collector =====
 	// Replaces `val` as the parser's start rule. Consumes #DS / #DE / #DR
@@ -2598,6 +2850,15 @@ func Yaml(j *tabnas.Tabnas, opts map[string]any) error {
 	})
 
 	return nil
+}
+
+// jsonText is v as JSON spells it, for a message that quotes an option.
+func jsonText(v any) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Sprint(v)
+	}
+	return string(b)
 }
 
 // isWordByte reports whether b is an ASCII letter or digit (used for the
@@ -2806,6 +3067,14 @@ func handleBlockScalar(lex *tabnas.Lex, pnt *tabnas.Point, ys *yamlSource, fwd f
 			lineIndent++
 		}
 		afterSpaces := pos + lineIndent
+		// Indentation the source ends in is not a line: no line break ends
+		// it, so it is nothing a keep indicator keeps. Counted as an empty
+		// line, `|+` gave one line break too many for a text that ends in
+		// its indentation.
+		if !fwd.has(afterSpaces) && lineIndent <= blockIndent {
+			pos = afterSpaces
+			break
+		}
 		if !fwd.has(afterSpaces) || fwd.b(afterSpaces) == '\n' || fwd.b(afterSpaces) == '\r' {
 			if lineIndent > blockIndent {
 				lines = append(lines, fwd.sub(pos+blockIndent, afterSpaces))
@@ -2898,6 +3167,13 @@ func handleBlockScalar(lex *tabnas.Lex, pnt *tabnas.Point, ys *yamlSource, fwd f
 func foldLines(lines []string) string {
 	var result strings.Builder
 	prevWasNormal := false
+	// The last line written was more indented, and its line break is not
+	// written yet. It is a line break in the value, never folded, but it is
+	// written when the next line is, so that a more-indented line that ends
+	// the scalar leaves the value without one, as a normal line does:
+	// chomping then adds the one line break both end with. Written at once,
+	// `>+` kept two line breaks after such a line where the text has one.
+	prevWasMore := false
 	pendingEmptyCount := 0
 
 	for _, line := range lines {
@@ -2906,7 +3182,13 @@ func foldLines(lines []string) string {
 
 		if isEmpty {
 			pendingEmptyCount++
-		} else if isMore {
+			continue
+		}
+		if prevWasMore {
+			result.WriteByte('\n')
+			prevWasMore = false
+		}
+		if isMore {
 			if prevWasNormal && result.Len() > 0 {
 				result.WriteByte('\n')
 			}
@@ -2921,8 +3203,8 @@ func foldLines(lines []string) string {
 				}
 			}
 			result.WriteString(line)
-			result.WriteByte('\n')
 			prevWasNormal = false
+			prevWasMore = true
 		} else {
 			if pendingEmptyCount > 0 {
 				if prevWasNormal && result.Len() > 0 {
@@ -3018,10 +3300,66 @@ func handleTagInTextCheck(lex *tabnas.Lex, pnt *tabnas.Point, fwd fwdText, tagHa
 	return &tabnas.LexCheckResult{Done: true, Token: tkn}
 }
 
-// handlePlainScalar processes YAML plain scalar values with multiline continuation.
-func handlePlainScalar(lex *tabnas.Lex, pnt *tabnas.Point, ys *yamlSource, fwd fwdText, flowState *flowScanState) *tabnas.LexCheckResult {
+// plainScalar is the plain scalar plainScalarAt reads: its text, with its
+// lines folded, how many bytes it takes, and how many line breaks are
+// among them.
+type plainScalar struct {
+	text     string
+	consumed int
+	rows     int
+}
+
+// handlePlainScalar processes YAML plain scalar values with multiline
+// continuation, the scalar read by plainScalarAt from the cursor. Under the
+// core schema (core) a plain scalar resolves as that schema says alone.
+func handlePlainScalar(lex *tabnas.Lex, pnt *tabnas.Point, ys *yamlSource, fwd fwdText, flowState *flowScanState, core bool) *tabnas.LexCheckResult {
+	plain := plainScalarAt(ys, ys.pos(), flowState)
+	text := plain.text
+	totalConsumed := plain.consumed
+	rows := plain.rows
+	if len(text) == 0 {
+		return nil
+	}
+
+	// Check if this is a YAML value keyword.
+	if val, ok := isYamlValue(text, core); ok {
+		tkn := lex.Token("#VL", tabnas.TinVL, val, text)
+		advanceColText(pnt, text)
+		return &tabnas.LexCheckResult{Done: true, Token: tkn}
+	}
+
+	// Check if it's a number: under the core schema one of its number
+	// forms, and otherwise whatever JavaScript reads as a number.
+	num, isNum := 0.0, false
+	if core {
+		num, isNum = coreNumber(text)
+	} else {
+		num, isNum = parseYamlNumber(text)
+	}
+	if isNum {
+		tkn := lex.Token("#NR", tabnas.TinNR, num, text)
+		advanceColText(pnt, text)
+		return &tabnas.LexCheckResult{Done: true, Token: tkn}
+	}
+
+	// Plain text. The cursor past it is placed by its offset.
+	tkn := lex.Token("#TX", tabnas.TinTX, text, fwd.sub(0, totalConsumed))
+	pnt.RI += rows
+	advanceCol(pnt, fwd, totalConsumed)
+	return &tabnas.LexCheckResult{Done: true, Token: tkn}
+}
+
+// plainScalarAt reads the plain scalar that starts at source position
+// here: its text, with its lines folded as YAML folds a plain scalar's,
+// how many bytes it takes, and how many line breaks are among them. It
+// ends at a `: `, at a ` #`, in a flow collection at `,` `]` `}`, or before
+// a line that does not continue it. The text check reads every plain
+// scalar through this, and the matcher asks it whether a scalar that
+// starts as a number runs on to the next line. Mirrors plainScalarAt in
+// src/yaml.ts.
+func plainScalarAt(ys *yamlSource, here int, flowState *flowScanState) plainScalar {
+	fwd := ys.fwdAt(here)
 	// Detect flow context (incremental scan, see flowScanState).
-	here := ys.pos()
 	flowState.advance(ys, here)
 	inFlowCtx := flowState.depth > 0
 
@@ -3047,9 +3385,29 @@ func handlePlainScalar(lex *tabnas.Lex, pnt *tabnas.Point, ys *yamlSource, fwd f
 		isMapValue = true
 	}
 
+	// A sequence entry's scalar (`- text`): the column of the `-` it
+	// follows, the nearest when several lead the line (`- - text`).
+	entryIn := -1
+	ci = here - 1
+	for ci >= lineStartPos && (ys.b(ci) == ' ' || ys.b(ci) == '\t') {
+		ci--
+	}
+	if ci >= lineStartPos && ci < here-1 && ys.b(ci) == '-' &&
+		(ci == lineStartPos || ys.b(ci-1) == ' ' || ys.b(ci-1) == '\t') {
+		entryIn = utf8.RuneCountInString(ys.sub(lineStartPos, ci))
+	}
+
+	// The minimum indent for continuation lines. For map values:
+	// continuation requires indent > the colon's line indent. For a
+	// sequence entry's scalar: indent > its `-`, so that a line at the
+	// sequence's own indent, or an enclosing one's, is the next entry and
+	// never more of this scalar (`- - x` then `- - y`). For standalone
+	// scalars, indent >= the current line's.
 	minContinuationIndent := currentLineIndent
 	if isMapValue {
 		minContinuationIndent = currentLineIndent + 1
+	} else if entryIn >= 0 {
+		minContinuationIndent = entryIn + 1
 	}
 
 	// Scan first line.
@@ -3187,56 +3545,13 @@ func handlePlainScalar(lex *tabnas.Lex, pnt *tabnas.Point, ys *yamlSource, fwd f
 	if folded != nil {
 		text = string(folded)
 	}
-	text = trimRight(text)
-	if len(text) == 0 {
-		return nil
-	}
-
-	// Check if this is a YAML value keyword.
-	if val, ok := isYamlValue(text); ok {
-		tkn := lex.Token("#VL", tabnas.TinVL, val, text)
-		// Correct today by accident of the keyword set — `true`, `null`,
-		// `~` and the rest are ASCII — and written in the unit the column
-		// actually means, so it stays correct if that ever changes.
-		advanceColText(pnt, text)
-		return &tabnas.LexCheckResult{Done: true, Token: tkn}
-	}
-
-	// Check if it's a number.
-	if num, ok := parseYamlNumber(text); ok {
-		tkn := lex.Token("#NR", tabnas.TinNR, num, text)
-		// Correct today by accident of the grammar — a YAML number is
-		// ASCII, so bytes and characters coincide — and written in the
-		// unit the column actually means, so it stays correct if that
-		// ever changes.
-		advanceColText(pnt, text)
-		return &tabnas.LexCheckResult{Done: true, Token: tkn}
-	}
-
-	// Plain text. THE path a non-ASCII scalar takes, and the one the
-	// column bug lived on: `pnt.CI += totalConsumed` charged a byte
-	// count. Traced rather than guessed — instrumenting every CI site
-	// and parsing `{a: é, ]` showed this line and one other firing, out
-	// of forty.
-	//
-	// The TypeScript half is `pnt.cI += totalConsumed  // approximate`,
-	// and the approximation is the multi-row case below: when `rows > 0`
-	// the column should restart on the last line rather than accumulate
-	// across the newlines. That is true in BOTH ports and is not what
-	// this changes — the two are now approximate in the same way and in
-	// the same unit, which is the parity claim. Making them exact is a
-	// separate question, and one the TypeScript comment has been asking
-	// for longer.
-	tkn := lex.Token("#TX", tabnas.TinTX, text, fwd.sub(0, totalConsumed))
-	pnt.RI += rows
-	advanceCol(pnt, fwd, totalConsumed)
-	return &tabnas.LexCheckResult{Done: true, Token: tkn}
+	return plainScalar{text: trimRight(text), consumed: totalConsumed, rows: rows}
 }
 
 // handleTypeTag processes !!type tags (!!str, !!int, !!float, etc.).
 func handleTypeTag(lex *tabnas.Lex, pnt *tabnas.Point, ys *yamlSource, fwd fwdText,
 	tagHandles map[string]string, pendingAnchors *[]anchorInfo, declaredAnchors map[string]bool,
-	anchors map[string]any, TX, NR, VL, ST tabnas.Tin) *tabnas.Token {
+	anchors map[string]any, flowState *flowScanState, TX, NR, VL, ST tabnas.Tin) *tabnas.Token {
 
 	tagEnd := 2
 	for fwd.has(tagEnd) && fwd.b(tagEnd) != ' ' && fwd.b(tagEnd) != '\n' &&
@@ -3266,6 +3581,93 @@ func handleTypeTag(lex *tabnas.Lex, pnt *tabnas.Point, ys *yamlSource, fwd fwdTe
 		}
 		valStart = anchorEnd
 		valEnd = valStart
+	}
+
+	// A tag that ends its line. Its node is the next line's when that line
+	// is indented past this one, or, for a tag that stands first on its
+	// line, at least as far: the value below a key, a sequence entry's, a
+	// document's root. Otherwise the tagged node is empty, and the line
+	// break stays for the indent token: `a: !!str` then `b: 1` is two
+	// members, where the break was once skipped and `b` read as the value
+	// of `a`. The line break is one or two characters (`\r\n`), and a tag
+	// that ends the source has no next line: its node is empty too.
+	var nextPlain *plainScalar
+	tagNl := valStart
+	if fwd.b(tagNl) == '\r' {
+		tagNl++
+	}
+	if fwd.b(tagNl) == '\n' {
+		tagNl++
+	}
+	if tagNl > valStart && fwd.has(tagNl) {
+		nextIn := 0
+		for fwd.b(tagNl+nextIn) == ' ' {
+			nextIn++
+		}
+		ncHas := fwd.has(tagNl + nextIn)
+		nc := fwd.b(tagNl + nextIn)
+		blankNext := !ncHas || nc == '\n' || nc == '\r' || nc == '#' || nc == '\t'
+		here := ys.pos()
+		ls := ys.lineStart(here)
+		if ls == 0 && ys.bomAtStart() {
+			ls = len(bomText)
+		}
+		lineIn := 0
+		for ls+lineIn < here && ys.b(ls+lineIn) == ' ' {
+			lineIn++
+		}
+		// The tag stands first on its line when only its line's
+		// indentation, a document marker (`--- `) and its node's other
+		// properties come before it.
+		lq := ls + lineIn
+		if lineIn == 0 && ys.prefixAt(lq, "---") && (ys.b(lq+3) == ' ' || ys.b(lq+3) == '\t') {
+			lq += 3
+			for lq < here && (ys.b(lq) == ' ' || ys.b(lq) == '\t') {
+				lq++
+			}
+		}
+		for lq < here && (ys.b(lq) == '&' || ys.b(lq) == '!') {
+			for lq < here && ys.b(lq) != ' ' && ys.b(lq) != '\t' {
+				lq++
+			}
+			for lq < here && (ys.b(lq) == ' ' || ys.b(lq) == '\t') {
+				lq++
+			}
+		}
+		firstOnLine := lq == here
+		deeper := nextIn > lineIn
+		if firstOnLine {
+			deeper = nextIn >= lineIn
+		}
+		if blankNext || deeper {
+			scalarNext := !blankNext && strings.IndexByte("[{&!*|>", nc) < 0 &&
+				!blockStartAt(ys, here+tagNl+nextIn)
+			if scalarNext {
+				// A scalar on the next line is the tag's value. Left to the
+				// next lex cycle, the tag did not apply to it, and a plain
+				// one kept its line's indentation. A quoted one is read
+				// below as one on the tag's own line is, and a plain one
+				// whole, with the lines that continue it. The scan reads
+				// ahead of the cursor with a copy of the flow scan's state,
+				// which goes on only from where the cursor stands.
+				valStart = tagNl + nextIn
+				valEnd = valStart
+				if nc != '"' && nc != '\'' {
+					ahead := *flowState
+					p := plainScalarAt(ys, here+valStart, &ahead)
+					nextPlain = &p
+				}
+			} else {
+				// A collection, more properties, or nothing yet: skip the
+				// tag alone, and let the next lex cycle read the line break
+				// as the indent it is, and then the value on the following
+				// line. With the line break skipped as well, a mapping there
+				// lost its indent, and its first key kept the line's
+				// leading spaces.
+				pnt.SI += valStart
+				return nil
+			}
+		}
 	}
 
 	// Check for quoted value.
@@ -3301,24 +3703,9 @@ func handleTypeTag(lex *tabnas.Lex, pnt *tabnas.Point, ys *yamlSource, fwd fwdTe
 		return tkn
 	}
 
-	// Tag followed by newline — skip and let next cycle handle.
-	if fwd.has(valStart) && (fwd.b(valStart) == '\n' || fwd.b(valStart) == '\r') && fwd.has(valStart+1) {
-		nl := valStart
-		if fwd.has(nl) && fwd.b(nl) == '\r' {
-			nl++
-		}
-		if fwd.has(nl) && fwd.b(nl) == '\n' {
-			nl++
-		}
-		pnt.SI += nl
-		pnt.CI = 0
-		pnt.RI++
-		return nil // Will re-enter matcher
-	}
-
 	// Unquoted value. A `#` straight after the tag's space starts a
 	// comment, so the value is empty (`!!str #c` is "").
-	for fwd.has(valEnd) && fwd.b(valEnd) != '\n' && fwd.b(valEnd) != '\r' &&
+	for nextPlain == nil && fwd.has(valEnd) && fwd.b(valEnd) != '\n' && fwd.b(valEnd) != '\r' &&
 		fwd.b(valEnd) != ',' && fwd.b(valEnd) != '}' && fwd.b(valEnd) != ']' {
 		if valEnd == valStart && fwd.b(valEnd) == '#' && valStart > 0 &&
 			(fwd.b(valStart-1) == ' ' || fwd.b(valStart-1) == '\t') {
@@ -3334,6 +3721,10 @@ func handleTypeTag(lex *tabnas.Lex, pnt *tabnas.Point, ys *yamlSource, fwd fwdTe
 		valEnd++
 	}
 	rawVal := trimRight(fwd.sub(valStart, valEnd))
+	if nextPlain != nil {
+		rawVal = nextPlain.text
+		valEnd = valStart + nextPlain.consumed
+	}
 	result := applyTagConversion(tag, rawVal, tagHandles)
 	if tagAnchorName != "" {
 		ys.record(anchors, tagAnchorName, result)
@@ -3413,9 +3804,6 @@ func handleExplicitKey(lex *tabnas.Lex, pnt *tabnas.Point, ys *yamlSource, fwd f
 		li++
 	}
 
-	// Count extra rows consumed (for multiline / block scalar keys).
-	extraRows := 0
-
 	// Handle block scalar keys (| or >). Mirrors src/yaml.ts:1481-1530.
 	if bm := explicitKeyBlockScalarRe.FindStringSubmatch(key); bm != nil {
 		isFolded := bm[1] == ">"
@@ -3443,7 +3831,6 @@ func handleExplicitKey(lex *tabnas.Lex, pnt *tabnas.Point, ys *yamlSource, fwd f
 				if fwd.has(consumed) && fwd.b(consumed) == '\n' {
 					consumed++
 				}
-				extraRows++
 				continue
 			}
 			// Determine content indent from first non-empty line.
@@ -3471,7 +3858,6 @@ func handleExplicitKey(lex *tabnas.Lex, pnt *tabnas.Point, ys *yamlSource, fwd f
 			if fwd.has(consumed) && fwd.b(consumed) == '\n' {
 				consumed++
 			}
-			extraRows++
 		}
 		// Apply chomping: remove trailing empty lines for non-keep.
 		if chomp != "+" {
@@ -3506,7 +3892,6 @@ func handleExplicitKey(lex *tabnas.Lex, pnt *tabnas.Point, ys *yamlSource, fwd f
 				if fwd.has(afterSpaces) && fwd.b(afterSpaces) == '\n' {
 					afterSpaces++
 				}
-				extraRows++
 				consumed = afterSpaces
 				continue
 			}
@@ -3531,7 +3916,6 @@ func handleExplicitKey(lex *tabnas.Lex, pnt *tabnas.Point, ys *yamlSource, fwd f
 				if fwd.has(consumed) && fwd.b(consumed) == '\n' {
 					consumed++
 				}
-				extraRows++
 				continue
 			}
 			break
@@ -3555,14 +3939,27 @@ func handleExplicitKey(lex *tabnas.Lex, pnt *tabnas.Point, ys *yamlSource, fwd f
 		}
 	}
 
+	// The key's token is cut here, where its `?` stands, before the cursor
+	// moves on to its value: a token's place is where it starts. Its source
+	// spans the consumed key text (mirrors src/yaml.ts).
+	srcEnd := keyEnd
+	if hasValue {
+		srcEnd = consumed
+	}
+	var keyTkn *tabnas.Token
+	if quotedKey {
+		keyTkn = lex.Token("#ST", tabnas.TinST, key, fwd.sub(0, srcEnd))
+	} else {
+		keyTkn = lex.Token("#TX", TX, key, fwd.sub(0, srcEnd))
+	}
+
 	if hasValue {
 		pnt.SI += valConsumed
-		pnt.RI += 1 + extraRows
 		// Characters, not bytes: `consumed` and `valConsumed` are BYTE
 		// indices into fwd, so a non-ASCII key set the following indent
 		// column too far right by that key's extra bytes.
 		indent := utf8.RuneCountInString(fwd.sub(consumed, valConsumed))
-		pnt.CI = indent + 1
+		ys.place(pnt)
 
 		// If there's inline content after `: ` on the same line that itself
 		// starts a block mapping/sequence (e.g. `: get:\n      summary: ...`),
@@ -3591,9 +3988,11 @@ func handleExplicitKey(lex *tabnas.Lex, pnt *tabnas.Point, ys *yamlSource, fwd f
 						}
 					}
 				}
-				// Or sequence indicator `- `.
-				if !needsIndent && nextCh == '-' && fwd.has(valConsumed+1) &&
-					(fwd.b(valConsumed+1) == ' ' || fwd.b(valConsumed+1) == '\t') {
+				// Or sequence indicator (`- `), which a line break or the
+				// source's end follows too when its entry is empty.
+				if !needsIndent && nextCh == '-' && (!fwd.has(valConsumed+1) ||
+					fwd.b(valConsumed+1) == ' ' || fwd.b(valConsumed+1) == '\t' ||
+					fwd.b(valConsumed+1) == '\n' || fwd.b(valConsumed+1) == '\r') {
 					needsIndent = true
 				}
 			}
@@ -3610,7 +4009,10 @@ func handleExplicitKey(lex *tabnas.Lex, pnt *tabnas.Point, ys *yamlSource, fwd f
 			*pendingExplicitCL = true
 		}
 	} else {
-		advanceCol(pnt, fwd, beforeNewline)
+		// No `:` follows: the cursor stops before the line break, so the
+		// line break handler emits the indent for the mapping going on.
+		pnt.SI += beforeNewline
+		ys.place(pnt)
 		clTkn := lex.Token("#CL", CL, 1, ": ")
 		vlTkn := lex.Token("#VL", VL, nil, "")
 		clTkn.SI += ys.base
@@ -3618,16 +4020,7 @@ func handleExplicitKey(lex *tabnas.Lex, pnt *tabnas.Point, ys *yamlSource, fwd f
 		*pendingTokens = append(*pendingTokens, clTkn, vlTkn)
 	}
 
-	// Token source spans the consumed key text (mirrors src/yaml.ts:1587).
-	srcEnd := keyEnd
-	if hasValue {
-		srcEnd = consumed
-	}
-	if quotedKey {
-		return lex.Token("#ST", tabnas.TinST, key, fwd.sub(0, srcEnd))
-	}
-	tkn := lex.Token("#TX", TX, key, fwd.sub(0, srcEnd))
-	return tkn
+	return keyTkn
 }
 
 // handleDocMarker processes --- and ... document markers.
@@ -3640,6 +4033,13 @@ func handleDocMarker(lex *tabnas.Lex, pnt *tabnas.Point, fwd fwdText,
 	DS, DE tabnas.Tin) *tabnas.Token {
 
 	isEnd := fwd.b(0) == '.'
+	// The token is cut where the marker stands, before the cursor moves.
+	var tkn *tabnas.Token
+	if isEnd {
+		tkn = lex.Token("#DE", DE, tabnas.Undefined, "...")
+	} else {
+		tkn = lex.Token("#DS", DS, tabnas.Undefined, "---")
+	}
 	pos := 3
 	// Skip trailing whitespace after marker.
 	for fwd.has(pos) && (fwd.b(pos) == ' ' || fwd.b(pos) == '\t') {
@@ -3667,12 +4067,6 @@ func handleDocMarker(lex *tabnas.Lex, pnt *tabnas.Point, fwd fwdText,
 		// indices. Inline content after a `---` marker is where this
 		// shows.
 		pnt.CI += utf8.RuneCountInString(fwd.sub(0, pos))
-	}
-	var tkn *tabnas.Token
-	if isEnd {
-		tkn = lex.Token("#DE", DE, tabnas.Undefined, "...")
-	} else {
-		tkn = lex.Token("#DS", DS, tabnas.Undefined, "---")
 	}
 	pnt.SI += pos
 	return tkn
@@ -4008,17 +4402,29 @@ func handleSingleQuotedString(lex *tabnas.Lex, pnt *tabnas.Point, fwd fwdText, S
 // skipNumberMatch is set to true when trailing text is detected so the
 // NumberCheck callback skips the number matcher and lets TextCheck handle
 // the scalar (with multiline continuation support).
-func handleNumericColon(lex *tabnas.Lex, pnt *tabnas.Point, ys *yamlSource, fwd fwdText, TX tabnas.Tin, skipNumberMatch *bool, flowState *flowScanState) *tabnas.Token {
+func handleNumericColon(lex *tabnas.Lex, pnt *tabnas.Point, ys *yamlSource, fwd fwdText, TX tabnas.Tin, skipNumberMatch *bool, flowState *flowScanState, core bool) *tabnas.Token {
 	flowState.advance(ys, ys.pos())
 	inFlow := flowState.depth > 0
 
 	hasEmbeddedColon := false
 	hasTrailingText := false
 	hasBlockComma := false
+	// The `:` that ends a plain scalar: one before a blank, a line break or
+	// the end of the source.
+	endsPlain := func(i int) bool {
+		return fwd.b(i) == ':' && fwd.has(i) && (!fwd.has(i+1) || fwd.b(i+1) == ' ' ||
+			fwd.b(i+1) == '\t' || fwd.b(i+1) == '\n' || fwd.b(i+1) == '\r')
+	}
 	pi := 1
 	for fwd.has(pi) && fwd.b(pi) != '\n' && fwd.b(pi) != '\r' {
-		if fwd.b(pi) == ':' && fwd.has(pi+1) && fwd.b(pi+1) != ' ' && fwd.b(pi+1) != '\t' &&
-			fwd.b(pi+1) != '\n' && fwd.b(pi+1) != '\r' {
+		// The scalar is a key, and ends here: `12:30:` then a block is the
+		// key 12:30, and the scan once went on over its colon, which the
+		// token then took (`127.0.0.1:5000:` as a key, in Docker's
+		// description).
+		if endsPlain(pi) {
+			break
+		}
+		if fwd.b(pi) == ':' {
 			// An embedded colon does not end the scan: the scalar can go on
 			// past a space ("09:00 AM"), which only the trailing-text branch
 			// reads as one scalar (tabnas/yaml#90).
@@ -4031,10 +4437,6 @@ func handleNumericColon(lex *tabnas.Lex, pnt *tabnas.Point, ys *yamlSource, fwd 
 		// Flow indicators only indicate inside a flow collection, so in block
 		// context `example: 1,2,3` is the plain scalar "1,2,3" — not a number,
 		// a separator, and two more numbers.
-		//
-		// Only a comma at END of line was accepted before, which left `1,2,3`
-		// to the number matcher: it took the `1`, the `,` became a structural
-		// token, and the parse died on the `2`.
 		//
 		// The scan CONTINUES rather than breaking, so a scalar that also has a
 		// space with text after it ("12, hexadecimal") still reaches the
@@ -4066,44 +4468,52 @@ func handleNumericColon(lex *tabnas.Lex, pnt *tabnas.Point, ys *yamlSource, fwd 
 	// TRAILING TEXT FIRST. A scalar can be both ("12, hexadecimal"), and the
 	// token scan below stops at the first space, which would truncate it to
 	// "12,". TextCheck takes the whole scalar, continuation lines included.
-	//
-	// In FLOW context too. The canonical takes this branch without asking
-	// about flow depth, so `[12 x]` is the one scalar "12 x" there, and a
-	// `flowState.depth == 0` guard here left the digits to the number
-	// matcher and the text to the grammar: `[12, "x"]`. The comma branch
-	// below keeps its flow test, because a comma inside a flow collection
-	// IS a separator.
+	// In flow context too, as the canonical takes this branch.
 	if hasTrailingText {
 		*skipNumberMatch = true
 		return nil
 	}
 	// A `#` inside the scalar's token follows a non-blank character, and YAML
 	// starts a comment only at a `#` after white space, so `80#` is the plain
-	// scalar "80#". Left to the number matcher it read 80, and the rest of the
-	// line went as a comment (tabnas/yaml#95). TextCheck reads it whole, as it
-	// reads `foo#bar`, and as for trailing text it takes continuation lines
-	// and stops at a mapping colon (`80#:`). The token ends at a blank, or in
-	// a flow collection at its `,` `]` `}`, so a `#` past the collection's
-	// close keeps the reading it had.
-	//
-	// Outside a flow collection `[` `]` `{` `}` indicate nothing either, so
-	// `5[` and `12[x]` are plain scalars too. The number matcher took the
-	// digits and the parse failed on the bracket (tabnas/yaml#99).
+	// scalar "80#" (tabnas/yaml#95). Outside a flow collection `[` `]` `{`
+	// `}` indicate nothing either, so `5[` and `12[x]` are plain scalars too
+	// (tabnas/yaml#99). TextCheck reads them whole.
 	tokenEnd := 0
 	for fwd.has(tokenEnd) && fwd.b(tokenEnd) != ' ' && fwd.b(tokenEnd) != '\t' &&
-		fwd.b(tokenEnd) != '\n' && fwd.b(tokenEnd) != '\r' &&
+		fwd.b(tokenEnd) != '\n' && fwd.b(tokenEnd) != '\r' && !endsPlain(tokenEnd) &&
 		!(inFlow && (fwd.b(tokenEnd) == ',' || fwd.b(tokenEnd) == ']' || fwd.b(tokenEnd) == '}')) {
 		tokenEnd++
 	}
 	token := fwd.sub(0, tokenEnd)
-	if strings.IndexByte(token, '#') > 0 || (!inFlow && strings.ContainsAny(token, "[]{}")) {
+	if strings.IndexByte(token, '#') >= 0 || (!inFlow && strings.ContainsAny(token, "[]{}")) {
 		*skipNumberMatch = true
 		return nil
 	}
-	if hasBlockComma {
+	// A scalar that runs on to the next line is one plain scalar, and so a
+	// string: `a: 12` with `more` indented below it is "12 more", and so are
+	// `12:30` and `1,2` with a line below them. The number matcher took the
+	// 12, or this branch the `12:30`, and the next line then failed the
+	// parse, or in a flow collection was read as a second member. Only a
+	// token that ends its line can run on, so only then is the scalar
+	// scanned as the text handler scans it.
+	rest := tokenEnd
+	for fwd.has(rest) && (fwd.b(rest) == ' ' || fwd.b(rest) == '\t') {
+		rest++
+	}
+	if fwd.has(rest) && (fwd.b(rest) == '\n' || fwd.b(rest) == '\r') &&
+		plainScalarAt(ys, ys.pos(), flowState).rows > 0 {
+		*skipNumberMatch = true
+		return nil
+	}
+
+	if hasEmbeddedColon || hasBlockComma {
+		// Scan to the end of the plain scalar token: a blank, a line break,
+		// the source's end, a `:` that ends it, or in a flow collection its
+		// `,` `]` `}` (`[1, 12:30]` holds "12:30", not "12:30,").
 		end := 0
 		for fwd.has(end) && fwd.b(end) != ' ' && fwd.b(end) != '\t' &&
-			fwd.b(end) != '\n' && fwd.b(end) != '\r' {
+			fwd.b(end) != '\n' && fwd.b(end) != '\r' && !endsPlain(end) &&
+			!(inFlow && (fwd.b(end) == ',' || fwd.b(end) == ']' || fwd.b(end) == '}')) {
 			end++
 		}
 		text := fwd.sub(0, end)
@@ -4111,21 +4521,18 @@ func handleNumericColon(lex *tabnas.Lex, pnt *tabnas.Point, ys *yamlSource, fwd 
 		advanceCol(pnt, fwd, end)
 		return tkn
 	}
-	if !hasEmbeddedColon {
-		return nil
+
+	// Under the core schema a token that is not one of its number forms is
+	// a string (`0b11`, `1_000`, `-0x30`), so it goes to the text handler,
+	// and the number matcher, which reads jsonic's number syntax, never
+	// sees it.
+	if core {
+		if _, ok := coreNumber(token); !ok {
+			*skipNumberMatch = true
+			return nil
+		}
 	}
-	// In a flow collection the scalar also ends at its `,` `]` `}`:
-	// `[1, 12:30]` holds "12:30", not "12:30,".
-	end := 0
-	for fwd.has(end) && fwd.b(end) != ' ' && fwd.b(end) != '\t' &&
-		fwd.b(end) != '\n' && fwd.b(end) != '\r' &&
-		!(inFlow && (fwd.b(end) == ',' || fwd.b(end) == ']' || fwd.b(end) == '}')) {
-		end++
-	}
-	text := fwd.sub(0, end)
-	tkn := lex.Token("#TX", TX, text, text)
-	advanceCol(pnt, fwd, end)
-	return tkn
+	return nil
 }
 
 // applyTagConversion applies !!type tag conversion to a raw value.
@@ -4455,7 +4862,8 @@ const grammarText = `
 func configureGrammarRules(j *tabnas.Tabnas, IN, EL tabnas.Tin, KEY []tabnas.Tin,
 	CL, ZZ, CA, CS, CB, TX, ST, VL, NR, QM tabnas.Tin,
 	anchors map[string]any, pendingAnchors *[]anchorInfo,
-	literalMergeKey map[*tabnas.OrderedMap]bool, ys *yamlSource) {
+	literalMergeKey map[*tabnas.OrderedMap]bool, ys *yamlSource,
+	openAnchors *map[string]int) {
 
 	_ = IN
 	_ = EL
@@ -4467,6 +4875,24 @@ func configureGrammarRules(j *tabnas.Tabnas, IN, EL tabnas.Tin, KEY []tabnas.Tin
 	_ = CB
 	_ = NR
 	_ = VL
+
+	// recursiveAlias fails the parse at tkn, with the code
+	// yaml_recursive_alias, when it is an alias to an anchor whose node is
+	// still open: an alias inside the node it names. It reports whether
+	// it did. Mirrors recursiveAlias in src/yaml.ts, where a rule's action
+	// or handler returns the bad token; here the action sets it as the
+	// parse's error, which the parse loop raises.
+	recursiveAlias := func(ctx *tabnas.Context, tkn *tabnas.Token) bool {
+		if tkn == nil || tkn.Tin != VL {
+			return false
+		}
+		name, ok := aliasMarker(tkn.Val)
+		if !ok || (*openAnchors)[name] <= 0 {
+			return false
+		}
+		failAt(ctx, tkn, "yaml_recursive_alias")
+		return true
+	}
 
 	// Function refs used by the declarative grammar.
 	refs := map[tabnas.FuncRef]any{
@@ -4498,12 +4924,24 @@ func configureGrammarRules(j *tabnas.Tabnas, IN, EL tabnas.Tin, KEY []tabnas.Tin
 			return true
 		}),
 		// A sequence at the indent of the key it is the value of, its
-		// mapping's or a sequence entry's: `a:\n- x` and `- a:\n  - x`.
+		// mapping's or a sequence entry's: `a:\n- x` and `- a:\n  - x`. The
+		// key's column is the one that counts. A sequence entry's key
+		// stands at its mapping's column, not at an enclosing mapping's,
+		// and a sequence entry's own value has no key: a `-` at an
+		// enclosing indent is that sequence's next entry (`a:\n- x\n-\n- y`,
+		// and `v:` with no value before the next `-`).
 		"@val-indent-eq-parent": tabnas.AltCond(func(r *tabnas.Rule, ctx *tabnas.Context) bool {
-			if mapIn, ok := entryMapIn(r); ok {
-				if t0Val, ok := toInt(ctx.T0.Val); ok && t0Val == mapIn {
-					return true
-				}
+			parent := ""
+			if r.Parent != nil && r.Parent != tabnas.NoRule {
+				parent = r.Parent.Name
+			}
+			if parent == "yamlElemPair" {
+				mapIn, ok := toInt(r.K["yamlMapIn"])
+				t0Val, ok2 := toInt(ctx.T0.Val)
+				return ok && ok2 && t0Val == mapIn
+			}
+			if parent == "yamlBlockList" || parent == "yamlBlockElem" {
+				return false
 			}
 			parentIn, hasParentIn := r.K["yamlIn"]
 			if !hasParentIn || parentIn == nil {
@@ -4516,6 +4954,18 @@ func configureGrammarRules(j *tabnas.Tabnas, IN, EL tabnas.Tin, KEY []tabnas.Tin
 			}
 			return false
 		}),
+		// Whether a value may open a block sequence on its own line: not
+		// when it is the value of a mapping's pair. YAML has no `key: - a`:
+		// a block sequence starts on the line after its key. Read as one,
+		// its entries' column was the dash's, so a second line under it
+		// joined in, and `key: - a` with `- b` at the key's column lost the
+		// second entry.
+		"@val-not-pair-value": tabnas.AltCond(func(r *tabnas.Rule, ctx *tabnas.Context) bool {
+			if r.Parent == nil || r.Parent == tabnas.NoRule {
+				return true
+			}
+			return r.Parent.Name != "pair" && r.Parent.Name != "yamlElemPair"
+		}),
 		"@val-set-in-from-o0": tabnas.AltAction(func(r *tabnas.Rule, ctx *tabnas.Context) {
 			if v, ok := toInt(r.O0.Val); ok {
 				r.EnsureN()["in"] = v
@@ -4527,12 +4977,11 @@ func configureGrammarRules(j *tabnas.Tabnas, IN, EL tabnas.Tin, KEY []tabnas.Tin
 		"@val-set-el-in": tabnas.AltAction(func(r *tabnas.Rule, ctx *tabnas.Context) {
 			r.EnsureN()["in"] = r.O0.CI - 1
 		}),
+		// A scalar on the line after its key is the value its token read: a
+		// number, a boolean or null as well as a string (`a:\n  1` is 1). An
+		// alias's marker is resolved by the val that pushed this rule.
 		"@indent-plain-value": tabnas.AltAction(func(r *tabnas.Rule, ctx *tabnas.Context) {
-			if r.O0.Tin == ST || r.O0.Tin == TX {
-				r.Node = r.O0.Val
-			} else {
-				r.Node = r.O0.Src
-			}
+			r.Node = r.O0.Val
 		}),
 		// A block sequence entry's mapping stands at the column its content
 		// starts at; a flow sequence's pair (`[a: 1]`) keeps the list's
@@ -4581,17 +5030,29 @@ func configureGrammarRules(j *tabnas.Tabnas, IN, EL tabnas.Tin, KEY []tabnas.Tin
 			return false
 		}),
 		"@elem-key": tabnas.AltAction(func(r *tabnas.Rule, ctx *tabnas.Context) {
+			if recursiveAlias(ctx, r.O0) {
+				return
+			}
 			r.EnsureU()["key"] = extractKey(r.O0, anchors)
 		}),
 		"@implicit-null-pair": tabnas.AltAction(func(r *tabnas.Rule, ctx *tabnas.Context) {
+			if recursiveAlias(ctx, r.O0) {
+				return
+			}
 			key := extractKey(r.O0, anchors)
 			r.EnsureU()["key"] = key
 			storeMember(r, ctx, formatKey(key), nil)
 		}),
-		"@qm-pairkey": tabnas.AltAction(func(r *tabnas.Rule, _ *tabnas.Context) {
+		"@qm-pairkey": tabnas.AltAction(func(r *tabnas.Rule, ctx *tabnas.Context) {
+			if recursiveAlias(ctx, r.O1) {
+				return
+			}
 			r.EnsureU()["key"] = extractKey(r.O1, anchors)
 		}),
 		"@qm-implicit-null-pair": tabnas.AltAction(func(r *tabnas.Rule, ctx *tabnas.Context) {
+			if recursiveAlias(ctx, r.O1) {
+				return
+			}
 			key := extractKey(r.O1, anchors)
 			r.EnsureU()["key"] = key
 			storeMember(r, ctx, formatKey(key), nil)
@@ -4630,6 +5091,9 @@ func configureGrammarRules(j *tabnas.Tabnas, IN, EL tabnas.Tin, KEY []tabnas.Tin
 				r.EnsureU()["yamlAnchors"] = anchorsCopy
 				r.EnsureU()["yamlAnchorOpenNode"] = r.Node
 				*pendingAnchors = (*pendingAnchors)[:0]
+				for _, anchor := range anchorsCopy {
+					(*openAnchors)[anchor.name]++
+				}
 				// The lists inside the anchored value are kept, behind a
 				// stream that empties them, until the anchor is recorded at
 				// this val's close (holdPruning).
@@ -4645,6 +5109,21 @@ func configureGrammarRules(j *tabnas.Tabnas, IN, EL tabnas.Tin, KEY []tabnas.Tin
 		rs.AddAC(func(r *tabnas.Rule, ctx *tabnas.Context) {
 			if m, ok := r.Node.(map[string]any); ok {
 				if alias, ok := m["__yamlAlias"].(string); ok {
+					if (*openAnchors)[alias] > 0 {
+						// The alias's own token: this val's, or its indent
+						// child's when the alias stands on the line after
+						// its key.
+						tkn := r.O0
+						if n, ok := aliasMarker(tkn.Val); !ok || n != alias {
+							if c := r.Child; c != nil && c != tabnas.NoRule && c.O0 != nil {
+								if n, ok := aliasMarker(c.O0.Val); ok && n == alias {
+									tkn = c.O0
+								}
+							}
+						}
+						failAt(ctx, tkn, "yaml_recursive_alias")
+						return
+					}
 					// `rule.node = anchors[name]`, with no test that
 					// the anchor is there: an alias to a name the
 					// document never anchored reads as the absent
@@ -4688,6 +5167,15 @@ func configureGrammarRules(j *tabnas.Tabnas, IN, EL tabnas.Tin, KEY []tabnas.Tin
 							val = deepCopy(v)
 						}
 						anchors[anchor.name] = val
+					}
+					// The node has closed: an alias after it names a
+					// finished node.
+					for _, anchor := range anchorsSlice {
+						if (*openAnchors)[anchor.name] > 1 {
+							(*openAnchors)[anchor.name]--
+						} else {
+							delete(*openAnchors, anchor.name)
+						}
 					}
 				}
 				// Recorded: the hold this val raised at its open is released.
@@ -4816,6 +5304,9 @@ func configureGrammarRules(j *tabnas.Tabnas, IN, EL tabnas.Tin, KEY []tabnas.Tin
 			if keyTkn != nil && keyTkn.Tin == QM {
 				keyTkn = r.O1
 			}
+			if recursiveAlias(ctx, keyTkn) {
+				return
+			}
 			if keyTkn == nil || keyTkn.Tin == ST || r.U["key"] != "<<" {
 				return
 			}
@@ -4845,7 +5336,14 @@ func configureGrammarRules(j *tabnas.Tabnas, IN, EL tabnas.Tin, KEY []tabnas.Tin
 	j.Rule("map", func(rs *tabnas.RuleSpec, _ *tabnas.Parser) {
 		rs.AddBO(func(r *tabnas.Rule, ctx *tabnas.Context) {
 			if _, ok := r.N["in"]; !ok {
-				r.EnsureN()["in"] = 0
+				// No indent token came before this mapping: it is a
+				// document's root, or a flow mapping. A root block mapping
+				// stands at the column of its first key, which need not be
+				// 0 (YAML 1.2.2, 9.1.1: a document's root node is indented
+				// by -1, so any column is deeper). Read as 0, the second
+				// pair of `  a: 1` then `  b: 2` was a deeper indent with
+				// nothing to open, and the parse failed.
+				r.EnsureN()["in"] = firstKeyColumn(ys, ctx, TX, NR, ST, VL)
 			}
 			r.EnsureK()["yamlIn"] = r.N["in"]
 		})
@@ -4893,6 +5391,63 @@ func configureGrammarRules(j *tabnas.Tabnas, IN, EL tabnas.Tin, KEY []tabnas.Tin
 			}
 		})
 	})
+}
+
+// aliasMarker is the anchor name an alias's marker names, when v is one:
+// the value an alias's token carries while its anchor's node is not
+// recorded yet.
+func aliasMarker(v any) (string, bool) {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return "", false
+	}
+	name, ok := m["__yamlAlias"].(string)
+	return name, ok
+}
+
+// failAt fails the parse at a copy of tkn, with the error code why: the
+// parse loop raises the error a rule's action or handler sets.
+func failAt(ctx *tabnas.Context, tkn *tabnas.Token, why string) {
+	bad := *tkn
+	bad.Err = why
+	bad.Why = why
+	ctx.ParseErr = &bad
+}
+
+// firstKeyColumn is the column of the token a mapping opens on, when that
+// token is a key and its node is the first thing on its line, and 0
+// otherwise: a flow mapping's brace, or a key that follows something on
+// its line (`--- a: 1`), keeps the indent of 0 it always had. The key's
+// node starts at its properties, so `  &x a: 1` stands at 2 as `  a: 1`
+// does. Mirrors firstKeyColumn in src/yaml.ts.
+func firstKeyColumn(ys *yamlSource, ctx *tabnas.Context, TX, NR, ST, VL tabnas.Tin) int {
+	tkn := ctx.T0
+	if tkn == nil || !(tkn.Tin == TX || tkn.Tin == NR || tkn.Tin == ST || tkn.Tin == VL) {
+		return 0
+	}
+	ys.outside(ctx.Lex)
+	at := tkn.SI
+	li := ys.lineStart(at)
+	if li == 0 && ys.bomAtStart() {
+		li = len(bomText)
+	}
+	i := li
+	for i < at && ys.b(i) == ' ' {
+		i++
+	}
+	col := i - li
+	for i < at && (ys.b(i) == '&' || ys.b(i) == '!') {
+		for i < at && ys.b(i) != ' ' && ys.b(i) != '\t' {
+			i++
+		}
+		for i < at && (ys.b(i) == ' ' || ys.b(i) == '\t') {
+			i++
+		}
+	}
+	if i == at {
+		return col
+	}
+	return 0
 }
 
 // mapToGrammarRules converts a parsed rule map into typed GrammarRuleSpec map.
