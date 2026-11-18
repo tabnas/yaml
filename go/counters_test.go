@@ -1,6 +1,7 @@
 package tabnasyaml
 
 import (
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"sort"
@@ -103,6 +104,49 @@ func TestAMapNamesTheKeysItsMergeBroughtAndOnlyThoseWithTheirSources(t *testing.
 	} {
 		if _, merged := named(t, c.src); !reflect.DeepEqual(merged, c.want) {
 			t.Errorf("%q: %v, want %v", c.src, merged, c.want)
+		}
+	}
+}
+
+// aliases parses src and answers what its passes show of an alias: each
+// rule whose first open token is one, with the value that token carries,
+// as "rule=json". The part reads an alias to a mapping or a sequence from
+// that token, on the open pass of the rule that reads it: a val, or, for
+// an alias on the line after its key, the indent the val pushed.
+func aliases(t *testing.T, src string) []string {
+	t.Helper()
+	seen := []string{}
+	j := MakeJsonic()
+	j.SubRuleDone(func(rule *tabnas.Rule, _ *tabnas.Context, done tabnas.RuleDone) {
+		if done.State == tabnas.OPEN && rule.ON > 0 &&
+			len(rule.O[0].Src) > 0 && '*' == rule.O[0].Src[0] {
+			b, err := json.Marshal(specCanon(rule.O[0].Val))
+			if err != nil {
+				t.Fatalf("%q: %v", src, err)
+			}
+			seen = append(seen, rule.Name+"="+string(b))
+		}
+	})
+	if _, err := j.Parse(src); err != nil {
+		t.Fatalf("%q: %v", src, err)
+	}
+	return seen
+}
+
+func TestAnAliasIsTheFirstTokenOfTheRuleThatReadsItAValOrAnIndent(t *testing.T) {
+	for _, c := range []struct {
+		src  string
+		want []string
+	}{
+		{"a: &q [1]\nb: *q\n", []string{"val=[1]"}},
+		{"x: &x [1]\na:\n  *x\n", []string{"indent=[1]"}},
+		{"x: &m {p: 1}\na:\n  *m\n", []string{`indent={"p":1}`}},
+		{"x: &s hi\na:\n  *s\n", []string{`indent="hi"`}},
+		{"x: &x [1]\nl:\n  -\n    *x\n", []string{"indent=[1]"}},
+		{"x: &x [1]\na:\n  *x\nb: *x\n", []string{"indent=[1]", "val=[1]"}},
+	} {
+		if got := aliases(t, c.src); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("%q: the passes show %v, not %v", c.src, got, c.want)
 		}
 	}
 }

@@ -402,19 +402,19 @@ repository, through any runtime's `translate()`:
   included, at the root and as a block sequence's item, and nothing in
   a flow sequence; a key with no value in a flow mapping (`{a, b: c}`)
   is a null member at once; an `indent` opened on a plain scalar (the
-  value on the line after its key, indented) yields it at its close; an
-  alias whose anchor's node is still open is undefined; a separator with
-  no value is a null element; a stream of directives and document
-  markers alone is null. Every event is the one the walk of the
-  grammar's value gives. The part's header says how, and what it
-  measured: over the 626 inputs of `test/spec/*.tsv` that are not error
-  rows and the 287 cases of the YAML Test Suite the reader reads, it
-  writes the walk's tree for 850 in every runtime; it refuses 6 itself,
-  merge sources that repeat a key the grammar merged (below), and the
-  host's tree contract refuses the other 57, which a host reads whole: a
-  stream of several documents is a second root (ruling 5 of admin
-  ADR-33), and a mapping that repeats a key, whose values the grammar
-  combines, holds the key twice.
+  value on the line after its key, indented) yields it at its close,
+  and one opened on an alias to a collection writes the collection
+  there; a separator with no value is a null element; a stream of
+  directives and document markers alone is null. Every event is the one
+  the walk of the grammar's value gives. The part's header says how, and
+  what it measured: over the 810 inputs of `test/spec/*.tsv` that are
+  not error rows and the 288 cases of the YAML Test Suite the reader
+  reads, it writes the walk's tree for 1,033 in every runtime; it
+  refuses 6 itself, merge sources that repeat a key the grammar merged
+  (below), and the host's tree contract refuses the other 59, which a
+  host reads whole: a stream of several documents is a second root
+  (ruling 5 of admin ADR-33), and a mapping that repeats a key, whose
+  values the grammar combines, holds the key twice.
   - **Aliases are replayed.** The lexer reads `&name` and hands it to
     the val that claims it, so no pass carries it. That val names it in
     its counters instead (`nameAnchors` in `ts/src/yaml.ts`, and its
@@ -425,9 +425,12 @@ repository, through any runtime's `translate()`:
     its own `i`, from its open pass to its close, records a mapping's or
     a sequence's under the name, and writes them again at an alias to a
     collection, whose token carries the value the grammar resolved
-    (a scalar's the val's close carries already). What the part keeps is
-    held in its state, under `max_metadata_bytes`, past which the run
-    fails with `RESOURCE_LIMIT_EXCEEDED` naming it.
+    (a scalar's the rule's close carries already). The alias's token is
+    the first token of the rule that reads it: a `val`, or the `indent`
+    that reads an alias on the line after its key
+    (`ts/test/counters.test.ts` and its twins hold both). What the part
+    keeps is held in its state, under `max_metadata_bytes`, past which
+    the run fails with `RESOURCE_LIMIT_EXCEEDED` naming it.
   - **A merge key's members are held.** A plain `<<` in a mapping is no
     member: the part keeps its value's events until the mapping closes.
     The grammar folds the members in at the map's close, after the
