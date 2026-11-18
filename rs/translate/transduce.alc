@@ -26,10 +26,12 @@
 ; grammar keeps each; a pair opened on a key with no value in a flow
 ; mapping (`{a, b: c}`) is a null member at once, as the grammar stores
 ; it; an `indent` opened on a plain scalar (`a:` and the scalar on the
-; next line, indented) yields it at its close, as a `val` does; an `elem`
-; opened on a separator with no value (`[a, , b]`) is a null element; a
-; stream of directives and document markers alone (`...`) makes a
-; `stream` pass and no value, null at `finish`, as the empty document is.
+; next line, indented) yields it at its close, as a `val` does, and one
+; opened on an alias to a collection writes the collection there, as a
+; `val` does; an `elem` opened on a separator with no value (`[a, , b]`)
+; is a null element; a stream of directives and document markers alone
+; (`...`) makes a `stream` pass and no value, null at `finish`, as the
+; empty document is.
 ;
 ; Anchors and aliases. The lexer reads `&name` and hands it to the val
 ; that claims it, so no pass carries it; the grammar names it instead in
@@ -42,16 +44,18 @@
 ; value, each with its depth in the value, as they are written; at the
 ; close a mapping's or a sequence's are recorded under the name, in place
 ; of the name's earlier record, as the grammar records the node. An alias
-; is a token whose value the grammar resolved: a scalar's the val's close
-; carries; a collection's are the events recorded under the alias's name,
-; written again at the val's close, after checking that the token's value
-; is a collection of that kind and size. An alias read while its
-; anchor's node was still open (`&a [*a]`) is inside the node it names:
-; the grammar refuses it, as `yaml_recursive_alias`, and the parse's
-; error ends the run. Every value the part keeps is held in its state,
-; under max_metadata_bytes, past which the run fails with
-; RESOURCE_LIMIT_EXCEEDED naming it, and the anchored values are kept for
-; the rest of the document, as the grammar keeps them.
+; is a token whose value the grammar resolved, the token of the rule that
+; reads it: a `val`, or the `indent` that reads an alias on the line after
+; its key. A scalar's that rule's close carries; a collection's are the
+; events recorded under the alias's name, written again at that rule's
+; close, after checking that the token's value is a collection of that
+; kind and size. An alias read while its anchor's node was still open
+; (`&a [*a]`) is inside the node it names: the grammar refuses it, as
+; `yaml_recursive_alias`, and the parse's error ends the run. Every value
+; the part keeps is held in its state, under max_metadata_bytes, past
+; which the run fails with RESOURCE_LIMIT_EXCEEDED naming it, and the
+; anchored values are kept for the rest of the document, as the grammar
+; keeps them.
 ;
 ; Merge keys. A plain `<<` in a mapping (`map`; a sequence's mapping is
 ; not merged, as the grammar merges none) is no member: the part keeps its
@@ -77,13 +81,13 @@
 ; What the tree contract after the part refuses is read whole the same
 ; way: a stream of several documents, whose second root follows the
 ; first, and a mapping that repeats a key, whose values the grammar
-; combines, where the part writes the member twice. Over the 626 inputs
+; combines, where the part writes the member twice. Over the 810 inputs
 ; of `test/spec/*.tsv` that are not error rows, the part writes what the
-; walk writes for 581; it refuses 6 itself, merge sources that repeat a
-; key the grammar merged, and the tree contract refuses the other 39 (18
+; walk writes for 763; it refuses 6 itself, merge sources that repeat a
+; key the grammar merged, and the tree contract refuses the other 41 (20
 ; streams of several documents, 21 repeated keys). Over the YAML Test
-; Suite's 308 cases that are not error cases, the reader reads 287, and
-; the part writes what the walk writes for 269 of them; the other 18 are
+; Suite's 308 cases that are not error cases, the reader reads 288, and
+; the part writes what the walk writes for 270 of them; the other 18 are
 ; streams of several documents.
 ;
 ; The state is [stack carry rooted pending held], held [levels anchors
@@ -91,19 +95,19 @@
 ; innermost last: :object for a map (:merge-object once a merge key opens
 ; in it, :quoted-object once a quoted `<<` does), :array for a flow list,
 ; :block-array for the val or indent whose open pushed the block list,
-; :elem-object for a yamlElemMap, :leaf for a val that pushed nothing,
-; [:alias name shape] for a val whose token is an alias to a collection,
-; :merge-pair for a merge key's pair, and :skip for any other rule. carry
-; says whether a val's close made an implicit list, so the list's open
-; starts no array; rooted, whether a value has begun; pending, the key a
-; pair announced whose value has not begun, or missing. A level is [sink
-; recorders]: the sink is :out, the output, at the root, or a collector of
-; a merge key's value; a recorder is [i names collector] for an open
-; anchored val; a collector is [depth started done items], the events
-; kept with their depths. anchors holds [name items] per recorded
-; anchor, merges the candidates of each open merging mapping, innermost
-; last. Without anchors and merge keys nothing grows with the document's
-; length, only with its nesting.
+; :elem-object for a yamlElemMap, :leaf for a val or an indent that
+; pushed nothing, [:alias name shape] for one whose token is an alias to
+; a collection, :merge-pair for a merge key's pair, and :skip for any
+; other rule. carry says whether a val's close made an implicit list, so
+; the list's open starts no array; rooted, whether a value has begun;
+; pending, the key a pair announced whose value has not begun, or
+; missing. A level is [sink recorders]: the sink is :out, the output, at
+; the root, or a collector of a merge key's value; a recorder is [i names
+; collector] for an open anchored val; a collector is [depth started done
+; items], the events kept with their depths. anchors holds [name items]
+; per recorded anchor, merges the candidates of each open merging mapping,
+; innermost last. Without anchors and merge keys nothing grows with the
+; document's length, only with its nesting.
 
 def yaml-transduce-has-key [groups]
   match (count (filter (fn [g] (match g (case "key" true) (case _ false))) groups))
@@ -566,14 +570,16 @@ def yaml-transduce-null-member [stack carry pending held token]
 ; The rule passes
 ; ---------------------------------------------------------------------
 
-; A val whose token's value is a collection: an alias, whose name is its
-; source after the `*`.
+; A val or an indent whose token's value is a collection: an alias, whose
+; name is its source after the `*`.
 def yaml-transduce-alias-open [stack carry pending held token]
   match (first-split "*" (get :src token))
     case ["" name] (transition [(push [:alias name (yaml-transduce-shape (get :val token))] stack) carry true pending held] [])
     case _ (fail :unstreamable "a collection in a token that is no alias, whose events the passes do not show")
 
-; A val that pushed nothing: a leaf, or an alias to a collection.
+; A val or an indent that pushed nothing: a leaf, or an alias to a
+; collection. An indent reads the value on the line after its key
+; (`a:`, then `*x` indented), and its token is the alias's as a val's is.
 def yaml-transduce-leaf-open [stack carry pending held rule]
   match (transduce-token 0 rule)
     case missing (transition [(push :leaf stack) carry true pending held] [])
@@ -612,7 +618,7 @@ def yaml-transduce-open [stack carry rooted pending held rule]
     case "indent"
       match (yaml-transduce-pushes rule)
         case "yamlBlockList" (transition [(push :block-array stack) carry true missing held] (yaml-transduce-value pending [array-start]))
-        case "" (transition [(push :leaf stack) carry true pending held] [])
+        case "" (yaml-transduce-leaf-open stack carry pending held rule)
         case _ (transition [(push :skip stack) carry rooted pending held] [])
     case "pair"
       match (yaml-transduce-pushes rule)
@@ -668,8 +674,8 @@ def yaml-transduce-unrecorded [rest carry pending held shape]
     case [:marker n] (yaml-transduce-undefined rest carry pending held)
     case _ (fail :unstreamable "an alias to a collection whose events the part did not keep")
 
-; An alias's val closes: the scalar its close carries, or the events
-; recorded under its name, written again.
+; The rule that read an alias closes, a val or an indent: the scalar its
+; close carries, or the events recorded under its name, written again.
 def yaml-transduce-alias-close [rest carry pending held rule name shape]
   match (get :value rule)
     case missing

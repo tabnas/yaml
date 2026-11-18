@@ -55,6 +55,26 @@ function named(src: string): { anchors: string[], merged: [string, number][][] }
 }
 
 
+// What the passes show of an alias: each rule whose first open token is
+// one, with the value that token carries, as JSON. The part reads an
+// alias to a mapping or a sequence from that token, on the open pass of
+// the rule that reads it: a val, or, for an alias on the line after its
+// key, the indent the val pushed.
+function aliases(src: string): [string, string][] {
+  const j = new Tabnas().use(jsonic).use(Yaml)
+  const seen: [string, string][] = []
+  j.sub({
+    ruleDone: (rule: any, _ctx: any, done: any) => {
+      if ('o' === done.state && 0 < rule.oN && String(rule.o0.src).startsWith('*')) {
+        seen.push([rule.name, JSON.stringify(rule.o0.val)])
+      }
+    },
+  })
+  j.parse(src)
+  return seen
+}
+
+
 describe('counters', () => {
 
   test('an anchored val names its anchors on its own passes', () => {
@@ -92,4 +112,14 @@ describe('counters', () => {
     assert.deepStrictEqual(named('- <<: {x: 1}\n  b: 2\n').merged, [])
     assert.deepStrictEqual(named('a: {<<: 1, b: 2}\n').merged, [])
   })
+
+  test('an alias is the first token of the rule that reads it, a val or an indent', () => {
+    assert.deepStrictEqual(aliases('a: &q [1]\nb: *q\n'), [['val', '[1]']])
+    assert.deepStrictEqual(aliases('x: &x [1]\na:\n  *x\n'), [['indent', '[1]']])
+    assert.deepStrictEqual(aliases('x: &m {p: 1}\na:\n  *m\n'), [['indent', '{"p":1}']])
+    assert.deepStrictEqual(aliases('x: &s hi\na:\n  *s\n'), [['indent', '"hi"']])
+    assert.deepStrictEqual(aliases('x: &x [1]\nl:\n  -\n    *x\n'), [['indent', '[1]']])
+    assert.deepStrictEqual(aliases('x: &x [1]\na:\n  *x\nb: *x\n'), [['indent', '[1]'], ['val', '[1]']])
+  })
+
 })

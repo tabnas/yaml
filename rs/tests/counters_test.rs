@@ -111,3 +111,45 @@ fn a_map_names_the_keys_its_merge_brought_and_only_those_with_their_sources() {
         assert_eq!(named(src).1, want, "{src:?}");
     }
 }
+
+/// What `src`'s passes show of an alias: each rule whose first open token
+/// is one, with the value that token carries, as `rule=json`. The part
+/// reads an alias to a mapping or a sequence from that token, on the open
+/// pass of the rule that reads it: a val, or, for an alias on the line
+/// after its key, the indent the val pushed.
+fn aliases(src: &str) -> Vec<String> {
+    let mut parser = tabnas_yaml::make();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    parser.subscribe_rule_done(move |rule, _context, done| {
+        if done.state != RuleState::Open {
+            return;
+        }
+        if let Some(token) = rule.o0() {
+            if token.src.as_str().starts_with('*') {
+                let name: &str = rule.name.as_ref();
+                sink.lock().unwrap().push(format!("{name}={}", token.val));
+            }
+        }
+    });
+    parser.parse(src).unwrap_or_else(|e| panic!("{src:?}: {e}"));
+    let seen = seen.lock().unwrap().clone();
+    seen
+}
+
+#[test]
+fn an_alias_is_the_first_token_of_the_rule_that_reads_it_a_val_or_an_indent() {
+    for (src, want) in [
+        ("a: &q [1]\nb: *q\n", vec!["val=[1]"]),
+        ("x: &x [1]\na:\n  *x\n", vec!["indent=[1]"]),
+        ("x: &m {p: 1}\na:\n  *m\n", vec![r#"indent={"p":1}"#]),
+        ("x: &s hi\na:\n  *s\n", vec![r#"indent="hi""#]),
+        ("x: &x [1]\nl:\n  -\n    *x\n", vec!["indent=[1]"]),
+        (
+            "x: &x [1]\na:\n  *x\nb: *x\n",
+            vec!["indent=[1]", "val=[1]"],
+        ),
+    ] {
+        assert_eq!(aliases(src), want, "{src:?}");
+    }
+}
