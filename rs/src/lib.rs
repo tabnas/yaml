@@ -50,7 +50,7 @@ mod readme_examples {}
 /// "version": the release orchestrator rewrites all three constants, and
 /// `tests/version_test.rs` fails the build if they drift. Mirrors
 /// `const VERSION` in `ts/src/yaml.ts` and `go/yaml.go`.
-pub const VERSION: &str = "0.5.32";
+pub const VERSION: &str = "0.5.33";
 
 /// The plugin name, which is also the key its options sit under.
 const PLUGIN_NAME: &str = "yaml";
