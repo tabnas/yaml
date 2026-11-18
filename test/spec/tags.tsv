@@ -59,3 +59,19 @@ a: !!int 0x20000000000001	{"a":9007199254740992}
 a: !!int 0x20000000000003	{"a":9007199254740996}	
 a: !!int 0o1777777777777777777777	{"a":18446744073709552000}	
 a: !!int 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff	{"a":"@@Infinity"}	
+a: !!str\nb: 1	{"a":"","b":1}	
+a: !!null\nb: 1	{"a":null,"b":1}	
+- !!str\n- x	["","x"]	
+a:\n  b: !!str\nc: 1	{"a":{"b":""},"c":1}	
+a:\n  b: !!str\n  c: 1	{"a":{"b":"","c":1}}	
+a: !!str\n  text	{"a":"text"}	
+- !!str\n  text	["text"]	
+a: !!str\n  text\n  more\nb: 1	{"a":"text more","b":1}	
+a: !!str\n  123	{"a":"123"}	
+a: !!int\n  "12"	{"a":12}	
+--- !!str\nd\ne	"d e"	
+&a !!str\ntext	"text"	
+a: !!str\n  k: v	{"a":{"k":"v"}}	
+a: !!foo\n  k: v\n  m: n\nb: 1	{"a":{"k":"v","m":"n"},"b":1}	
+a: !!str\n\n  text	{"a":"text"}	
+!!str	""	

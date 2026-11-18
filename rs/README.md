@@ -71,11 +71,31 @@ started explicitly with `---`, and whether it ended explicitly with
 use tabnas_yaml::{make_with, YamlOptions};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let parser = make_with(YamlOptions { meta: true });
+    let parser = make_with(YamlOptions { meta: true, ..Default::default() });
     let value = parser.parse("%YAML 1.2\n---\na: 1\n...")?;
     assert_eq!(
         value.to_string(),
         r#"{"meta":{"directives":["%YAML 1.2"],"explicit":true,"ended":true},"content":{"a":1}}"#
+    );
+    Ok(())
+}
+```
+
+With the `schema` option set to `Schema::Core`, a plain scalar resolves
+as the YAML 1.2 core schema says and no other way. Without it the plugin
+also reads the YAML 1.1 booleans `yes`, `no`, `on` and `off`, and
+jsonic's number syntax, such as `1_000` and `0b11`. Under it those are
+strings.
+
+```rust
+use tabnas_yaml::{make_with, Schema, YamlOptions};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let core = make_with(YamlOptions { schema: Some(Schema::Core), ..Default::default() });
+    let value = core.parse("{a: yes, b: 1_000, c: true, d: 12}")?;
+    assert_eq!(
+        value.to_string(),
+        r#"{"a":"yes","b":"1_000","c":true,"d":12}"#
     );
     Ok(())
 }
@@ -116,7 +136,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 Parse errors are the engine's `TabnasError`, re-exported as `YamlError`,
 with `code`, `row`, `col` and a report that shows the offending source
-with a caret under it.
+with a caret under it. The plugin adds three codes of its own to the
+engine's and jsonic's: `yaml_undefined_alias`, for an alias that names
+no anchor before it, `yaml_recursive_alias`, for an alias inside the
+node it names, and `yaml_tab_indent`, for a tab in a line's indentation
+before a mapping key or a sequence entry.
+
+```rust
+fn main() {
+    let error = tabnas_yaml::parse("a:\n\tb: 1").unwrap_err();
+    assert_eq!(error.code, "yaml_tab_indent");
+    assert_eq!((error.row, error.col), (2, 1));
+}
+```
 
 The crate also carries what a host needs to write YAML from another
 format. `render_text()` is YAML's render, a library in the
@@ -145,8 +177,8 @@ runtimes:
 | Suite bucket | Cases | Result |
 |---|---|---|
 | Valid parse (the case has `in.json`) | 279 | 279 pass, compared strictly across every document in the stream |
-| Expected error (the case has `error`) | 94 | 24 rejected; the other 70 are accepted and listed |
-| No expected output | 29 | 8 parse; the other 21 are rejected and listed |
+| Expected error (the case has `error`) | 94 | 28 rejected; the other 66 are accepted and listed |
+| No expected output | 29 | 9 parse; the other 20 are rejected and listed |
 | **Total** | **402** | |
 
 All 402 are asserted, with no skip list. The accepted-but-invalid cases
@@ -210,8 +242,9 @@ them written up with a measured table in
 [`../DIVERGENCE.md`](../DIVERGENCE.md):
 
 - **Configuration is a typed struct, not a plugin option bag.**
-  `YamlOptions { meta }` is the whole surface, and `make_with` takes it
-  by value. The callable facade TypeScript exposes has no Rust
+  `YamlOptions { meta, schema }` is the whole surface, with
+  `Some(Schema::Core)` for the core schema, and `make_with` takes it by
+  value. The callable facade TypeScript exposes has no Rust
   counterpart.
 - **The translation parts are this port's alone for now.**
   `render_text()` and `manifest_text()` have no TypeScript or Go
@@ -230,11 +263,15 @@ them written up with a measured table in
   value with the call stack to display, convert or drop it, so an
   unbounded document ends the caller's process rather than returning an
   error. TypeScript and Go have no limit.
-- **Two pathological documents are refused in a different place**, with
-  the same code as TypeScript and Go give them. It comes from the order
-  the engine's lexer offers a moved cursor to its remaining matchers. No
-  document's **value** differs for that reason any more. The register
-  names the inputs.
+- **A refusal can report the engine's row and column.** A token this
+  plugin builds stands where its offset says. The engine cuts a number
+  after a quoted scalar or a closed flow collection at its own cursor,
+  which counts a row at `\n` alone and counts a byte order mark as a
+  column. Where that number is what the parse refuses, after a `\r` by
+  itself or on the first line after a byte order mark, the diagnostic has
+  the code and the offset TypeScript and Go give, and the engine's row
+  and column. No document's **value** differs for that reason. The
+  register names the inputs.
 - **A `\u` escape naming an unpaired UTF-16 surrogate becomes the
   replacement character.** A Rust string holds Unicode scalars and a lone
   surrogate is not one, where a TypeScript string is UTF-16 and keeps it.

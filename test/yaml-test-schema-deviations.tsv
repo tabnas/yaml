@@ -12,6 +12,11 @@
 # DELETE its line: the test will tell you to. Never add a line to silence a
 # regression in a case that used to pass.
 #
+# This ledger is of the plugin's reading without options. Under the option
+# `schema: 'core'` none of it applies: every runner asserts the whole
+# corpus again under that option, and each input listed here reads there
+# as the core schema says.
+#
 # Format: <input, as a JSON string> <TAB> <reason>
 # (lines starting with # and blank lines are ignored)
 

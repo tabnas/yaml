@@ -18,6 +18,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	jsonic "github.com/tabnas/jsonic/go"
 )
 
 var (
@@ -150,5 +152,66 @@ func TestYamlTestSchema(t *testing.T) {
 				t.Errorf("%s: want %#v, got %#v (err %v)", name, want, got, err)
 			}
 		})
+	}
+
+	// Under the core schema option the ledger does not apply: EVERY input
+	// reads as the core schema says, the listed deviations included. That
+	// is what the option means, so the corpus is its definition. Mirrors
+	// the second describe of ts/test/yaml-test-schema.test.ts.
+	core := MakeJsonic(YamlOptions{Schema: "core"})
+	t.Run("under schema core", func(t *testing.T) {
+		for _, input := range inputs {
+			want := schemaExpected(t, corpus[input])
+			name, _ := json.Marshal(input)
+			t.Run(string(name), func(t *testing.T) {
+				got, err := core.Parse(input)
+				if err != nil || !schemaSame(got, want) {
+					t.Errorf("%s: want %#v, got %#v (err %v)", name, want, got, err)
+				}
+			})
+		}
+	})
+}
+
+// An unknown schema is refused when the plugin is installed, so that a
+// misspelling cannot leave the default on.
+func TestAnUnknownSchemaIsRefused(t *testing.T) {
+	for _, schema := range []any{"Core", "json", 1} {
+		err := jsonic.Make().Use(Yaml, map[string]any{"schema": schema})
+		if err == nil || !strings.Contains(err.Error(), "unknown schema") {
+			t.Errorf("schema %#v: Use gave %v, want an unknown schema error", schema, err)
+		}
+	}
+	for _, schema := range []any{"core", "", nil} {
+		if err := jsonic.Make().Use(Yaml, map[string]any{"schema": schema}); err != nil {
+			t.Errorf("schema %#v: Use gave %v", schema, err)
+		}
+	}
+
+	// MakeJsonic has no error to return, and a parser it made without the
+	// plugin would read YAML as relaxed JSON: it panics with the plugin's
+	// error.
+	for _, schema := range []string{"Core", "json"} {
+		func() {
+			defer func() {
+				r := recover()
+				err, ok := r.(error)
+				if !ok || !strings.Contains(err.Error(), "unknown schema") {
+					t.Errorf("schema %q: MakeJsonic gave %v, want a panic with the unknown schema error", schema, r)
+				}
+			}()
+			MakeJsonic(YamlOptions{Schema: schema})
+		}()
+	}
+	for _, schema := range []string{"core", ""} {
+		got, err := MakeJsonic(YamlOptions{Schema: schema}).Parse("a: yes")
+		if err != nil {
+			t.Fatalf("schema %q: %v", schema, err)
+		}
+		want := map[string]any{"a": true}
+		if schema == "core" {
+			want = map[string]any{"a": "yes"}
+		}
+		expectEqual(t, got, want)
 	}
 }

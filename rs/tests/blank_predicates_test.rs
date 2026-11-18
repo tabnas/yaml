@@ -51,9 +51,11 @@ fn a_tab_does_not_end_a_typed_tags_anchor_name() {
     expect("a: !!str &\tn foo", j!({"a": "foo"}));
     expect("a: !!str &n\t foo", j!({"a": "foo"}));
 
-    // The controls: a SPACE does end the name, and so does a line end.
+    // The controls: a SPACE does end the name, and so does a line end,
+    // where the tagged node is then empty and the next line is the next
+    // member.
     expect("a: !!str &n foo", j!({"a": "foo"}));
-    expect("a: !!str &n\nb: 1", j!({"a": {"b": 1}}));
+    expect("a: !!str &n\nb: 1", j!({"a": "", "b": 1}));
 
     // The lexer's own `&name` handler is a DIFFERENT scan, and a tab
     // does end a name there. Without this row the two could be merged.

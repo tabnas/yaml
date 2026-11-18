@@ -10,27 +10,21 @@
 //! (`#DS` / `#DE` / `#DR`), anchors, aliases, tags, explicit keys and
 //! both quoted scalar forms.
 //!
-//! # Two cursors
+//! # Rows and columns
 //!
-//! The canonical matcher mutates the lexer's own `Point` directly, and
-//! not always to the position natural advancement would give: after a
-//! standalone anchor or tag line it assigns `pnt.cI = spaces` rather than
-//! `spaces + 1`, and before a document marker it assigns `0`. Those are
-//! quirks, but they are load-bearing ones, because `@val-set-el-in`
-//! computes a block sequence's indent as `#EL`'s column minus one. A port
-//! that advanced naturally would accept `&a\n- 1\n- 2`, which the
-//! canonical parser rejects.
-//!
-//! This engine's `Lexer` exposes advancement, not assignment, so this
-//! module carries a VIRTUAL cursor beside the real one: the row and
-//! column the canonical matcher would hold, kept in the context bag
-//! ([`crate::state::V_ROW`], [`V_COL`](crate::state::V_COL),
-//! [`V_POS`](crate::state::V_POS)). Every token this plugin emits is
-//! built at the virtual point; the real cursor is moved by the same
-//! number of characters, so the byte offsets never part. When another
-//! matcher has consumed a token in between, the virtual point is carried
-//! over that span the way the engine carries its own, so the offset
-//! survives rather than being forgotten.
+//! A token's row and column are the ones its offset gives: one more than
+//! the line breaks before it (a `\r\n` is one, and so is a `\r` by
+//! itself), and how many characters it stands past its line's start, from
+//! 1 ([`crate::source::Src::row_col`]). The canonical matcher sets them
+//! from the offset wherever it cuts a token (its `place`). It once kept
+//! them up token by token, and they drifted: a column too far after every
+//! `: `, no row for a line break inside a quoted scalar, column 0 after a
+//! block scalar. This port carried a virtual cursor that reproduced that
+//! drift, because `@val-set-el-in` reads the column of a sequence entry's
+//! dash. With the columns exact it is gone: each decision here still moves
+//! a `(position, row, column)` triple, but only the position counts, and
+//! every token, and every refusal, is placed by its offset when it is
+//! built ([`ready`]).
 //!
 //! # Bytes and columns
 //!
@@ -54,17 +48,13 @@ use crate::text;
 /// The reference name the grammar's `options.lex.match` entry uses.
 pub(crate) const MATCHER: &str = "@yaml-matcher";
 
-/// A token this plugin builds, with the virtual point it was built at.
-/// The canonical matcher captures `lex.pnt` at different moments in
-/// different branches, sometimes before its own advance and sometimes
-/// after, so the point travels with the token rather than being inferred.
+/// A token this plugin builds, with the source position it starts at,
+/// which places it.
 pub(crate) struct Tok {
     pub(crate) name: &'static str,
     pub(crate) val: Value,
     pub(crate) src: String,
     pub(crate) si: usize,
-    pub(crate) ri: usize,
-    pub(crate) ci: usize,
 }
 
 impl Tok {
@@ -79,18 +69,14 @@ impl Tok {
             val,
             src: src.into(),
             si: at.0,
-            ri: at.1,
-            ci: at.2,
         }
     }
 }
 
-/// What one matcher call decided: where the cursor ends up, what the
-/// virtual row and column become, and the token to return, if any.
+/// What one matcher call decided: where the cursor ends up, and the token
+/// to return, if any.
 pub(crate) struct Act {
     pub(crate) si: usize,
-    pub(crate) ri: usize,
-    pub(crate) ci: usize,
     pub(crate) token: Option<Tok>,
     /// The refusal to report where this matcher's cursor stands, if any.
     pub(crate) bad: Option<Bad>,
@@ -109,8 +95,6 @@ impl Act {
     pub(crate) fn still(at: (usize, usize, usize)) -> Self {
         Act {
             si: at.0,
-            ri: at.1,
-            ci: at.2,
             token: None,
             bad: None,
         }
@@ -119,8 +103,6 @@ impl Act {
     pub(crate) fn moved(at: (usize, usize, usize), token: Option<Tok>) -> Self {
         Act {
             si: at.0,
-            ri: at.1,
-            ci: at.2,
             token,
             bad: None,
         }
@@ -134,8 +116,6 @@ impl Act {
     pub(crate) fn refuse(at: (usize, usize, usize)) -> Self {
         Act {
             si: at.0,
-            ri: at.1,
-            ci: at.2,
             token: None,
             bad: Some(Bad {
                 code: "unexpected",
@@ -147,15 +127,16 @@ impl Act {
     /// An alias of `chars` characters whose anchor does not occur before
     /// it, refused where it starts.
     pub(crate) fn undefined_alias(at: (usize, usize, usize), chars: usize) -> Self {
+        Act::bad(at, crate::UNDEFINED_ALIAS, chars)
+    }
+
+    /// A refusal with the code `code`, where the cursor lands at `at`,
+    /// naming the `chars` characters from there.
+    pub(crate) fn bad(at: (usize, usize, usize), code: &'static str, chars: usize) -> Self {
         Act {
             si: at.0,
-            ri: at.1,
-            ci: at.2,
             token: None,
-            bad: Some(Bad {
-                code: crate::UNDEFINED_ALIAS,
-                chars,
-            }),
+            bad: Some(Bad { code, chars }),
         }
     }
 }
@@ -338,58 +319,20 @@ pub(crate) fn advance_cols(
     (end, at.1, at.2 + columns)
 }
 
-/// Carry a `(row, column)` pair forward over `src.slice(from, to)` the way the
-/// engine's own cursor moves: a line feed starts a new row at column one,
-/// anything else charges one column.
-fn carry(src: Src<'_>, from: usize, to: usize, row: usize, column: usize) -> (usize, usize) {
-    let (mut row, mut column) = (row, column);
-    let from = src.clamp(from);
-    let to = src.clamp(to).max(from);
-    for character in src.slice(from, to).chars() {
-        if character == '\n' {
-            row += 1;
-            column = 1;
-        } else {
-            column += 1;
-        }
-    }
-    (row, column)
-}
-
-/// The virtual point for this call: what was stored, carried over
-/// anything another matcher consumed since, or the real cursor when
-/// nothing has been stored yet.
-pub(crate) fn virtual_point_for(src: Src<'_>, point: &Point, context: &Context) -> (usize, usize) {
-    let here = point.site.si;
-    let Some(stored) = state::num(context, state::V_POS) else {
-        return (point.site.ri, point.site.ci);
-    };
-    let stored = stored.max(0.0) as usize;
-    if stored > here {
-        return (point.site.ri, point.site.ci);
-    }
-    let row = state::usize_at(context, state::V_ROW);
-    let column = state::usize_at(context, state::V_COL);
-    carry(src, stored, here, row, column)
-}
-
-fn store_point(context: &mut Context, act: &Act) {
-    state::set_usize(context, state::V_POS, act.si);
-    state::set_usize(context, state::V_ROW, act.ri);
-    state::set_usize(context, state::V_COL, act.ci);
-}
-
-/// A decision made ready to apply: its token built at its own virtual
-/// point, and how many characters the real cursor moves.
+/// A decision made ready to apply: its token built where it starts, how
+/// many characters the real cursor moves, and the row and column of the
+/// place a refusal names.
 pub(crate) struct Ready {
     act: Act,
     token: Option<Token>,
     characters: usize,
+    place: (usize, usize),
 }
 
-/// Build a decision's token at its own virtual point, and count the
-/// characters the real cursor moves over, reading `src`, the source the
-/// decision was made over, from the cursor at `point`.
+/// Build a decision's token, and count the characters the real cursor
+/// moves over, reading `src`, the source the decision was made over, from
+/// the cursor at `point`. A token's row and column are the ones its offset
+/// gives ([`Src::row_col`]), whatever the decision computed as it went.
 pub(crate) fn ready(src: Src<'_>, point: &Point, act: Act) -> Ready {
     let start = point.site.si;
     let start_pos = point.site.pos;
@@ -400,6 +343,7 @@ pub(crate) fn ready(src: Src<'_>, point: &Point, act: Act) -> Ready {
         act.token.as_ref().map(|token| {
             let offset = token.si.clamp(start, end);
             let pos = start_pos + src.slice(start, offset).chars().count();
+            let (ri, ci) = src.row_col(offset);
             // A tin of -1 asks the engine to resolve the identity from the
             // name, which it does for every custom matcher result. Every
             // name used here is registered before the grammar is installed.
@@ -413,47 +357,53 @@ pub(crate) fn ready(src: Src<'_>, point: &Point, act: Act) -> Ready {
                     site: Site {
                         si: offset,
                         pos,
-                        ri: token.ri,
-                        ci: token.ci,
+                        ri,
+                        ci,
                     },
                 },
             )
         })
     };
 
-    let characters = src.slice(start, act.si.clamp(start, end)).chars().count();
+    let landed = act.si.clamp(start, end);
+    let characters = src.slice(start, landed).chars().count();
+    let place = if act.bad.is_some() {
+        src.row_col(landed)
+    } else {
+        (0, 0)
+    };
     Ready {
         act,
         token,
         characters,
+        place,
     }
 }
 
-/// Apply a decision made ready: move the real cursor by the same number of
-/// characters as the virtual one, and record where the virtual cursor now
-/// stands.
-pub(crate) fn apply(lexer: &mut Lexer<'_>, context: &mut Context, ready: Ready) -> Option<Token> {
+/// Apply a decision made ready: move the real cursor to where the decision
+/// left it.
+pub(crate) fn apply(lexer: &mut Lexer<'_>, ready: Ready) -> Option<Token> {
     let Ready {
         act,
         token,
         characters,
+        place,
     } = ready;
-    let start_pos = lexer.point().site.pos;
+    let at = lexer.point().site.pos + characters;
     if characters > 0 {
         lexer.advance_chars(characters);
     }
-    store_point(context, &act);
     if let Some(bad) = act.bad {
-        // The refusal is reported where this plugin's cursor stands, not
-        // where the engine's does, for the reason every other token here
-        // carries the plugin's point.
+        // The refusal names the place its offset gives, as every token
+        // here does: the engine's own cursor counts a row at a line feed
+        // alone, so a `\r` by itself would leave it a row short.
         let mut refusal = if bad.chars == 0 {
             lexer.bad(bad.code)
         } else {
-            lexer.bad_span(bad.code, start_pos, start_pos + bad.chars)
+            lexer.bad_span(bad.code, at, at + bad.chars)
         };
-        refusal.site.ri = act.ri;
-        refusal.site.ci = act.ci;
+        refusal.site.ri = place.0;
+        refusal.site.ci = place.1;
         return Some(refusal);
     }
     token
@@ -481,14 +431,12 @@ pub(crate) fn yaml_matcher(
     let start = point.site.si;
     let touched = Cell::new(false);
     let again = kept.again(start, source::taken(context));
-    let (row, column) = if again {
-        kept.restore(context)
+    if again {
+        kept.restore(context);
     } else {
         kept.note(start, lexer);
-        let at = virtual_point_for(kept.src(lexer.source(), &touched), &point, context);
-        kept.save(context, at);
-        at
-    };
+        kept.save(context);
+    }
     // The flow scan goes on from where it stopped, which a cut made again
     // begins from again: the copy keeps the text from there.
     let flow_from = state::usize_at(context, state::FLOW_POS);
@@ -498,6 +446,7 @@ pub(crate) fn yaml_matcher(
             // Before the copy drops the text it went on from.
             state::update_flow(context, src, start);
         }
+        let (row, column) = src.row_col(start);
         let act = decide(src, (start, row, column), context);
         // A call that moved the cursor and produced nothing leaves the rest
         // of the matcher chain reading a position it was not dispatched for.
@@ -511,7 +460,7 @@ pub(crate) fn yaml_matcher(
     }
     let windowed = kept.windowed();
     kept.store(context);
-    let token = apply(lexer, context, ready);
+    let token = apply(lexer, ready);
     if windowed && touched.get() {
         // Past the window's end, as the engine's own matchers ask: the
         // cut is made again over a wider window.
@@ -521,43 +470,40 @@ pub(crate) fn yaml_matcher(
 }
 
 /// Whether the source holds nothing but comment lines and JavaScript's
-/// white space: `src.trim() === '' || stripped === ''` in the canonical
-/// port, where `stripped` is `src.replace(/^[ \t]*#[^\n]*(\n|$)/gm, '')`
-/// and `trim` strips JavaScript's whitespace rather than Rust's. A line,
-/// ended by a line feed, whose first non-blank character is `#` goes,
-/// terminator included, and every other line must be white space, so the
-/// source is read from its start only as far as the first character that
-/// is neither.
+/// white space, as `src.replace(/^[ \t]*#[^\n]*(\n|$)/gm, '').trim() === ''`
+/// asks of the whole text, where `trim` strips JavaScript's whitespace
+/// rather than Rust's. It reads from the source's start and stops at the
+/// first character that is neither. A line starts after a line terminator
+/// (`\n`, `\r`, U+2028, U+2029), as `^` takes one under the `m` flag, and
+/// a comment ends at a `\n` or a `\r`. Mirrors the canonical `sourceBlank`.
 fn blank_source(src: Src<'_>) -> bool {
     let mut at = 0;
+    let mut line_start = true;
     loop {
-        // At a line's start: a comment line goes whole.
-        let mut q = at;
-        while src.is(q, b' ') || src.is(q, b'\t') {
-            q += 1;
-        }
-        if src.is(q, b'#') {
-            match src.find(q, b'\n') {
-                Some(end) => {
-                    at = end + 1;
-                    continue;
+        if line_start {
+            let mut q = at;
+            while src.is(q, b' ') || src.is(q, b'\t') {
+                q += 1;
+            }
+            if src.is(q, b'#') {
+                while src.has(q) && !line_end(src.at(q)) {
+                    q += 1;
                 }
-                None => return true,
+                if !src.has(q) {
+                    return true;
+                }
+                at = q + 1;
+                continue;
             }
         }
-        // Any other line holds only white space, to its line feed.
-        loop {
-            let Some(character) = src.char_at(at) else {
-                return true;
-            };
-            if !crate::js_space(character) {
-                return false;
-            }
-            at += character.len_utf8();
-            if character == '\n' {
-                break;
-            }
+        let Some(character) = src.char_at(at) else {
+            return true;
+        };
+        if !crate::js_space(character) {
+            return false;
         }
+        at += character.len_utf8();
+        line_start = matches!(character, '\n' | '\r' | '\u{2028}' | '\u{2029}');
     }
 }
 
@@ -618,8 +564,24 @@ fn decide(src: Src<'_>, start: (usize, usize, usize), context: &mut Context) -> 
     loop {
         // Consuming the last of the source without producing a token
         // leaves the engine's matcher chain with nothing to claim and no
-        // character to reject. End of source IS the next token.
+        // character to reject. End of source IS the next token: a pass that
+        // stepped over something with no token of its own (an anchor, a
+        // tag, blanks after a value) cuts it here, as the line break handler
+        // does. Inside a flow collection the end is refused: a collection
+        // the source ends before closing is not a document.
         if !src.has(cursor.0) {
+            // The `#CL` an explicit key owes comes first, as it does
+            // wherever the pass stands.
+            if state::flag(context, state::PENDING_CL) {
+                state::set_flag(context, state::PENDING_CL, false);
+                return Act::moved(
+                    cursor,
+                    Some(Tok::new("#CL", Value::Number(1.0), ": ", cursor)),
+                );
+            }
+            if cursor.0 != start.0 && state::flow_depth_at(context, src, cursor.0) == 0 {
+                return Act::moved(cursor, Some(Tok::new("#ZZ", Value::Undefined, "", cursor)));
+            }
             return Act::refuse(cursor);
         }
         let fwd = src.from(cursor.0);
@@ -637,10 +599,29 @@ fn decide(src: Src<'_>, start: (usize, usize, usize), context: &mut Context) -> 
                 run += 1;
             }
             let after = at(fwd, run);
-            if tab && (after == i32::from(b'\n') || after < 0) {
-                let skip = if after < 0 { run } else { run + 1 };
-                cursor = (cursor.0 + skip, cursor.1 + 1, 0);
+            if tab && (line_end(after) || after < 0) {
+                // At a line's start the run is a blank line, and its line
+                // break goes with it. After something on the line it is
+                // trailing white space, and the line break stays for the
+                // indent token: `seq:` then a tab, with its entries on the
+                // next line, keeps the token that says they start there.
+                let skip = if !at_line_start(src, cursor.0) {
+                    run
+                } else if after == i32::from(b'\r') && is(fwd, run + 1, b'\n') {
+                    run + 2
+                } else if line_end(after) {
+                    run + 1
+                } else {
+                    run
+                };
+                cursor = (cursor.0 + skip, cursor.1, cursor.2);
                 continue;
+            }
+            // A tab in the leading blanks of a document's first line,
+            // before block structure: the line break handler refuses it on
+            // every later line.
+            if tab && at_line_start(src, cursor.0) && block_start_at(src, cursor.0 + run) {
+                return Act::bad(cursor, TAB_INDENT, run);
             }
         }
 
@@ -681,7 +662,7 @@ fn decide(src: Src<'_>, start: (usize, usize, usize), context: &mut Context) -> 
             let next = advance_cols(src, cursor, pos);
             return Act::moved(
                 next,
-                Some(Tok::new("#DR", Value::String(text.clone()), text, next)),
+                Some(Tok::new("#DR", Value::String(text.clone()), text, cursor)),
             );
         }
 
@@ -759,9 +740,12 @@ fn decide(src: Src<'_>, start: (usize, usize, usize), context: &mut Context) -> 
         }
 
         // A value that starts with a digit (or a sign and a digit) but is
-        // not a number: `+190:20:30` is one plain scalar.
+        // not a number: `+190:20:30` is one plain scalar. So does a dot
+        // before a digit: `.5 x` is one plain scalar, where the number
+        // matcher would take `.5` and leave the `x` to fail the parse.
         let digit = |index: usize| at(fwd, index) >= 0 && (at(fwd, index) as u8).is_ascii_digit();
-        if digit(0) || ((is(fwd, 0, b'+') || is(fwd, 0, b'-')) && digit(1)) {
+        let lead = usize::from(is(fwd, 0, b'+') || is(fwd, 0, b'-'));
+        if digit(lead) || (is(fwd, lead, b'.') && digit(lead + 1)) {
             if let Some(act) = numeric_plain(src, fwd, cursor, context) {
                 return act;
             }
@@ -795,11 +779,10 @@ fn decide(src: Src<'_>, start: (usize, usize, usize), context: &mut Context) -> 
         }
 
         // Flow punctuation. The engine's fixed-token matcher would take
-        // these, but it builds its token at the engine's own cursor, and
-        // this plugin's cursor is one column ahead of it from a `: `
-        // onwards (see the module note). Emitting them here keeps every
-        // token of a YAML parse on the one cursor, so a diagnostic
-        // reports the column the canonical parser reports.
+        // these, at the engine's own cursor; emitted here, each is placed
+        // by its offset as every token of this plugin is (see the module
+        // note), so a diagnostic reports the place the canonical parser
+        // reports whatever the engine's cursor counted.
         //
         // Only where the fixed matcher would itself have had a turn: the
         // cursor has not moved during this call, so the character the
@@ -854,8 +837,7 @@ fn decide(src: Src<'_>, start: (usize, usize, usize), context: &mut Context) -> 
 /// the old one, and a character outside that set is simply unclaimed.
 /// This is not incidental: the canonical matcher emits a flow
 /// collection's opener itself after an anchor or a tag for exactly this
-/// reason, and the one place it does not compensate, a `{` or `[` at
-/// column 0 after a blank or comment line, is refused.
+/// reason.
 fn dispatch_family(byte: i32) -> Option<u8> {
     Some(match byte {
         value if value == i32::from(b'{') => 0,
@@ -905,6 +887,44 @@ pub(crate) const BOM: char = '\u{FEFF}';
 
 /// The byte order mark as text.
 pub(crate) const BOM_TEXT: &str = "\u{FEFF}";
+
+/// The error code for a tab in the indentation before block structure.
+pub(crate) const TAB_INDENT: &str = "yaml_tab_indent";
+
+/// Space, tab, carriage return or line feed: what ends an indicator.
+fn yaml_space(value: i32) -> bool {
+    blank(value) || line_end(value)
+}
+
+/// Whether block structure starts at source position `i`, the first
+/// character after a line's leading blanks: a sequence entry (`- `), an
+/// explicit key (`? `), or an implicit key, quoted or plain, which is a
+/// scalar its line follows with `: `. A tab among those blanks is then a
+/// tab in indentation, which YAML forbids (YAML 1.2.2, 6.1): the line's
+/// depth cannot be read. A plain or quoted scalar, a flow collection and a
+/// comment may follow a tab. Mirrors the canonical `blockStartAt`.
+pub(crate) fn block_start_at(src: Src<'_>, i: usize) -> bool {
+    let c = at(src, i);
+    if c < 0 || line_end(c) || c == i32::from(b'#') {
+        return false;
+    }
+    if c == i32::from(b'-') || c == i32::from(b'?') {
+        let n = at(src, i + 1);
+        if n < 0 || yaml_space(n) {
+            return true;
+        }
+    }
+    if c == i32::from(b'"') || c == i32::from(b'\'') {
+        return quoted_key_at(src, i);
+    }
+    if matches!(u8::try_from(c), Ok(b'{' | b'}' | b'[' | b']' | b',')) {
+        return false;
+    }
+    if c == i32::from(b':') && (at(src, i + 1) < 0 || yaml_space(at(src, i + 1))) {
+        return true;
+    }
+    is(src, state::plain_scalar_rest(src, i), b':')
+}
 
 /// Whether `offset` begins a line: the source start, just after a line
 /// break, or just after the byte order mark that opens the stream.
@@ -1004,8 +1024,6 @@ pub(crate) fn encode_token(token: &Tok) -> Value {
     map.insert("v".to_string(), token.val.clone());
     map.insert("s".to_string(), Value::String(token.src.clone()));
     map.insert("i".to_string(), Value::Number(token.si as f64));
-    map.insert("r".to_string(), Value::Number(token.ri as f64));
-    map.insert("c".to_string(), Value::Number(token.ci as f64));
     Value::object(map)
 }
 
@@ -1040,8 +1058,6 @@ fn decode_token(value: &Value, fallback: (usize, usize, usize)) -> Tok {
             _ => String::new(),
         },
         si: number("i", fallback.0),
-        ri: number("r", fallback.1),
-        ci: number("c", fallback.2),
     }
 }
 
@@ -1354,7 +1370,7 @@ fn struct_tag(
     cursor: (usize, usize, usize),
 ) -> Result<(usize, usize, usize), Box<Act>> {
     let mut skip = 2;
-    while fwd.has(skip) && !is(fwd, skip, b' ') && !is(fwd, skip, b'\n') {
+    while fwd.has(skip) && !is(fwd, skip, b' ') && !line_end(at(fwd, skip)) {
         skip += 1;
     }
     while is(fwd, skip, b' ') {
@@ -1467,7 +1483,7 @@ fn doc_marker(src: Src<'_>, fwd: Src<'_>, cursor: (usize, usize, usize)) -> Act 
     let name = if ended { "#DE" } else { "#DS" };
     Act::moved(
         next,
-        Some(Tok::new(name, Value::Undefined, fwd.slice(0, 3), next)),
+        Some(Tok::new(name, Value::Undefined, fwd.slice(0, 3), cursor)),
     )
 }
 
@@ -1756,8 +1772,18 @@ fn numeric_plain(
     let mut embedded_colon = false;
     let mut trailing_text = false;
     let mut block_comma = false;
+    // The `:` that ends a plain scalar: one before a blank, a line break
+    // or the end of the source.
+    let ends_plain =
+        |index: usize| is(fwd, index, b':') && blank_line_end_or_eof(at(fwd, index + 1));
     let mut index = 1;
     while fwd.has(index) && !line_end(at(fwd, index)) {
+        // The scalar is a key, and ends here: `12:30:` then a block is the
+        // key 12:30, where the scan once went on over its colon, which the
+        // token then took (`127.0.0.1:5000:` as a key).
+        if ends_plain(index) {
+            break;
+        }
         // An embedded colon does not end the scan: the scalar can go on
         // past a space (`09:00 AM`), which only the trailing-text branch
         // reads as one scalar (tabnas/yaml#90).
@@ -1829,6 +1855,7 @@ fn numeric_plain(
     let mut token_end = 0;
     while fwd.has(token_end)
         && !blank_line_end_or_eof(at(fwd, token_end))
+        && !ends_plain(token_end)
         && !(in_flow
             && (is(fwd, token_end, b',') || is(fwd, token_end, b']') || is(fwd, token_end, b'}')))
     {
@@ -1841,12 +1868,26 @@ fn numeric_plain(
         return Some(text::plain_scalar(src, fwd, cursor, context));
     }
 
+    // A scalar that runs on to the next line is one plain scalar, and so a
+    // string: `a: 12` with `more` indented below it is "12 more", and so
+    // are `12:30` and `1,2` with a line below them. Only a token that ends
+    // its line can run on, so only then is the scalar scanned as the
+    // plain-scalar handler scans it.
+    let mut rest = token_end;
+    while blank(at(fwd, rest)) {
+        rest += 1;
+    }
+    if line_end(at(fwd, rest)) && text::plain_scalar_at(src, cursor.0, context).rows > 0 {
+        return Some(text::plain_scalar(src, fwd, cursor, context));
+    }
+
     if embedded_colon || block_comma {
         // In a flow collection the scalar also ends at its `,` `]` `}`:
         // `[1, 12:30]` holds "12:30", not "12:30,".
         let mut end = 0;
         while fwd.has(end)
             && !blank_line_end_or_eof(at(fwd, end))
+            && !ends_plain(end)
             && !(in_flow && (is(fwd, end, b',') || is(fwd, end, b']') || is(fwd, end, b'}')))
         {
             end += 1;
@@ -1858,6 +1899,18 @@ fn numeric_plain(
             Some(Tok::new("#TX", Value::String(text.clone()), text, cursor)),
         ));
     }
+
+    // Under the core schema a token that is not one of its number forms is
+    // a string (`0b11`, `1_000`, `-0x30`), so it goes to the plain-scalar
+    // handler, and the number matcher, which reads jsonic's number syntax,
+    // never sees it.
+    if crate::core_schema(context) {
+        let token = fwd.slice(0, token_end);
+        if crate::core_number(token).is_none() {
+            return Some(text::plain_scalar(src, fwd, cursor, context));
+        }
+    }
+
     None
 }
 
@@ -1924,7 +1977,7 @@ fn flow_newline(
 /// on. Blank, comment-only, tab-only and anchor-only lines are consumed
 /// so the indent reported is that of the next line with content.
 fn block_newline(
-    _src: Src<'_>,
+    src: Src<'_>,
     fwd: Src<'_>,
     cursor: (usize, usize, usize),
     context: &mut Context,
@@ -1933,10 +1986,12 @@ fn block_newline(
     let mut spaces = 0;
     let mut rows = 0;
     while fwd.has(pos) {
+        // `\r\n`, `\n`, or `\r` by itself: each is one line break
+        // (YAML 1.2.2, 5.4).
         if is(fwd, pos, b'\r') && is(fwd, pos + 1, b'\n') {
             pos += 2;
             rows += 1;
-        } else if is(fwd, pos, b'\n') {
+        } else if line_end(at(fwd, pos)) {
             pos += 1;
             rows += 1;
         } else {
@@ -1961,6 +2016,24 @@ fn block_newline(
             if !fwd.has(tab) || line_end(at(fwd, tab)) {
                 pos = tab;
                 continue;
+            }
+            // A comment after the tab is a comment-only line, as one after
+            // spaces is.
+            if is(fwd, tab, b'#') {
+                while fwd.has(tab) && !line_end(at(fwd, tab)) {
+                    tab += 1;
+                }
+                pos = tab;
+                continue;
+            }
+            // A tab in the line's indentation, before block structure
+            // (`a:` then a tab and `b: 1`).
+            if block_start_at(src, cursor.0 + tab) {
+                return Err(Box::new(Act::bad(
+                    (cursor.0 + pos, cursor.1, cursor.2),
+                    TAB_INDENT,
+                    tab - pos,
+                )));
             }
         }
         if is(fwd, pos, b'&') {
@@ -2001,15 +2074,14 @@ fn block_newline(
         return Ok((cursor.0 + pos, cursor.1 + rows, 0));
     }
 
-    // Neither does a flow collection or a quoted scalar at column 0:
-    // there is no block for an indent to describe. A quoted KEY is
-    // different: it continues (or closes back to) the root block mapping,
-    // so it needs its #IN like a plain key does (tabnas/yaml#86).
-    if spaces == 0
-        && (is(fwd, pos, b'{')
-            || is(fwd, pos, b'[')
-            || ((is(fwd, pos, b'"') || is(fwd, pos, b'\'')) && !quoted_key_at(fwd, pos)))
-    {
+    // Neither does a quoted scalar at column 0: there is no block for an
+    // indent to describe. A quoted KEY is different: it continues (or
+    // closes back to) the root block mapping, so it needs its #IN like a
+    // plain key does (tabnas/yaml#86). A flow collection at column 0 takes
+    // its #IN as well: at a document's root the grammar opens it below
+    // that indent, and elsewhere there is nothing it can be the value of,
+    // and the grammar refuses it.
+    if spaces == 0 && (is(fwd, pos, b'"') || is(fwd, pos, b'\'')) && !quoted_key_at(fwd, pos) {
         return Ok((cursor.0 + pos, cursor.1 + rows, 0));
     }
 
@@ -2099,9 +2171,10 @@ fn dq_escape(e: char) -> Option<char> {
 /// doubled quote. Double quotes take every escape YAML 1.2 defines: the
 /// single characters of [`dq_escape`], and `\x`, `\u` and `\U` with
 /// exactly two, four and eight hexadecimal digits, a `\u` high surrogate
-/// followed by a `\u` low one read as the one character they name. A
-/// malformed or unknown escape, a lone surrogate or a quote inside leaves
-/// the text as it is. Mirrors the canonical `unquoteWholeScalar`.
+/// followed by a `\u` low one read as the one character they name, and a
+/// lone surrogate as U+FFFD. A malformed or unknown escape, a code point
+/// past U+10FFFF or a quote inside leaves the text as it is. Mirrors the
+/// canonical `unquoteWholeScalar`.
 fn unquote_whole_scalar(text: &str) -> String {
     let chars: Vec<char> = text.chars().collect();
     let Some(&quote) = chars.first() else {
@@ -2156,10 +2229,14 @@ fn unquote_whole_scalar(text: &str) -> String {
                     j += 6;
                 }
             }
-            let Some(decoded) = char::from_u32(code) else {
+            if code > 0x10_ffff {
                 return text.to_string();
-            };
-            out.push(decoded);
+            }
+            // Half of a surrogate pair by itself is the code unit it spells
+            // in the canonical, which a Rust string cannot hold: it folds to
+            // the replacement character, as it does in a double quoted
+            // scalar anywhere else (`"\ud800"`).
+            out.push(char::from_u32(code).unwrap_or('\u{fffd}'));
         } else {
             out.push(c);
         }
@@ -2401,9 +2478,11 @@ fn explicit_key(
                         }
                     }
                 }
+                // A sequence indicator (`- `), which a line break or the
+                // source's end follows too when its entry is empty.
                 if !needs_indent
                     && following == i32::from(b'-')
-                    && blank(at(fwd, value_consumed + 1))
+                    && blank_line_end_or_eof(at(fwd, value_consumed + 1))
                 {
                     needs_indent = true;
                 }
@@ -2425,9 +2504,11 @@ fn explicit_key(
         } else {
             state::set_flag(context, state::PENDING_CL, true);
         }
+        // The key's token is cut where its `?` stands: a token's place is
+        // where it starts.
         return Act::moved(
             next,
-            Some(Tok::new(key_token, Value::String(key), source, next)),
+            Some(Tok::new(key_token, Value::String(key), source, cursor)),
         );
     }
 
@@ -2446,7 +2527,7 @@ fn explicit_key(
     );
     Act::moved(
         next,
-        Some(Tok::new(key_token, Value::String(key), source, next)),
+        Some(Tok::new(key_token, Value::String(key), source, cursor)),
     )
 }
 

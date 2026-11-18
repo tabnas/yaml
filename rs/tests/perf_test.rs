@@ -8,7 +8,7 @@
 //    grammar per call. Building this grammar dominates a small parse, so
 //    a rebuild-per-call `parse` is an order of magnitude slower.
 //  * Parse time must grow about linearly with input size for each input
-//    shape, not quadratically.
+//    shape, not quadratically, one long line included.
 
 mod common;
 
@@ -155,6 +155,28 @@ fn next_line_values_parse_in_linear_time() {
         ("emptyValues", empty_values),
     ];
     assert_linear(&parser, &shapes, 4000, 1.8);
+}
+
+/// A long scalar and then many items, all on one line, as minified JSON
+/// is written. A token's column is how many characters it stands past its
+/// line's start, and that was once counted from the start for every
+/// token, which takes the square of the line: measured, the per-byte cost
+/// grew 2.6x from 250 to 8000 items, and 300 KB of `[1, 1, ...]` took 3.2
+/// seconds where the same items on a line each took 0.7. The count is kept
+/// as the source goes by (`Lines::line_chars`), and the growth is 1.0x.
+fn long_scalar_then_items(count: usize) -> String {
+    format!(
+        "[\"{}\", {}]\n",
+        "x".repeat(count * 100),
+        vec!["1"; count].join(", ")
+    )
+}
+
+#[test]
+fn one_long_line_parses_in_linear_time() {
+    let parser = tabnas_yaml::make();
+    let shapes: [Shape; 1] = [("longScalarThenItems", long_scalar_then_items)];
+    assert_linear(&parser, &shapes, 8000, 1.8);
 }
 
 fn assert_linear(parser: &tabnas::Tabnas, shapes: &[Shape], large: usize, bound: f64) {

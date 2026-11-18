@@ -94,7 +94,9 @@ out   // => { port: 5432, enabled: true, note: null, title: 'hello world' }
 
 `yes` is a boolean (YAML's keyword set is broad: `yes`/`no`,
 `on`/`off`, `true`/`false`), `~` is null, and `hello world` (spaces and
-all) is a single unquoted string up to the end of the line.
+all) is a single unquoted string up to the end of the line. The
+[guide](guide.md#read-plain-scalars-as-the-yaml-12-core-schema-does)
+shows the option under which `yes` stays a string, as YAML 1.2 reads it.
 
 
 ## 5. Parse a nested structure

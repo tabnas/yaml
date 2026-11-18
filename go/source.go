@@ -65,6 +65,21 @@ type yamlSource struct {
 	jSig, jQuote, jPrev int
 	jSkip, jComment     bool
 
+	// The line breaks sync has passed, counted: a `\n`, a `\r` by itself,
+	// or a `\r\n` is one (rowCR: the last byte passed was a `\r`, whose
+	// `\n`, if it follows, is the rest of the same break). The cursor's row
+	// is one more than the breaks before it.
+	rows  int
+	rowCR bool
+	// The column place last worked out: the line's start, the position,
+	// and how many characters lie between them. A position further along
+	// the same line counts on from there, so a long line is not counted
+	// again from its start at every token.
+	colLine, colPos, colRunes int
+	// Set while the matcher runs the text check's scan ahead of the
+	// engine's own matchers and puts the cursor back: nothing is placed.
+	dry bool
+
 	// The cut the matcher last began: its source position, and how many
 	// tokens the lexer had given by then. The engine cuts a token again
 	// over a wider window when a read reached the window's end, from the
@@ -96,6 +111,8 @@ type sourceSnap struct {
 	end, histLen, breaks int
 	jSig, jQuote, jPrev  int
 	jSkip, jComment      bool
+	rows                 int
+	rowCR                bool
 }
 
 // histBreaks is how many line breaks hist keeps the text after. A
@@ -119,6 +136,9 @@ func (y *yamlSource) reset(lex *tabnas.Lex) {
 	y.breaks = y.breaks[:0]
 	y.jSig, y.jQuote, y.jPrev = -1, 0, -1
 	y.jSkip, y.jComment = false, false
+	y.rows, y.rowCR = 0, false
+	y.colLine, y.colPos, y.colRunes = -1, -1, 0
+	y.dry = false
 	y.cutPos, y.cutGiven = -1, -1
 	y.undo = y.undo[:0]
 	if ctx := lex.Ctx; ctx != nil && y.windowed {
@@ -173,7 +193,7 @@ func (y *yamlSource) begin(lex *tabnas.Lex, flow *flowScanState) {
 
 func (y *yamlSource) save() {
 	y.undo = y.undo[:0]
-	y.snap = sourceSnap{y.end, len(y.hist), len(y.breaks), y.jSig, y.jQuote, y.jPrev, y.jSkip, y.jComment}
+	y.snap = sourceSnap{y.end, len(y.hist), len(y.breaks), y.jSig, y.jQuote, y.jPrev, y.jSkip, y.jComment, y.rows, y.rowCR}
 	if y.saveHook != nil {
 		y.saveHook()
 	}
@@ -196,6 +216,7 @@ func (y *yamlSource) restore() {
 	y.hist = y.hist[:s.histLen]
 	y.breaks = y.breaks[:s.breaks]
 	y.jSig, y.jQuote, y.jPrev, y.jSkip, y.jComment = s.jSig, s.jQuote, s.jPrev, s.jSkip, s.jComment
+	y.rows, y.rowCR = s.rows, s.rowCR
 	if y.restoreHook != nil {
 		y.restoreHook()
 	}
@@ -356,11 +377,20 @@ func (y *yamlSource) sync(to int) {
 		a, c := from+k, int(seg[k])
 		if c == '\n' || c == '\r' {
 			y.breaks = append(y.breaks, a)
+			if c == '\r' {
+				y.rows++
+				y.rowCR = true
+			} else if y.rowCR {
+				y.rowCR = false
+			} else {
+				y.rows++
+			}
 			// Line breaks are lines' ends in every scan here, and neither
 			// is blank or in a comment to the flow colon.
 			y.jQuote, y.jSkip, y.jComment, y.jPrev = 0, false, false, -1
 			continue
 		}
+		y.rowCR = false
 		if y.jComment {
 			continue
 		}
@@ -441,6 +471,38 @@ func (y *yamlSource) lineStart(a int) int {
 		a--
 	}
 	return a
+}
+
+// place sets the cursor's row and column from its source position: one
+// more than the line breaks before it, and how many characters it stands
+// past its line's start, from 1 (a byte order mark opening the stream
+// takes no column). The matcher places the cursor wherever it cuts a
+// token, so a token's place is its offset's, whatever the tokens before
+// it took. Kept up as each token was taken, they drifted: a column too
+// far after every `: `, no row for a line break inside a quoted scalar,
+// and column 0 after a block scalar. Mirrors place in src/yaml.ts, whose
+// columns count UTF-16 units where these count characters.
+func (y *yamlSource) place(pnt *tabnas.Point) {
+	if y.dry {
+		return
+	}
+	pos := y.base + pnt.SI
+	y.sync(pos)
+	ls := y.lineStart(pos)
+	if ls == 0 && y.bomAtStart() {
+		ls = len(bomText)
+	}
+	pnt.RI = 1 + y.rows
+	if pos <= ls {
+		pnt.CI = 1
+		return
+	}
+	if ls != y.colLine || pos < y.colPos {
+		y.colLine, y.colPos, y.colRunes = ls, ls, 0
+	}
+	y.colRunes += utf8.RuneCountInString(y.sub(y.colPos, pos))
+	y.colPos = pos
+	pnt.CI = y.colRunes + 1
 }
 
 // quoteBefore reports whether the last byte before source position a that

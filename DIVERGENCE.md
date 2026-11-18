@@ -8,10 +8,8 @@ None of these can be written as a row of `test/spec/*.tsv`, which is why
 this repository still has no divergence register: one is invisible to the
 value those fixtures compare, two concern a diagnostic's position, which
 no fixture pins, one needs a nesting depth far past anything a fixture
-cell would hold, two need a lone UTF-16 surrogate in an expected
-cell, which a UTF-8 file cannot carry, and one is an input the runtimes
-disagree about accepting at all, where a row carries one expected answer
-for all three. A divergence a row could
+cell would hold, and two need a lone UTF-16 surrogate in an expected
+cell, which a UTF-8 file cannot carry. A divergence a row could
 express belongs in a register, with a `rust` column, per
 [`AGENTS.md`](AGENTS.md).
 
@@ -52,10 +50,10 @@ tests together.
 
 | input | TypeScript | Go | Rust |
 |---|---|---|---|
-| `{a: xx, ]` | column 10 | 10 | 10 |
-| `{a: é, ]` | column 9 | 9 | 9 |
-| `{a: €, ]` | column 9 | 9 | 9 |
-| `{a: 😀, ]` | column 10 | 9 | 9 |
+| `{a: xx, ]` | column 9 | 9 | 9 |
+| `{a: é, ]` | column 8 | 8 | 8 |
+| `{a: €, ]` | column 8 | 8 | 8 |
+| `{a: 😀, ]` | column 9 | 8 | 8 |
 
 Every diagnostic column in this plugin agrees with the canonical one
 except after a character outside the Basic Multilingual Plane, which
@@ -63,7 +61,11 @@ TypeScript counts as two columns and the other two runtimes as one. It is
 recorded upstream in `parser/DIVERGENCE.md` ("Column positions for astral
 characters") and pinned here by `go/column_units_test.go`,
 `ts/test/column-units.test.ts` and `rs/tests/column_units_test.rs`, all on
-the same sixteen cases.
+the same fifteen cases. A column is the one the token's offset gives: how
+far the token stands past its line's start, from 1. Each runtime once
+kept its columns up token by token, and from a `: ` onwards every one of
+them ran one ahead, which is why this table once read a column higher in
+every cell.
 
 Owner: the engine. Nothing in this repository can repair it.
 
@@ -100,78 +102,63 @@ pin both sides of the boundary.
 Owner: this plugin, for the count; `tabnas-jsonic`, for the number. Read
 jsonic's register for the measurements.
 
-## The matcher chain after a cursor move (Rust)
-
-Both engines dispatch their lexer's matcher chain on the FIRST character
-of a call: only the matchers that could produce a token starting there
-are run. A plugin matcher that moves the cursor and then produces nothing
-therefore leaves the new position to a matcher set chosen for the old
-one. That is not incidental: the canonical matcher emits a flow
-collection's opener itself after an anchor or a tag for exactly this
-reason. But the two chains are not built the same way, so what remains
-available differs.
-
-Most of the difference is compensated for: `rs/src/lex.rs` refuses a
-character the canonical chain would have left unclaimed
-(`claimable_after_move`), and `rs/src/text.rs` stands in for the number
-matcher, which the canonical chain reaches after a move and this one does
-not.
-
-The original differential run of about 12,700 generated documents found
-thirteen documents that every runtime refused with the same code at a
-different place. Parser 0.12.9's deferred-error repair closed this recorded
-class: both representative documents now report `unexpected` at 5:1 in all
-three runtimes. `rs/tests/divergence_test.rs` keeps those positions as parity
-assertions because a shared fixture pins the code but not the position.
-
-**And ONE document the other two runtimes accept and this one refuses,
-found by a later sweep over tab placement:**
+## A number the engine cuts stands at the engine's cursor (Rust)
 
 | input | TypeScript | Go | Rust |
 |---|---|---|---|
-| `? k\n: <TAB>\n` | `{"k": null}` | the same | `ERROR:unexpected` |
-| `? k\n: <TAB>` | `{"k": null}` | the same | `ERROR:unexpected` |
-| `? k\n:   <TAB>\n` | `{"k": null}` | the same | `ERROR:unexpected` |
-| `? k\n:  \n` | `{"k": null}` | the same | the same |
-| `? k\n: <TAB>v\n` | `{"k": "v"}` | the same | the same |
+| `a: 1\rb: "x" 3` | `unexpected` at 2:8 | the same | at 1:13 |
+| `a: 1\rb: [1] 3` | `unexpected` at 2:8 | the same | at 1:13 |
+| `a: 1\r\rb: 'x' 3` | `unexpected` at 3:8 | the same | at 1:14 |
+| `<BOM>b: "x" 3` | `unexpected` at 1:8 | the same | at 1:9 |
+| `a: 1\nb: "x" 3` | `unexpected` at 2:8 | the same | the same |
+| `a: 1\r\nb: "x" 3` | `unexpected` at 2:8 | the same | the same |
+| `a: 1\rb: "x" y` | `unexpected` at 2:8 | the same | the same |
+| `a: 1\rb: [1, }` | `unexpected` at 2:8 | the same | the same |
+| `<BOM>b: [1, }` | `unexpected` at 1:8 | the same | the same |
+| `<BOM>a: 1\nb: "x" 3` | `unexpected` at 2:8 | the same | the same |
 
-The last two rows are the controls: spaces alone in the same place agree,
-and so does a tab with a value after it. A line of nothing but blanks
-that contains a TAB is skipped by both matchers, because YAML counts it
-blank and the engine refuses a bare tab; the canonical then moves its
-point and returns no token, and the engine's own matchers take over at
-the end of the source. This port returns `Act::refuse` instead, at the
-end-of-source guard in `decide`, and the parse stops one token short of
-the value the explicit key owes. Making that guard refuse only when
-nothing was consumed is NOT the repair: it was measured, and it makes
-`a: !é` reach the engine with an `internal` error, which
-`rs/tests/untrusted_test.rs` catches.
+A token's row and column are the ones its offset gives, in every runtime,
+for every token the plugin builds. A number that follows a quoted scalar
+or a closed flow collection on its line is cut by the engine's own number
+matcher, at the engine's cursor. TypeScript and Go set that cursor's row
+and column from the offset before the engine's matchers run. The Rust
+engine's lexer gives a matcher advancement and no assignment, and its
+cursor parts from the offset in two places:
 
-`rs/tests/divergence_test.rs` pins all five tabled rows. The same
-differential run over 8,408 generated
-documents of realistic YAML shape, over the 253 fixture rows, over the
-402 conformance inputs and over every string literal in the Go test
-files found no difference at all beyond the astral column above; the
-`? k` row came from a later sweep of 862 documents that put a tab at
-every position of 35 constructs, and it is the only difference that
-sweep found.
+- It counts a row at each character of its `line.rowChars`, which is
+  `\n`. After a carriage return by itself it is still on row 1, with the
+  column counted from the source's start.
+- It counts a byte order mark that opens the text as a column, where the
+  mark takes none. On that text's first line its column is one more.
 
-This entry once carried a value difference as well,
-`!!int%TAG !! x:\t\n... ... %YAML 1.20o17`, and it was never the matcher
-chain: the typed tag's value scan ended at the colon because a TAB
-followed it, where the canonical ends there only before a literal space,
-a line end or the end of the source. All three runtimes now read the
-first document as the string `!! x:`, the input is a row of
-`test/spec/directives.tsv`, and
-`rs/tests/divergence_test.rs::a_tag_before_a_directive_line_resolves_the_canonical_way`
-keeps the reason beside it. A row tabled here as impossible was a
-one-character predicate; the neighbouring position rows are worth
-re-measuring in the same spirit.
+Where such a number is what a parse refuses, the diagnostic names the
+right code and the right offset, and the engine's row and column.
 
-Owner: this port. The repair is to reproduce the canonical chain's number
-matcher exactly rather than standing in for it, which means porting
-`Lexer::match_number` and its options; that is a larger change than the
-three shapes justify today.
+The last six rows are the controls: the other two line breaks, where the
+cursor counts the row, tokens the plugin cuts itself after the same
+carriage return or mark, and the second line of a text the mark opens.
+The value a document reads as is not affected. A document with neither a
+carriage return by itself nor a byte order mark is not affected at all.
+
+Measured over 1,872 texts generated for the purpose, 12 openings each
+followed by one of 52 last lines under each of the three line breaks, of
+which the canonical implementation refuses 951: Go reports the canonical
+place for all 951, and Rust for all but 122, every one of them a number
+the engine cuts after a carriage return by itself. Over 192 refusals
+generated far along a line, after non-ASCII text and a byte order mark,
+Go reports the canonical place for all, and Rust for all but 4, each a
+number the engine cuts on the first line after the mark. Over the texts
+this repository holds, the fixture rows, the YAML Test Suite cases and
+the schema inputs, as written and with their line breaks made `\r\n` and
+`\r`, the 254 refusals stand at the canonical place in both.
+
+`rs/tests/divergence_test.rs` pins all ten tabled rows.
+
+Owner: the engine. The repair is a way for a matcher to place the Rust
+lexer's cursor, as the other two engines allow. Standing in for the
+engine's number matcher at every position instead would risk the values
+numbers read as for the sake of a diagnostic's place, which is the worse
+trade.
 
 ## UTF-16 escapes in a double quoted scalar (Go and Rust)
 
@@ -185,6 +172,8 @@ lone surrogate has no UTF-8 spelling and a byte-order mark is invisible.
 | `a: "\uD83D"` | a lone high surrogate | U+FFFD | U+FFFD |
 | `a: "\uDE00"` | a lone low surrogate | U+FFFD | U+FFFD |
 | `a: "\U0000D83D"` | a lone high surrogate | U+FFFD | U+FFFD |
+| `"\uD83D": 1`, the key | a lone high surrogate | U+FFFD | U+FFFD |
+| `? "\uD83D"` then `: 1`, the key | a lone high surrogate | U+FFFD | U+FFFD |
 
 The canonical handler builds the scalar with `String.fromCharCode` for
 `\x` and `\u`, and `String.fromCodePoint` for `\U`. Both take a UTF-16
@@ -204,12 +193,21 @@ records for its own quoted strings, under "Lone surrogates in quoted
 strings" in `parser/DIVERGENCE.md`, and the string model decides it
 rather than this plugin.
 
+A key is the same scalar, so it reads the same way, an implicit key
+and an explicit one (`? "..."`) alike. The explicit key was once the
+exception in every runtime: an escape that named half a pair left the
+key as its quoted text, quotes and all, so that the three could share a
+fixture row. It reads as the scalar now, and is recorded here with the
+rest.
+
 Provenance: the TypeScript column was produced by running
-`ts/src/yaml.ts` under Node 22; the Go column by `tabnasyaml.Parse` in
-`go/`; the Rust column by `tabnas_yaml::parse`. No row of
+`ts/src/yaml.ts` under Node 22, and for the two key rows under Node 24;
+the Go column by `tabnasyaml.Parse` in `go/`; the Rust column by
+`tabnas_yaml::parse`. No row of
 `test/spec/*.tsv` can carry the TypeScript answers for the unpaired
 rows, because an expected cell is UTF-8 text and a lone surrogate has
 no UTF-8 encoding. They are pinned by
+`ts/test/yaml.test.ts` (`an-unpaired-surrogate-escape-is-its-code-unit`),
 `rs/tests/js_semantics_test.rs::an_unpaired_surrogate_escape_folds` and,
 for the Go column,
 `go/divergence_test.go::TestAnUnpairedSurrogateEscapeFolds`.
@@ -301,61 +299,3 @@ whose control rows fail if the Basic Multilingual Plane cases drift and
 whose astral rows fail if the fold changes.
 
 Owner: the string model, as upstream, for both ports.
-
-## A tab-only tail at the end of the source (Go)
-
-| input | TypeScript | Go | Rust |
-|---|---|---|---|
-| `a: 1<TAB>` | `ERROR:unexpected` | `{"a":1}` | `ERROR:unexpected` |
-| `a: true<TAB>` | `ERROR:unexpected` | `{"a":true}` | `ERROR:unexpected` |
-| `a: null<TAB>` | `ERROR:unexpected` | `{"a":null}` | `ERROR:unexpected` |
-| `a: [1]<TAB>` | `ERROR:unexpected` | `{"a":[1]}` | `ERROR:unexpected` |
-| `- 1<TAB>` | `ERROR:unexpected` | `[1]` | `ERROR:unexpected` |
-| `a: 1<TAB>\nb: 2` | `{"a":1,"b":2}` | same | same |
-| `a: 1 ` | `{"a":1}` | same | same |
-| `a: x<TAB>` | `{"a":"x"}` | same | same |
-
-What is established: the canonical's keyword and number branches in
-the text check advance by the TRIMMED text, so a tab sitting after such
-a value stays in the source, where the plain-scalar branch would have
-advanced over the whole run it consumed. The matcher's next round
-reaches that tab through the branch that skips a blank line carrying
-one, and the branch does consume it, which instrumenting the branch
-shows. The document is refused anyway, at the end of the source.
-
-What was NOT isolated is the step that refuses it. The obvious
-candidate is that same branch charging a row and resetting the column
-although no newline followed (`skip` is `lineEnd + 1` when there is a
-newline and the line's own length when there is not, so the point
-moves to a line that does not exist), but holding the row and the
-column still over that branch leaves every row of the table where it
-is. The Rust port carries the canonical arithmetic and the canonical
-refusal. The Go matcher has no such branch, so a tail of blanks
-reaches jsonic's own lexer, which reads a tab as a space, and the
-document ends.
-
-The last three rows are the controls, and they say what the entry is
-NOT about: the same tab followed by a newline is a blank line in every
-runtime, a trailing SPACE never enters the branch, and a plain
-scalar's own handler has already consumed the tab before the branch is
-reached. Bare jsonic accepts `a: 1<TAB>` in both languages, so the
-refusal belongs to this plugin and not to the grammar underneath it.
-
-Provenance: the TypeScript column was produced by running
-`ts/src/yaml.ts` under Node 22; the Go column by `tabnasyaml.Parse` in
-`go/`; the Rust column by `tabnas_yaml::parse`. No row of
-`test/spec/*.tsv` can carry this, because a row's expected cell is one
-answer for all three runtimes and these two answers differ in kind.
-Pinned by
-`go/divergence_test.go::TestATabOnlyTailAtTheEndOfTheSourceIsAccepted`.
-
-Owner: the CANONICAL, and the Go column is the answer to keep. A
-document whose last character is a tab is valid YAML, and a refusal
-that depends on whether the value was a number, a keyword or a plain
-scalar is an artifact rather than a rule. The repair belongs in
-`ts/src/yaml.ts`, and then in `rs/src/lex.rs`, and it starts by
-finding the step named above; it may free cases in
-`test/yaml-test-suite-unparsed.tsv`, which is the direction that
-ledger moves in. Until it lands, Go is recorded as differing rather
-than made to copy the wart, because a port never takes on a canonical
-defect (ADR-13).

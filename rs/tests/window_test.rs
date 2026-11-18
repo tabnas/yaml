@@ -152,6 +152,25 @@ fn fixture_rows() -> Vec<(String, String)> {
     rows
 }
 
+/// The rows whose options name the core schema, by where they are.
+fn core_rows() -> std::collections::HashSet<String> {
+    let mut rows = std::collections::HashSet::new();
+    for entry in fs::read_dir(common::spec_dir()).expect("test/spec reads") {
+        let path = entry.expect("an entry reads").path();
+        if path.extension().is_none_or(|ext| ext != "tsv") {
+            continue;
+        }
+        let spec = tabnas_support::load_spec(&path, &tabnas_support::SpecOptions::default())
+            .unwrap_or_else(|error| panic!("{error}"));
+        for row in &spec.rows {
+            if row.named("opts").contains("\"core\"") {
+                rows.insert(row.location());
+            }
+        }
+    }
+    rows
+}
+
 /// The parser `make()` stands for: jsonic's base with the plugin
 /// installed, which dmog composed before `make()` declared the window.
 /// jsonic's base declares the window itself (tabnas/jsonic#121), so it is
@@ -170,10 +189,13 @@ fn composed(options: tabnas_yaml::YamlOptions) -> tabnas::Tabnas {
 fn make_declares_the_window() {
     assert!(tabnas_yaml::make().options.lex.window);
     assert!(
-        tabnas_yaml::make_with(tabnas_yaml::YamlOptions { meta: true })
-            .options
-            .lex
-            .window
+        tabnas_yaml::make_with(tabnas_yaml::YamlOptions {
+            meta: true,
+            ..Default::default()
+        })
+        .options
+        .lex
+        .window
     );
     // The plugin alone declares nothing: a host may install it beneath
     // matchers of its own.
@@ -201,7 +223,10 @@ fn make_parses_as_the_composition_does() {
     }
     // With options, as the plugin takes them.
     let meta = "a: 1\n---\nb: 2\n";
-    let options = tabnas_yaml::YamlOptions { meta: true };
+    let options = tabnas_yaml::YamlOptions {
+        meta: true,
+        ..Default::default()
+    };
     let made_meta = outcome(tabnas_yaml::make_with(options).parse(meta));
     assert_eq!(made_meta, outcome(composed(options).parse(meta)));
     assert!(made_meta.contains("\"meta\""), "{made_meta}");
@@ -212,11 +237,25 @@ fn make_parses_as_the_composition_does() {
 #[test]
 fn every_row_parses_the_same_from_a_reader() {
     let rows = fixture_rows();
+    let core = core_rows();
+    assert!(
+        !core.is_empty(),
+        "the fixtures hold rows under the core schema"
+    );
     let parser = tabnas_yaml::make();
+    let core_parser = tabnas_yaml::make_with(tabnas_yaml::YamlOptions {
+        schema: Some(tabnas_yaml::Schema::Core),
+        ..Default::default()
+    });
     let mut compared = 0;
     let mut failures = Vec::new();
     for (index, (at, input)) in rows.iter().enumerate() {
-        let (n, found) = same_from_reader(&parser, at, input);
+        let parser = if core.contains(at) {
+            &core_parser
+        } else {
+            &parser
+        };
+        let (n, found) = same_from_reader(parser, at, input);
         compared += n;
         failures.extend(found);
         if (index + 1) % 100 == 0 || index + 1 == rows.len() {

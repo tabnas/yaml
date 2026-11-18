@@ -68,6 +68,17 @@ pub(crate) struct Lines {
     pub(crate) skip: bool,
     pub(crate) comment: bool,
     pub(crate) prev: i32,
+    /// The line breaks before `end`, counted: a `\n`, a `\r` by itself or
+    /// a `\r\n` is one. `cr` says the byte before `end` is a `\r`, whose
+    /// `\n`, if one follows, is the rest of the same break. A position's
+    /// row is one more than the breaks before it.
+    pub(crate) rows: usize,
+    pub(crate) cr: bool,
+    /// How many characters the line `end` is on holds before `end`. A
+    /// position's column is counted from here and not from its line's
+    /// start: counted from the start for every token, one long line, as
+    /// minified JSON is, took the square of its length.
+    pub(crate) line_chars: usize,
 }
 
 impl Lines {
@@ -86,13 +97,27 @@ impl Lines {
             if keep_breaks {
                 self.breaks.push(pos);
             }
+            if c == i32::from(b'\r') {
+                self.rows += 1;
+                self.cr = true;
+            } else if self.cr {
+                self.cr = false;
+            } else {
+                self.rows += 1;
+            }
             // Line breaks are lines' ends in every scan here, and neither
             // is blank or in a comment to the flow colon.
             self.quote = 0;
             self.skip = false;
             self.comment = false;
             self.prev = -1;
+            self.line_chars = 0;
             return;
+        }
+        self.cr = false;
+        // Every byte of UTF-8 but a continuation byte begins a character.
+        if c >= 0 && (c & 0xC0) != 0x80 {
+            self.line_chars += 1;
         }
         if self.comment {
             return;
@@ -288,18 +313,6 @@ impl<'a> Src<'a> {
             .all(|(offset, byte)| self.at(index + offset) == i32::from(byte))
     }
 
-    /// The first index at or after `index` that holds `byte`, or None.
-    pub(crate) fn find(self, index: usize, byte: u8) -> Option<usize> {
-        let from = self.behind(self.org + index).min(self.text.len());
-        match self.text.as_bytes()[from..].iter().position(|&b| b == byte) {
-            Some(k) => Some(index + k),
-            None => {
-                self.touched.set(true);
-                None
-            }
-        }
-    }
-
     /// The start of the line that holds source position `pos`: the
     /// source's start or the position after a line break, as a scan back
     /// from `pos` finds it. The line breaks noted answer it at once, where
@@ -338,6 +351,77 @@ impl<'a> Src<'a> {
         at
     }
 
+    /// The row and column of source position `pos`, as its offset gives
+    /// them: one more than the line breaks before it (a `\r\n` is one), and
+    /// how many characters it stands past its line's start, from 1. A byte
+    /// order mark that opens the stream takes no column. The breaks before
+    /// the position noted up to are counted, and so are the characters of
+    /// its line; those between it and `pos` are read. So a lookup reads
+    /// the span between the two and no more, however long the line is.
+    pub(crate) fn row_col(self, pos: usize) -> (usize, usize) {
+        let end = self.lines.end;
+        let mut rows = self.lines.rows;
+        if pos >= end {
+            let mut cr = self.lines.cr;
+            for at in end..pos {
+                let c = self.byte(at);
+                if c == i32::from(b'\r') {
+                    rows += 1;
+                    cr = true;
+                } else if c == i32::from(b'\n') {
+                    if !cr {
+                        rows += 1;
+                    }
+                    cr = false;
+                } else {
+                    cr = false;
+                }
+            }
+        } else {
+            for at in pos..end {
+                let c = self.byte(at);
+                if c == i32::from(b'\r')
+                    || (c == i32::from(b'\n') && (at == 0 || self.byte(at - 1) != i32::from(b'\r')))
+                {
+                    rows -= 1;
+                }
+            }
+        }
+        let start = self.line_start(pos);
+        let bom = start == 0 && self.starts_with_abs(0, crate::lex::BOM_TEXT);
+        let column = if bom && pos < crate::lex::BOM_TEXT.len() {
+            1
+        } else {
+            let span = |from: usize, to: usize| {
+                let from = self.behind(from).min(self.text.len());
+                let to = self.behind(to).min(self.text.len());
+                self.text[from..to].chars().count()
+            };
+            // The characters of the line before `pos`. Where that line is
+            // the one noted up to, its count is kept, and only the span
+            // between the two positions is read.
+            let chars = if start == self.line_start(end) {
+                if pos >= end {
+                    self.lines.line_chars + span(end, pos)
+                } else {
+                    self.lines.line_chars - span(pos, end)
+                }
+            } else {
+                span(start, pos)
+            };
+            // The mark is a character of its line, and takes no column.
+            chars - usize::from(bom) + 1
+        };
+        (rows + 1, column)
+    }
+
+    /// Whether source position `pos` holds the ASCII `word`.
+    fn starts_with_abs(self, pos: usize, word: &str) -> bool {
+        word.bytes()
+            .enumerate()
+            .all(|(offset, byte)| self.byte(pos + offset) == i32::from(byte))
+    }
+
     /// Whether the last byte before source position `pos` that is neither
     /// blank nor in a comment is a quote: the flow colon's question,
     /// however far back the quote is. The bytes from where the lines were
@@ -356,10 +440,7 @@ impl<'a> Src<'a> {
 
 /// The bag's entries a cut changes, which a cut made again begins from as
 /// the first began.
-const CUT_STATE: [&str; 13] = [
-    state::V_POS,
-    state::V_ROW,
-    state::V_COL,
+const CUT_STATE: [&str; 10] = [
     state::MOVED,
     state::INIT,
     state::PENDING_CL,
@@ -389,10 +470,11 @@ const PREV: usize = 7;
 const BUF: usize = 8;
 const CUT_POS: usize = 9;
 const CUT_TAKEN: usize = 10;
-const CUT_ROW: usize = 11;
-const CUT_COL: usize = 12;
-const SNAP: usize = 13;
-const BREAKS: usize = 14;
+const ROWS: usize = 11;
+const CR: usize = 12;
+const LINE_CHARS: usize = 13;
+const SNAP: usize = 14;
+const BREAKS: usize = 15;
 
 /// What the plugin keeps of the source from one call to the next, in the
 /// context's bag: the lines noted, and from a reader its copy of the
@@ -412,12 +494,9 @@ pub(crate) struct Kept {
     /// parser had taken by then. The engine cuts a token again over a
     /// wider window when a read reached the window's end, from the same
     /// place, before the parser takes another: such a cut begins from the
-    /// state the first began with. With it, the virtual row and column it
-    /// began at ([`crate::lex::virtual_point_for`]).
+    /// state the first began with.
     cut_pos: usize,
     cut_taken: usize,
-    cut_row: usize,
-    cut_col: usize,
 }
 
 impl Kept {
@@ -437,8 +516,6 @@ impl Kept {
                 low: 0,
                 cut_pos: usize::MAX,
                 cut_taken: usize::MAX,
-                cut_row: 0,
-                cut_col: 0,
             };
         };
         let fields = Arc::make_mut(&mut items);
@@ -465,13 +542,14 @@ impl Kept {
                 skip: flag(&fields[SKIP]),
                 comment: flag(&fields[COMMENT]),
                 prev: signed(&fields[PREV]),
+                rows: number(&fields[ROWS]),
+                cr: flag(&fields[CR]),
+                line_chars: number(&fields[LINE_CHARS]),
             },
             buf,
             low: number(&fields[LOW]),
             cut_pos: number(&fields[CUT_POS]),
             cut_taken: number(&fields[CUT_TAKEN]),
-            cut_row: number(&fields[CUT_ROW]),
-            cut_col: number(&fields[CUT_COL]),
             items,
         }
     }
@@ -491,8 +569,9 @@ impl Kept {
         fields[BUF] = Value::String(self.buf);
         fields[CUT_POS] = n(self.cut_pos);
         fields[CUT_TAKEN] = n(self.cut_taken);
-        fields[CUT_ROW] = n(self.cut_row);
-        fields[CUT_COL] = n(self.cut_col);
+        fields[ROWS] = n(self.lines.rows);
+        fields[CR] = Value::Bool(self.lines.cr);
+        fields[LINE_CHARS] = n(self.lines.line_chars);
         fields.truncate(BREAKS);
         fields.extend(self.lines.breaks.iter().map(|&b| n(b)));
         let value = Value::Array(self.items);
@@ -608,13 +687,12 @@ impl Kept {
         false
     }
 
-    /// Keep the state a cut begins with, its virtual point `at` among it,
-    /// and begin the record of what it changes of the anchors.
-    pub(crate) fn save(&mut self, context: &mut Context, at: (usize, usize)) {
+    /// Keep the state a cut begins with, and begin the record of what it
+    /// changes of the anchors.
+    pub(crate) fn save(&mut self, context: &mut Context) {
         if !self.windowed {
             return;
         }
-        (self.cut_row, self.cut_col) = at;
         let snap = CUT_STATE
             .iter()
             .map(|key| context.u.get(*key).cloned().unwrap_or(Value::Undefined))
@@ -625,9 +703,8 @@ impl Kept {
             .insert(state::UNDO.to_string(), Value::array(Vec::new()));
     }
 
-    /// Begin a cut made again from the state the first began with, and
-    /// answer the virtual point it began at.
-    pub(crate) fn restore(&mut self, context: &mut Context) -> (usize, usize) {
+    /// Begin a cut made again from the state the first began with.
+    pub(crate) fn restore(&mut self, context: &mut Context) {
         state::undo(context);
         if let Value::Array(snap) = &self.items[SNAP] {
             for (key, value) in CUT_STATE.iter().zip(snap.iter()) {
@@ -638,7 +715,6 @@ impl Kept {
                 }
             }
         }
-        (self.cut_row, self.cut_col)
     }
 }
 

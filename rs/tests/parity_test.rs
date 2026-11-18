@@ -98,6 +98,13 @@ fn runner_with(prepare: fn(&mut tabnas::Tabnas)) -> Runner {
                 .get("meta")
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false);
+            let schema = match parsed.get("schema") {
+                None => None,
+                Some(serde_json::Value::String(name)) if name == "core" => {
+                    Some(tabnas_yaml::Schema::Core)
+                }
+                Some(other) => panic!("{}: no schema {other}", row.location()),
+            };
             for key in parsed
                 .as_object()
                 .map(|map| map.keys())
@@ -105,12 +112,12 @@ fn runner_with(prepare: fn(&mut tabnas::Tabnas)) -> Runner {
                 .flatten()
             {
                 assert!(
-                    key == "meta",
+                    key == "meta" || key == "schema",
                     "{}: tabnas-yaml has no `{key}` option",
                     row.location()
                 );
             }
-            tabnas_yaml::YamlOptions { meta }
+            tabnas_yaml::YamlOptions { meta, schema }
         };
         let mut parser = tabnas_yaml::make_with(options);
         prepare(&mut parser);
@@ -189,6 +196,7 @@ fn every_fixture_is_present() {
         "block-sequences.tsv",
         "comments.tsv",
         "complex-keys.tsv",
+        "core-schema.tsv",
         "directives.tsv",
         "flow-collections.tsv",
         "happy.tsv",

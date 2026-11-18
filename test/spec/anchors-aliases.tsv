@@ -36,10 +36,11 @@ a: &t true\n*t: x	{"a":true,"true":"x"}
 a: &z ~\n*z: x	{"a":null,"null":"x"}
 a: &l [1, 2]\n*l: x	{"a":[1,2],"1,2":"x"}
 a: &m {b: 1}\n*m: x	{"a":{"b":1},"[object Object]":"x"}
-a: &r\n  b: *r\n	{"a":{"b":null}}
+a: &r\n  b: *r\n	ERROR:yaml_recursive_alias
 a: &__proto__ 1\nb: *__proto__\n	{"a":1,"b":1}
 a: &__proto__\n  toString: pwned\nb: *toString\n	ERROR:yaml_undefined_alias
-a: &__proto__\n  toString: pwned\nb: &toString\n  c: *toString\n	{"a":{"toString":"pwned"},"b":{"c":null}}
+a: &__proto__\n  toString: pwned\nb: &toString\n  c: *toString\n	ERROR:yaml_recursive_alias
+a: &__proto__\n  toString: pwned\nb: &toString 1\nc: *toString\n	{"a":{"toString":"pwned"},"b":1,"c":1}
 __proto__:\n  polluted: yes\n	{"__proto__":{"polluted":true}}
 # An alias is the anchored node again (YAML 1.2.2, 3.2.2.2): a number that
 # is not finite is kept, which a JSON round trip of the anchored value once
@@ -57,3 +58,16 @@ a: &x [1]\nb: *x\nc: &x {p: 2}\nd: *x	{"a":[1],"b":[1],"c":{"p":2},"d":{"p":2}}
 a: &x {p: 1}\nb: &y *x\nc: [*y, *x]	{"a":{"p":1},"b":{"p":1},"c":[{"p":1},{"p":1}]}
 a: &x [{p: &y {q: [1]}}]\nb: *x\nc: {d: *y}	{"a":[{"p":{"q":[1]}}],"b":[{"p":{"q":[1]}}],"c":{"d":{"q":[1]}}}
 a: &m {__proto__: 1}\nb: *m	{"a":{"__proto__":1},"b":{"__proto__":1}}
+&a [*a]	ERROR:yaml_recursive_alias	
+a: &x {b: *x}	ERROR:yaml_recursive_alias	
+a: &x\n  - *x	ERROR:yaml_recursive_alias	
+&x\n  a: 1\n  b:\n    *x	ERROR:yaml_recursive_alias	
+&x {*x : 1}	ERROR:yaml_recursive_alias	
+&x\n*x : 1	ERROR:yaml_recursive_alias	
+- &x\n- *x	[null,null]	
+a: &x\nb: *x	{"a":null,"b":null}	
+a: &x {b: &y 1, c: *y}\nd: *x	{"a":{"b":1,"c":1},"d":{"b":1,"c":1}}	
+- &a\n  - &b 1\n  - *b\n- *a	[[1,1],[1,1]]	
+a: &x	{"a":null}	
+- &x	[null]	
+a: &x 	{"a":null}	

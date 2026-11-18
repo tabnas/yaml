@@ -87,9 +87,12 @@ fn deep_nesting_is_refused_not_crashed() {
                 "compact block sequence",
                 format!("{}x\n", "- ".repeat(depth)),
             ),
+            // A sequence of maps, each map's value the next sequence on
+            // the line below its key: YAML has no `a: - x`, where a
+            // block sequence would start on its key's line.
             (
-                "compact sequence of maps",
-                format!("{}x\n", "- a: ".repeat(depth)),
+                "sequence of maps",
+                indented(depth, |_| "- a:\n".to_string()),
             ),
             // Through a later entry or pair, where the rule holding the
             // container has been replaced by its rotation.
@@ -162,14 +165,14 @@ fn nesting_within_the_limit_still_parses() {
     let parser = tabnas_yaml::make();
     let src = format!("{}{}", "[".repeat(100), "]".repeat(100));
     parser.parse(&src).expect("100 levels is within the limit");
-    // At the limit, in the compact shapes: 127 sequences, and 63 entries
-    // that each open a sequence and a map, 126 containers.
+    // At the limit: 127 compact sequences, and 63 entries that each open
+    // a sequence and a map, 126 containers.
     let value = parser
         .parse(&format!("{}x\n", "- ".repeat(127)))
         .expect("127 compact sequences is at the limit");
     assert!(!value.to_string().is_empty());
     parser
-        .parse(&format!("{}x\n", "- a: ".repeat(63)))
+        .parse(&indented(63, |_| "- a:\n".to_string()))
         .expect("126 containers is within the limit");
     // And through rotated rules: 127 sequences, and 63 levels of two.
     parser
@@ -221,7 +224,8 @@ fn unterminated_constructs_terminate() {
         ("a: \"abc", true),
         ("a: 'abc", true),
         ("a: |", true),
-        ("&a", false),
+        // An anchor with no node after it is an empty node.
+        ("&a", true),
         ("[1, 2\n", false),
         ("*missing", false),
     ] {
@@ -279,9 +283,13 @@ fn odd_characters_are_handled_not_crashed() {
             "a: \u{feff}",
             Some("{\"a\":\"\u{feff}\"}"),
         ),
-        // A lone carriage return between two pairs is refused, as it is
-        // in TypeScript: the line it opens has no indent token.
-        ("lone-carriage-return", "a: 1\rb: 2", None),
+        // A carriage return by itself is a line break (YAML 1.2.2, 5.4),
+        // as it is in TypeScript.
+        (
+            "lone-carriage-return",
+            "a: 1\rb: 2",
+            Some("{\"a\":1,\"b\":2}"),
+        ),
     ] {
         match (parser.parse(src), want) {
             (Ok(value), Some(want)) => assert_eq!(value.to_string(), want, "{label}"),

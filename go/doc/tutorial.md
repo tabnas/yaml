@@ -99,7 +99,9 @@ title: hello world
 
 `yes` is a `bool` (YAML's keyword set is broad: `yes`/`no`, `on`/`off`,
 `true`/`false`), `~` is `nil`, and `hello world` (spaces and all) is a
-single unquoted string up to the end of the line.
+single unquoted string up to the end of the line. The
+[guide](guide.md#read-plain-scalars-as-the-yaml-12-core-schema-does)
+shows the option under which `yes` stays a string, as YAML 1.2 reads it.
 
 
 ## 5. Reuse one parser for many inputs

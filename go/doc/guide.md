@@ -127,6 +127,30 @@ tabnasyaml.Parse("{mask: 0xff, perm: 0o755, flags: 0b1010}")
 ```
 
 
+## Read plain scalars as the YAML 1.2 core schema does
+
+Without options the plugin reads `yes`, `no`, `on` and `off` as
+booleans, as YAML 1.1 did, and takes jsonic's number syntax, so `1_000`
+is a number. A document written for YAML 1.2 means those as strings: a
+list of country codes that holds `NO`, or a property named `on`. Set
+`Schema: "core"` and a plain scalar resolves as the core schema says:
+
+```go
+core := tabnasyaml.MakeJsonic(tabnasyaml.YamlOptions{Schema: "core"})
+
+core.Parse("countries: [NO, SE, DK]")
+// map[countries:[NO SE DK]]
+core.Parse("{on: yes, id: 1_000}")
+// map[id:1_000 on:yes]
+core.Parse("{ok: true, n: 12, x: 0x1f, none: ~}")
+// map[n:12 none:<nil> ok:true x:31]
+```
+
+The option changes how a plain scalar resolves and nothing else. A
+quoted scalar reads as before, and so does a tagged one such as
+`!!int 0x1f`.
+
+
 ## Handle multi-document streams
 
 `---` starts a document; `...` ends one. One document parses to its
@@ -189,7 +213,19 @@ if err != nil {
 ```
 
 The error is the engine's parse error, carrying a stable code and the
-source location of the failure.
+source location of the failure. The plugin has three codes of its own,
+which the [reference](reference.md#error-codes) lists: an alias that
+names no anchor, an alias inside the node it names, and a tab used as
+indentation.
+
+```go
+// tabnas is the engine: import tabnas "github.com/tabnas/parser/go"
+_, err := tabnasyaml.Parse("a:\n\tb: 1")
+var te *tabnas.TabnasError
+if errors.As(err, &te) {
+    te.Code // "yaml_tab_indent"
+}
+```
 
 
 ## Install as a plugin on your own Jsonic instance

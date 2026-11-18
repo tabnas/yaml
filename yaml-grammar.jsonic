@@ -21,8 +21,10 @@
       { s: '#ZZ' b: 1 a: '@val-set-null' g: yaml }
       # Same or lesser indent after a colon means empty value — backtrack.
       { s: '#IN' b: 1 u: { yamlEmpty: true } g: yaml }
-      # This value is a list.
-      { s: '#EL' p: yamlBlockList a: '@val-set-el-in' g: yaml }
+      # This value is a list: a sequence's entry, or a document's root. A
+      # block sequence cannot start on the line of the key it is the value
+      # of (key: - a), so a pair's value is not one here.
+      { s: '#EL' c: '@val-not-pair-value' p: yamlBlockList a: '@val-set-el-in' g: yaml }
     ]
     inject: { append: false }
   }
