@@ -10,7 +10,7 @@ import { Yaml } from '../dist/yaml'
 
 // With `map.ordered` on, the engine records each member its pair rule
 // stores in a key-order side channel (`keyOrder`), which a reader that
-// walks a mapping in source order follows: alchemy-cli walks a value so.
+// walks a mapping in source order follows: dmog walks a value so.
 // A member this grammar stores itself is recorded the same way, or it
 // walks after every recorded one, out of the document's order: a key with
 // no value in a flow mapping, a sequence entry's pair (whose integer-like

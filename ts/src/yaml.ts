@@ -356,7 +356,7 @@ function coreNumber(text: string): number | undefined {
 // So `- a: {b: 1}` and `a: {c: 2}` in one sequence entry merge as they
 // do at the root. With `map.ordered` on, the engine records the members
 // its own rule stores in a key-order side channel, which a reader that
-// walks a mapping in source order follows (`keyOrder`; alchemy-cli's walk
+// walks a mapping in source order follows (`keyOrder`; dmog's walk
 // of a value); a member stored here is recorded the same way, so that it
 // walks where the document put it, and not after every recorded one. The
 // record is the engine's `recordKeyOrder`, which @tabnas/parser exports
